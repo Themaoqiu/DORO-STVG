@@ -12,6 +12,7 @@ checkpoints/
 notebooks/
 wandb/
 sweeps/
+cankao/
 BREEDS-Benchmarks/
 CLIP/
 .gitmodules

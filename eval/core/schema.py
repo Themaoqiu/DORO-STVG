@@ -1,36 +1,34 @@
-"""标准化数据格式定义"""
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
 
 @dataclass
 class STVGSample:
-    """STVG任务的标准化样本格式"""
     
     item_id: str                                    # 样本唯一ID
     video_path: str                                 # 视频文件完整路径
     query: str                                      # 文本查询描述
     gt_temporal_bound: Tuple[int, int]              # GT时间边界 (start_frame, end_frame)
     gt_bboxes: Dict[int, List[List[float]]]         # GT边界框 {frame_id: [[x1,y1,x2,y2]]}
+    frame_time_mapping: Optional[str] = None  # "0.00s,0.40s,..." 时间戳字符串
     
-    metadata: Dict[str, Any] = field(default_factory=dict)  # 数据集特有信息
+    video_metadata: Optional[Dict[str, Any]] = None  # {fps, frames_indices, frame_times, ...}
+    
+    qtype: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
     
     @property
     def qtype(self) -> Optional[str]:
-        """兼容VidSTG的qtype字段"""
         return self.metadata.get('qtype', None)
     
     @property
     def video_name(self) -> str:
-        """视频文件名(用于结果保存)"""
         return self.metadata.get('video_name', self.item_id)
     
     @property
     def dataset_name(self) -> str:
-        """数据集名称"""
         return self.metadata.get('dataset', 'unknown')
     
     def to_dict(self) -> dict:
-        """转换为字典格式"""
         return {
             'item_id': self.item_id,
             'video_path': self.video_path,
@@ -43,16 +41,15 @@ class STVGSample:
 
 @dataclass
 class Result:
-    """模型预测结果的标准格式"""
+    item_id: str
+    pred_temporal_bound: Optional[Tuple[int, int]] = None  # (start_frame, end_frame)
+    pred_bboxes: Dict[int, List[float]] = field(default_factory=dict)  # {frame_idx: [x1,y1,x2,y2]}
     
-    item_id: str                                    # 对应样本ID
-    pred_temporal_bound: Tuple[int, int]            # 预测时间边界
-    pred_bboxes: Dict[int, List[List[float]]]       # 预测边界框
-    confidence: Optional[float] = None              # 置信度分数
-    metadata: Dict[str, Any] = field(default_factory=dict)  # 额外信息
+    video_metadata: Optional[Dict[str, Any]] = None
+    
+    metadata: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> dict:
-        """转换为字典格式"""
         return {
             'item_id': self.item_id,
             'pred_temporal_bound': self.pred_temporal_bound,

@@ -1,29 +1,31 @@
-"""统一STVG评估器"""
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 from collections import defaultdict
 
-from ..core.schema import STVGSample, PredictionResult
-from .metrics import compute_temporal_iou, compute_iou
+from ..core.schema import Result, STVGSample
+from .metrics import compute_stvg_metrics
 
 
-class UnifiedSTVGEvaluator:
-    """统一的STVG评估器,兼容VidSTG和HCSTVG"""
+class STVGEvaluator:
+    """统一的STVG评估器"""
     
     def __init__(
         self,
         dataset: 'BaseSTVGDataset',
-        iou_thresholds: List[float] = [0.3, 0.5],
+        iou_thresholds: List[float] = [0.3, 0.5, 0.7],
+        num_frames: int = 100,
         logger = None
     ):
         """
         Args:
-            dataset: 数据集实例(包含GT信息)
-            iou_thresholds: IoU阈值列表
+            dataset: 数据集实例
+            iou_thresholds: m_vIoU阈值列表
+            num_frames: 视频采样帧数 (默认100)
             logger: 日志记录器
         """
         self.dataset = dataset
         self.iou_thresholds = iou_thresholds
+        self.num_frames = num_frames
         self.logger = logger
         
         # 构建GT索引
@@ -33,11 +35,12 @@ class UnifiedSTVGEvaluator:
         }
         
         # 预测结果缓存
-        self.predictions: Dict[str, PredictionResult] = {}
+        self.predictions: Dict[str, Result] = {}
         
         self._log(f"[Evaluator] Initialized with {len(self.gt_index)} GT samples")
-    
-    def update(self, predictions: List[PredictionResult]):
+        self._log(f"[Evaluator] Using {num_frames} frames per video")
+
+    def update(self, predictions: List[Result]):
         """更新预测结果"""
         for pred in predictions:
             self.predictions[pred.item_id] = pred
@@ -49,9 +52,21 @@ class UnifiedSTVGEvaluator:
         计算评估指标
         
         Returns:
-            指标字典,格式取决于数据集类型:
-            - VidSTG: 按qtype分组 {declarative_viou@0.5: 0.xx, interrogative_viou@0.5: 0.xx}
-            - HCSTVG: 不分组 {viou@0.5: 0.xx, tiou: 0.xx}
+            {
+                'm_tIoU': float,           # 平均时间IoU
+                'm_sIoU': float,           # 平均空间IoU
+                'm_vIoU': float,           # 平均视频级IoU
+                'vIoU@0.3': float,         # Recall@0.3
+                'vIoU@0.5': float,         # Recall@0.5
+                'vIoU@0.7': float          # Recall@0.7
+            }
+            
+            如果是VidSTG还会按qtype分组:
+            {
+                'declarative_m_tIoU': ...,
+                'interrogative_m_tIoU': ...,
+                ...
+            }
         """
         if not self.predictions:
             self._log("[Warning] No predictions to evaluate!")
@@ -76,95 +91,96 @@ class UnifiedSTVGEvaluator:
     def _evaluate_single_sample(
         self, 
         gt: STVGSample, 
-        pred: PredictionResult
+        pred: Result
     ) -> dict:
-        """评估单个样本"""
-        # 1. 计算时间IoU
-        tiou = compute_temporal_iou(
-            gt.gt_temporal_bound, 
-            pred.pred_temporal_bound
+        video_metadata = gt.video_metadata
+        if video_metadata is None:
+            self._log(f"[Warning] No video metadata for GT: {gt.item_id}")
+            fps = 30.0
+        else:
+            fps = video_metadata['fps']
+
+        gt_span = gt.gt_temporal_bound
+
+        gt_bboxes_normalized = self._normalize_spatial_bboxes(
+            gt.gt_bboxes,
+            gt.metadata.get('width', 1),
+            gt.metadata.get('height', 1)
         )
         
-        # 2. 计算空间指标
-        gt_start, gt_end = gt.gt_temporal_bound
-        pred_start, pred_end = pred.pred_temporal_bound
+        pred_span = pred.pred_temporal_bound
+        pred_bboxes = pred.pred_bboxes
         
-        union_frames = set(range(
-            min(gt_start, pred_start),
-            max(gt_end, pred_end)
-        ))
-        inter_frames = set(range(
-            max(gt_start, pred_start),
-            min(gt_end, pred_end)
-        ))
+        # 计算指标
+        metrics = compute_stvg_metrics(
+            gt_span=gt_span,
+            pred_span=pred_span,
+            gt_bboxes=gt_bboxes_normalized,
+            pred_bboxes=pred_bboxes,
+            num_frames=self.num_frames
+        )
         
-        # 计算vIoU (video-level IoU)
-        viou_sum = 0.0
-        gt_viou_sum = 0.0
-        
-        for fid in gt.gt_bboxes.keys():
-            if fid not in pred.pred_bboxes:
-                continue
-            
-            # 计算该帧的IoU
-            iou = compute_iou(
-                np.array(pred.pred_bboxes[fid]),
-                np.array(gt.gt_bboxes[fid])
-            )[0][0]
-            
-            if fid in inter_frames:
-                viou_sum += iou
-            gt_viou_sum += iou
-        
-        viou = viou_sum / max(len(union_frames), 1)
-        gt_viou = gt_viou_sum / max(len(gt.gt_bboxes), 1)
-        
-        # 3. 计算Recall指标
+        # 计算Recall指标
         recalls = {
-            f"viou@{thresh}": int(viou > thresh) 
-            for thresh in self.iou_thresholds
-        }
-        gt_recalls = {
-            f"gt_viou@{thresh}": int(gt_viou > thresh)
+            f"vIoU@{thresh}": int(metrics['m_vIoU'] >= thresh) 
             for thresh in self.iou_thresholds
         }
         
         return {
             'item_id': gt.item_id,
             'qtype': gt.qtype,
-            'tiou': tiou,
-            'viou': viou,
-            'gt_viou': gt_viou,
-            **recalls,
-            **gt_recalls
+            **metrics,
+            **recalls
         }
     
+    def _normalize_spatial_bboxes(
+        self,
+        bboxes: Dict[int, List[List[float]]],
+        width: int,
+        height: int
+    ) -> Dict[int, List[float]]:
+        normalized_bboxes = {}
+        
+        for frame_id, boxes in bboxes.items():
+            if boxes:
+                box = boxes[0]
+                normalized_box = [
+                    box[0] / width,
+                    box[1] / height,
+                    box[2] / width,
+                    box[3] / height
+                ]
+                normalized_bboxes[frame_id] = normalized_box
+        
+        return normalized_bboxes
+    
     def _aggregate_metrics(self, metrics_list: List[dict]) -> Dict[str, float]:
-        """聚合指标"""
         has_qtype = any(m['qtype'] is not None for m in metrics_list)
         
         if not has_qtype:
-            # HCSTVG模式: 直接平均
             return self._simple_aggregate(metrics_list)
         else:
-            # VidSTG模式: 按qtype分组
             return self._grouped_aggregate(metrics_list)
     
     def _simple_aggregate(self, metrics_list: List[dict]) -> Dict[str, float]:
-        """简单平均(用于HCSTVG)"""
         result = {}
-        keys = ['tiou', 'viou', 'gt_viou'] + \
-               [f"viou@{t}" for t in self.iou_thresholds] + \
-               [f"gt_viou@{t}" for t in self.iou_thresholds]
+        
+        keys = ['tIoU', 'sIoU', 'm_vIoU'] + [f"vIoU@{t}" for t in self.iou_thresholds]
         
         for key in keys:
             values = [m[key] for m in metrics_list if key in m]
-            result[key] = float(np.mean(values)) if values else 0.0
+            if values:
+                if key.startswith('vIoU@'):
+                    result[key] = float(np.sum(values) / len(values))
+                else:
+                    # IoU指标: 求平均
+                    result[f"m_{key}"] = float(np.mean(values))
+            else:
+                result[key] = 0.0
         
         return result
     
     def _grouped_aggregate(self, metrics_list: List[dict]) -> Dict[str, float]:
-        """按qtype分组聚合(用于VidSTG)"""
         groups = defaultdict(list)
         for m in metrics_list:
             groups[m['qtype']].append(m)
@@ -178,7 +194,6 @@ class UnifiedSTVGEvaluator:
         return result
     
     def _log(self, message: str):
-        """日志输出"""
         if self.logger:
             self.logger.info(message)
         else:

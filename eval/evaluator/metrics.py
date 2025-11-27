@@ -1,66 +1,99 @@
-"""评估指标计算"""
 import numpy as np
-from typing import Tuple, List
+from typing import Tuple, Dict, List
 
 
 def compute_temporal_iou(
-    gt_bound: Tuple[int, int], 
-    pred_bound: Tuple[int, int]
+    gt_span: Tuple[int, int], 
+    pred_span: Tuple[int, int]
 ) -> float:
     """
-    计算时间IoU (Temporal IoU)
+    计算时间IoU (tIoU)
     
     Args:
-        gt_bound: GT时间边界 (start, end)
-        pred_bound: 预测时间边界 (start, end)
+        gt_span: GT时间跨度 (start_frame, end_frame)
+        pred_span: 预测时间跨度 (start_frame, end_frame)
         
     Returns:
         tIoU值 [0, 1]
     """
-    max_start = max(gt_bound[0], pred_bound[0])
-    min_end = min(gt_bound[1], pred_bound[1])
-    min_start = min(gt_bound[0], pred_bound[0])
-    max_end = max(gt_bound[1], pred_bound[1])
-    
-    if min_end <= max_start:
+    if pred_span is None or gt_span is None:
         return 0.0
     
-    intersection = min_end - max_start
-    union = max_end - min_start
+    # 计算交集
+    inter_start = max(gt_span[0], pred_span[0])
+    inter_end = min(gt_span[1], pred_span[1])
+    
+    if inter_end <= inter_start:
+        return 0.0
+    
+    intersection = inter_end - inter_start
+    
+    # 计算并集
+    union_start = min(gt_span[0], pred_span[0])
+    union_end = max(gt_span[1], pred_span[1])
+    union = union_end - union_start
     
     return intersection / union if union > 0 else 0.0
 
 
-def compute_iou(boxes1: np.ndarray, boxes2: np.ndarray) -> np.ndarray:
-    """
-    计算两组边界框的IoU
+def compute_spatial_iou(box1: List[float], box2: List[float]) -> float:
+    x1_inter = max(box1[0], box2[0])
+    y1_inter = max(box1[1], box2[1])
+    x2_inter = min(box1[2], box2[2])
+    y2_inter = min(box1[3], box2[3])
     
-    Args:
-        boxes1: shape (N, 4) [x1, y1, x2, y2]
-        boxes2: shape (M, 4) [x1, y1, x2, y2]
-        
-    Returns:
-        shape (N, M) IoU矩阵
-    """
-    boxes1 = np.atleast_2d(boxes1)
-    boxes2 = np.atleast_2d(boxes2)
+    if x2_inter <= x1_inter or y2_inter <= y1_inter:
+        return 0.0
     
-    # 计算交集
-    xmin = np.maximum(boxes1[:, None, 0], boxes2[None, :, 0])
-    ymin = np.maximum(boxes1[:, None, 1], boxes2[None, :, 1])
-    xmax = np.minimum(boxes1[:, None, 2], boxes2[None, :, 2])
-    ymax = np.minimum(boxes1[:, None, 3], boxes2[None, :, 3])
+    inter_area = (x2_inter - x1_inter) * (y2_inter - y1_inter)
     
-    intersection = np.maximum(0, xmax - xmin) * np.maximum(0, ymax - ymin)
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
     
-    # 计算面积
-    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
-    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+    union_area = area1 + area2 - inter_area
     
-    # 计算并集
-    union = area1[:, None] + area2[None, :] - intersection
+    return inter_area / union_area if union_area > 0 else 0.0
+
+
+def compute_stvg_metrics(
+    gt_span: Tuple[int, int],
+    pred_span: Tuple[int, int],
+    gt_bboxes: Dict[int, List[float]],
+    pred_bboxes: Dict[int, List[float]],
+    num_frames: int = 100
+) -> dict:
+    tiou = compute_temporal_iou(gt_span, pred_span)
     
-    # 计算IoU
-    iou = intersection / np.maximum(union, 1e-10)
+    if pred_span is None:
+        return {
+            'tIoU': 0.0,
+            'sIoU': 0.0,
+            'm_vIoU': 0.0
+        }
     
-    return iou
+    gt_timestamps = set(gt_bboxes.keys())
+    pred_timestamps = set(pred_bboxes.keys())
+    
+    timestamps_union = gt_timestamps | pred_timestamps 
+    timestamps_inter = gt_timestamps & pred_timestamps
+    
+    iou_sum_inter = 0.0
+    for timestamp in timestamps_inter:
+        if timestamp in gt_bboxes and timestamp in pred_bboxes:
+            iou = compute_spatial_iou(
+                gt_bboxes[timestamp], 
+                pred_bboxes[timestamp]
+            )
+            iou_sum_inter += iou
+    
+    # sIoU: 交集帧的平均IoU
+    siou = iou_sum_inter / max(len(timestamps_inter), 1)
+    
+    # m_vIoU: 并集帧的平均IoU (缺失帧IoU=0)
+    m_viou = iou_sum_inter / max(len(timestamps_union), 1)
+    
+    return {
+        'tIoU': tiou,
+        'sIoU': siou,
+        'm_vIoU': m_viou
+    }

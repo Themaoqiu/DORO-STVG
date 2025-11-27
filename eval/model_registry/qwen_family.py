@@ -10,7 +10,6 @@ from ..prompts.stvg import STVGPromptTemplate
 
 
 class Qwen3(BaseSTVGModel):
-    """Qwen系列模型(Qwen-VL等)"""
     
     def __init__(
         self, 
@@ -81,14 +80,12 @@ class Qwen3(BaseSTVGModel):
             )
             prompts.append(prompt)
         
-        # 2. 处理视频
         mm_data = []
         for sample in samples:
             messages = self._build_conversation(sample)
             video_inputs = process_vision_info(messages)
             mm_data.append(video_inputs[0])
         
-        # 3. 执行推理
         llm_inputs = [
             {"prompt": prompt, "multi_modal_data": {"video": mm}}
             for prompt, mm in zip(prompts, mm_data)
@@ -96,7 +93,6 @@ class Qwen3(BaseSTVGModel):
         
         outputs = self.llm.generate(llm_inputs, sampling_params=self.sampling_params)
         
-        # 4. 解析输出
         predictions = []
         for sample, output in zip(samples, outputs):
             pred_text = output.outputs[0].text
@@ -106,9 +102,12 @@ class Qwen3(BaseSTVGModel):
         return predictions
     
     def _build_conversation(self, sample: STVGSample) -> List[dict]:
-        """构建对话格式"""
         query_text = STVGPromptTemplate.format_grounding_query(sample.query)
-        
+
+        fps = sample.metadata.get('fps', 30.0)
+        frame_count = sample.metadata.get('frame_count', 300)
+        duration = round(frame_count / fps, 1)
+
         return [
             {
                 "role": "user",
@@ -127,39 +126,29 @@ class Qwen3(BaseSTVGModel):
             }
         ]
     
-    def postprocess_output(
-        self, 
-        pred_text: str, 
-        sample: STVGSample
-    ) -> PredictionResult:
+    def postprocess_output(self, pred_text: str, sample: STVGSample) -> PredictionResult:
         """
         解析模型输出
         
-        期望格式: "temporal: (start, end), bboxes: {fid: [x1,y1,x2,y2], ...}"
+        期望格式: "During the span of {10, 50} 10: [0.1,0.2,0.3,0.4], 11: [0.1,0.2,0.3,0.4], ..."
         """
-        # TODO: 根据实际prompt设计解析输出
-        # 这里提供一个示例实现
-        pred_temporal = (0, 10)  # 默认值
+        from ..prompts.stvg import STVGPromptTemplate
+        
+        parsed = STVGPromptTemplate.parse_stvg_output(pred_text)
+        
+        pred_temporal = parsed.get('temporal_span', (0, 99))
         pred_bboxes = {}
         
-        try:
-            # 简单的字符串解析示例
-            import re
-            
-            # 提取时间边界
-            temporal_match = re.search(r'temporal:\s*\((\d+),\s*(\d+)\)', pred_text)
-            if temporal_match:
-                pred_temporal = (int(temporal_match.group(1)), int(temporal_match.group(2)))
-            
-            # 提取bboxes (示例格式)
-            # 实际需要根据你的prompt设计调整
-            
-        except Exception as e:
-            print(f"[Warning] Failed to parse output for {sample.item_id}: {e}")
+        # 转换为标准格式: {frame_idx: [[x1,y1,x2,y2]]}
+        for frame_idx, bbox in parsed['spatial_bboxes'].items():
+            pred_bboxes[frame_idx] = [bbox] 
         
         return PredictionResult(
             item_id=sample.item_id,
             pred_temporal_bound=pred_temporal,
             pred_bboxes=pred_bboxes,
-            metadata={'raw_output': pred_text}
+            metadata={
+                'raw_output': pred_text,
+                'parsed': parsed
+            }
         )
