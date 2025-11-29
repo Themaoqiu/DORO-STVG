@@ -2,24 +2,13 @@ import numpy as np
 from typing import Tuple, Dict, List
 
 
-def compute_temporal_iou(
+def compute_tiou(
     gt_span: Tuple[int, int], 
     pred_span: Tuple[int, int]
 ) -> float:
-    """
-    计算时间IoU (tIoU)
-    
-    Args:
-        gt_span: GT时间跨度 (start_frame, end_frame)
-        pred_span: 预测时间跨度 (start_frame, end_frame)
-        
-    Returns:
-        tIoU值 [0, 1]
-    """
     if pred_span is None or gt_span is None:
         return 0.0
     
-    # 计算交集
     inter_start = max(gt_span[0], pred_span[0])
     inter_end = min(gt_span[1], pred_span[1])
     
@@ -28,7 +17,6 @@ def compute_temporal_iou(
     
     intersection = inter_end - inter_start
     
-    # 计算并集
     union_start = min(gt_span[0], pred_span[0])
     union_end = max(gt_span[1], pred_span[1])
     union = union_end - union_start
@@ -36,7 +24,7 @@ def compute_temporal_iou(
     return intersection / union if union > 0 else 0.0
 
 
-def compute_spatial_iou(box1: List[float], box2: List[float]) -> float:
+def compute_siou(box1: List[float], box2: List[float]) -> float:
     x1_inter = max(box1[0], box2[0])
     y1_inter = max(box1[1], box2[1])
     x2_inter = min(box1[2], box2[2])
@@ -62,7 +50,7 @@ def compute_stvg_metrics(
     pred_bboxes: Dict[int, List[float]],
     num_frames: int = 100
 ) -> dict:
-    tiou = compute_temporal_iou(gt_span, pred_span)
+    tiou = compute_tiou(gt_span, pred_span)
     
     if pred_span is None:
         return {
@@ -80,16 +68,13 @@ def compute_stvg_metrics(
     iou_sum_inter = 0.0
     for timestamp in timestamps_inter:
         if timestamp in gt_bboxes and timestamp in pred_bboxes:
-            iou = compute_spatial_iou(
+            iou = compute_siou(
                 gt_bboxes[timestamp], 
                 pred_bboxes[timestamp]
             )
             iou_sum_inter += iou
     
-    # sIoU: 交集帧的平均IoU
     siou = iou_sum_inter / max(len(timestamps_inter), 1)
-    
-    # m_vIoU: 并集帧的平均IoU (缺失帧IoU=0)
     m_viou = iou_sum_inter / max(len(timestamps_union), 1)
     
     return {

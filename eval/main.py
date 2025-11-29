@@ -1,13 +1,11 @@
-"""评测框架主入口"""
 import argparse
 import logging
 from pathlib import Path
 
-from runner import run_from_config
+from .runner import run_from_config
 
 
 def setup_logger(output_dir: Path) -> logging.Logger:
-    """设置日志"""
     logger = logging.getLogger('STVG_Eval')
     logger.setLevel(logging.INFO)
     
@@ -20,7 +18,6 @@ def setup_logger(output_dir: Path) -> logging.Logger:
     file_handler = logging.FileHandler(output_dir / 'eval.log')
     file_handler.setLevel(logging.INFO)
     
-    # 格式
     formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
@@ -52,22 +49,18 @@ def main():
     
     args = parser.parse_args()
     
-    # 读取配置
     import yaml
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
     
-    # 覆盖输出目录
     if args.output_dir:
         config['evaluation']['output_dir'] = args.output_dir
     
     output_dir = Path(config['evaluation']['output_dir'])
     
-    # 设置日志
     logger = setup_logger(output_dir)
     logger.info(f"Starting evaluation with config: {args.config}")
     
-    # 运行评测
     try:
         metrics = run_from_config(args.config, logger=logger)
         logger.info("Evaluation completed successfully!")

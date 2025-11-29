@@ -7,7 +7,6 @@ from .metrics import compute_stvg_metrics
 
 
 class STVGEvaluator:
-    """统一的STVG评估器"""
     
     def __init__(
         self,
@@ -16,63 +15,32 @@ class STVGEvaluator:
         num_frames: int = 100,
         logger = None
     ):
-        """
-        Args:
-            dataset: 数据集实例
-            iou_thresholds: m_vIoU阈值列表
-            num_frames: 视频采样帧数 (默认100)
-            logger: 日志记录器
-        """
         self.dataset = dataset
         self.iou_thresholds = iou_thresholds
         self.num_frames = num_frames
         self.logger = logger
         
-        # 构建GT索引
         self.gt_index: Dict[str, STVGSample] = {
             sample.item_id: sample 
             for sample in dataset.samples
         }
         
-        # 预测结果缓存
         self.predictions: Dict[str, Result] = {}
         
         self._log(f"[Evaluator] Initialized with {len(self.gt_index)} GT samples")
         self._log(f"[Evaluator] Using {num_frames} frames per video")
 
     def update(self, predictions: List[Result]):
-        """更新预测结果"""
         for pred in predictions:
             self.predictions[pred.item_id] = pred
         
         self._log(f"[Evaluator] Updated {len(predictions)} predictions (total: {len(self.predictions)})")
     
     def compute_metrics(self) -> Dict[str, float]:
-        """
-        计算评估指标
-        
-        Returns:
-            {
-                'm_tIoU': float,           # 平均时间IoU
-                'm_sIoU': float,           # 平均空间IoU
-                'm_vIoU': float,           # 平均视频级IoU
-                'vIoU@0.3': float,         # Recall@0.3
-                'vIoU@0.5': float,         # Recall@0.5
-                'vIoU@0.7': float          # Recall@0.7
-            }
-            
-            如果是VidSTG还会按qtype分组:
-            {
-                'declarative_m_tIoU': ...,
-                'interrogative_m_tIoU': ...,
-                ...
-            }
-        """
         if not self.predictions:
             self._log("[Warning] No predictions to evaluate!")
             return {}
         
-        # 计算每个样本的指标
         metrics_per_sample = []
         for item_id, pred in self.predictions.items():
             if item_id not in self.gt_index:
@@ -85,7 +53,6 @@ class STVGEvaluator:
         
         self._log(f"[Evaluator] Evaluated {len(metrics_per_sample)} samples")
         
-        # 聚合指标
         return self._aggregate_metrics(metrics_per_sample)
     
     def _evaluate_single_sample(
@@ -93,13 +60,6 @@ class STVGEvaluator:
         gt: STVGSample, 
         pred: Result
     ) -> dict:
-        video_metadata = gt.video_metadata
-        if video_metadata is None:
-            self._log(f"[Warning] No video metadata for GT: {gt.item_id}")
-            fps = 30.0
-        else:
-            fps = video_metadata['fps']
-
         gt_span = gt.gt_temporal_bound
 
         gt_bboxes_normalized = self._normalize_spatial_bboxes(
@@ -136,8 +96,8 @@ class STVGEvaluator:
     def _normalize_spatial_bboxes(
         self,
         bboxes: Dict[int, List[List[float]]],
-        width: int,
-        height: int
+        width: float,
+        height: float
     ) -> Dict[int, List[float]]:
         normalized_bboxes = {}
         
@@ -173,7 +133,6 @@ class STVGEvaluator:
                 if key.startswith('vIoU@'):
                     result[key] = float(np.sum(values) / len(values))
                 else:
-                    # IoU指标: 求平均
                     result[f"m_{key}"] = float(np.mean(values))
             else:
                 result[key] = 0.0

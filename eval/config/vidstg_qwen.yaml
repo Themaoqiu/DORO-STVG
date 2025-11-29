@@ -1,6 +1,6 @@
 dataset:
   name: "vidstg"
-  annotation_path: "/path/to/VidSTG/annotations"  # JSON文件目录
+  annotation_path: "/path/to/VidSTG/annotations"
   video_dir: "/path/to/VidSTG/videos"
   subset: "test"
 
@@ -8,13 +8,12 @@ model:
   name: "Qwen3-VL-2B"
   model_path: "/path/to/Qwen3-VL-2B-Instruct"
   batch_size: 4
-  nframes: 16
+  nframes: 100
   max_tokens: 1024
   max_model_len: 32768
   temperature: 0.0
   tensor_parallel_size: 2
   gpu_memory_utilization: 0.8
-
 
 evaluation:
   iou_thresholds: [0.3, 0.5]

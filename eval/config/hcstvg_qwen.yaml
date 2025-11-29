@@ -1,0 +1,21 @@
+dataset:
+  name: "hcstvg"
+  annotation_path: "/path/to/HCSTVG/annotations"
+  video_dir: "/path/to/HCSTVG/videos"
+  subset: "test"
+
+model:
+  name: "Qwen3-VL-2B"
+  model_path: "/path/to/Qwen3-VL-2B-Instruct"
+  batch_size: 4
+  nframes: 100
+  max_tokens: 1024
+  max_model_len: 32768
+  temperature: 0.0
+  tensor_parallel_size: 2
+  gpu_memory_utilization: 0.8
+
+evaluation:
+  iou_thresholds: [0.3, 0.5]
+  save_predictions: true
+  output_dir: "./results/hcstvg_qwen"

@@ -3,11 +3,10 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import yaml
 
-from eval.evaluator.stvg_evaluator import STVGEvaluator
-
 from .dataset_registry import DatasetRegistry
 from .model_registry import ModelRegistry
 from .core.schema import STVGSample, Result
+from .evaluator.stvg_evaluator import STVGEvaluator
 
 
 class EvalRunner:
@@ -56,7 +55,10 @@ class EvalRunner:
                      f"({batch_start + 1}-{batch_end}/{num_samples})")
             
             try:
-                batch_predictions = self.model.predict_batch(batch_samples)
+                batch_predictions = self.model.predict_batch(
+                    batch_samples,
+                    output_folder=self.output_dir / 'annotated_videos'
+                )
                 all_predictions.extend(batch_predictions)
             except Exception as e:
                 self._log(f"[Error] Batch prediction failed: {e}")
