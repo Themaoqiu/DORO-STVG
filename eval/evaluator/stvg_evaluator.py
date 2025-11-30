@@ -95,15 +95,14 @@ class STVGEvaluator:
     
     def _normalize_spatial_bboxes(
         self,
-        bboxes: Dict[int, List[List[float]]],
+        bboxes: Dict[int, List[float]],
         width: float,
         height: float
     ) -> Dict[int, List[float]]:
         normalized_bboxes = {}
         
-        for frame_id, boxes in bboxes.items():
-            if boxes:
-                box = boxes[0]
+        for frame_id, box in bboxes.items():
+            if box:
                 normalized_box = [
                     box[0] / width,
                     box[1] / height,

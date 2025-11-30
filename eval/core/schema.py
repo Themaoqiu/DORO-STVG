@@ -8,7 +8,7 @@ class STVGSample:
     video_path: str
     query: str
     gt_temporal_bound: Tuple[int, int]
-    gt_bboxes: Dict[int, List[List[float]]]
+    gt_bboxes: Dict[int, List[float]]
     
     video_metadata: Optional[Dict[str, Any]] = None
     

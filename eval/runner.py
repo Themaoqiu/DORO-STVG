@@ -97,7 +97,7 @@ class EvalRunner:
             )
         self._log(f"[Runner] Predictions saved to: {pred_file}")
         
-        metrics_file = self.output_dir / 'results.json'
+        metrics_file = self.output_dir / 'status.json'
         with open(metrics_file, 'w') as f:
             json.dump(metrics, f, indent=2)
         self._log(f"[Runner] Metrics saved to: {metrics_file}")
