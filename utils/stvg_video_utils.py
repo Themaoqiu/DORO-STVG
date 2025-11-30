@@ -167,8 +167,7 @@ def process_video(
     annotation_font_size: int = 40,
     annotation_color: Tuple[int, int, int] = (255, 255, 0),
     annotation_font_path: Optional[str] = None,
-    max_pixels: int = 360 * 420,
-) -> Tuple[torch.Tensor, Dict[str, Any]]:
+) -> Tuple[str, Dict[str, Any]]:
     
     if annotate_frames:
         os.makedirs(output_folder, exist_ok=True)
@@ -222,29 +221,12 @@ def process_video(
             
             video_path = annotated_video_path
         logger.info(f"Using annotated video: {video_path}")
-    
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "video",
-                    "video": video_path,
-                    "nframes": num_frames,
-                    "max_pixels": max_pixels,
-                }
-            ]
-        }
-    ]
-    
-    image_inputs, video_inputs, video_kwargs = process_vision_info(
-        messages,
-        return_video_kwargs=True
-    )
-    
-    
-    if not annotate_frames:
+        return video_path, video_metadata
+    else:
         cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Cannot open video: {video_path}")
+        
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = cap.get(cv2.CAP_PROP_FPS)
         cap.release()
@@ -260,10 +242,9 @@ def process_video(
             'frame_times': frame_times,
             'video_duration': (total_frames - 1) / fps,
         }
-    
-    logger.info(f"[VideoUtils] Loaded video: {video_path}")
-    
-    return video_inputs, video_metadata
+        
+        logger.info(f"[VideoUtils] Using original video: {video_path}")
+        return video_path, video_metadata
 
 
 def convert_frame_index_to_time(frame_idx: int, fps: float) -> float:

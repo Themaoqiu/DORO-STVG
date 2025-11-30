@@ -70,45 +70,61 @@ class Qwen3(BaseModel):
         
         output_folder = Path(kwargs.get('output_folder', './annotated_videos'))
         
-        prompts = []
-        mm_data = []
+        batch_messages = []
         
         for sample in samples:
-            video_inputs, video_metadata = process_video(
+            annotated_video_path, video_metadata = process_video(
                 video_path=sample.video_path,
                 output_folder=str(output_folder),
                 num_frames=self.nframes,
-                annotate_frames=True,
-                max_pixels=360 * 420
+                annotate_frames=True
             )
             
             sample.video_metadata = video_metadata
             
             query_text = STVGPromptTemplate.format_grounding_query(sample.query)
             
-            conversation = [
+            messages = [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": query_text}
+                        {
+                            "type": "video",
+                            "video": annotated_video_path,
+                            "nframes": self.nframes,
+                            "max_pixels": 360 * 420,
+                        },
+                        {
+                            "type": "text",
+                            "text": query_text
+                        }
                     ]
                 }
             ]
-            
-            prompt = self.processor.apply_chat_template(
-                conversation,
-                tokenize=False,
-                add_generation_prompt=True
-            )
-            prompts.append(prompt)
-            mm_data.append(video_inputs)
+            batch_messages.append(messages)
         
-        llm_inputs = [{
-            "prompt": prompt, 
-            "multi_modal_data": {"video": mm}
-            }
-            for prompt, mm in zip(prompts, mm_data)
+        prompts = [
+            self.processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
+            for msg in batch_messages
         ]
+        
+        image_inputs, video_inputs, video_kwargs = process_vision_info(
+            batch_messages,
+            return_video_kwargs=True
+        )
+        
+        llm_inputs = []
+        for idx, prompt in enumerate(prompts):
+            sample_mm_data = {"video": video_inputs[idx]}
+            sample_video_kw = {}
+            for key, value in video_kwargs.items():
+                sample_video_kw[key] = value[idx]
+            
+            llm_inputs.append({
+                "prompt": prompt,
+                "multi_modal_data": sample_mm_data,
+                "mm_processor_kwargs": sample_video_kw,
+            })
         
         outputs = self.llm.generate(llm_inputs, sampling_params=self.sampling_params)
         
