@@ -1,5 +1,5 @@
 from typing import Dict, Type, Callable
-from .base_model import BaseSTVGModel
+from .base_model import BaseModel
 from .qwen_family import Qwen3
 
 
@@ -15,7 +15,7 @@ class ModelRegistry:
         return decorator
     
     @classmethod
-    def build(cls, model_name: str, **kwargs) -> BaseSTVGModel:
+    def build(cls, model_name: str, **kwargs) -> BaseModel:
         model_name_lower = model_name.lower()
         
         for pattern, builder in cls._registry.items():

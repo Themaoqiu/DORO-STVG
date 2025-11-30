@@ -8,7 +8,7 @@ model:
   name: "Qwen3-VL-2B"
   model_path: "/path/to/Qwen3-VL-2B-Instruct"
   batch_size: 4
-  nframes: 100
+  nframes: 99
   max_tokens: 1024
   max_model_len: 32768
   temperature: 0.0

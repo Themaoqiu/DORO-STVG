@@ -7,6 +7,7 @@ models/__pycache__
 cache/
 data/
 attention_data/
+results/
 checkpoint/
 checkpoints/
 notebooks/

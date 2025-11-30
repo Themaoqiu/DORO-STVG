@@ -1,18 +1,18 @@
 dataset:
   name: "hcstvg"
-  annotation_path: "/path/to/HCSTVG/annotations"
-  video_dir: "/path/to/HCSTVG/videos"
+  annotation_path: "/home/wangxingjian/TA-STVG/data/hc-stvg2/annos/test.json"
+  video_dir: "/home/wangxingjian/TA-STVG/data/hc-stvg2/v2_video"
   subset: "test"
 
 model:
   name: "Qwen3-VL-2B"
-  model_path: "/path/to/Qwen3-VL-2B-Instruct"
-  batch_size: 4
-  nframes: 100
+  model_path: "/home/wangxingjian/model/Qwen3-VL-2B-Instruct"
+  batch_size: 1
+  nframes: 80
   max_tokens: 1024
   max_model_len: 32768
   temperature: 0.0
-  tensor_parallel_size: 2
+  tensor_parallel_size: 1
   gpu_memory_utilization: 0.8
 
 evaluation:

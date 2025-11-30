@@ -3,7 +3,7 @@ from typing import List, Dict, Any
 from ..core.schema import STVGSample, Result
 
 
-class BaseSTVGModel(ABC):
+class BaseModel(ABC):
     
     def __init__(self, model_name: str, **kwargs):
         self.model_name = model_name

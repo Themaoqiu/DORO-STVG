@@ -1,4 +1,4 @@
-from .stvg_evaluator import UnifiedSTVGEvaluator
-from .metrics import compute_temporal_iou, compute_iou
+from .stvg_evaluator import STVGEvaluator
+from .metrics import compute_tiou, compute_siou, compute_stvg_metrics
 
-__all__ = ['UnifiedSTVGEvaluator', 'compute_temporal_iou', 'compute_iou']
+__all__ = ['STVGEvaluator', 'compute_tiou', 'compute_siou', 'compute_stvg_metrics']

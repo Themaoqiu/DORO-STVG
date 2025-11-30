@@ -3,24 +3,24 @@ from pathlib import Path
 from vllm import LLM, SamplingParams
 from transformers import AutoProcessor
 
-from .base_model import BaseSTVGModel
+from .base_model import BaseModel
 from ..core.schema import STVGSample, Result
 from ..prompts.stvg import STVGPromptTemplate
 
 
-class Qwen3(BaseSTVGModel):
+class Qwen3(BaseModel):
     
     def __init__(
         self, 
         model_name: str,
         model_path: str,
-        batch_size: int = 4,
-        nframes: int = 100,
-        max_tokens: int = 512,
-        max_model_len: int = 8192,
-        temperature: float = 0.0,
-        tensor_parallel_size: int = 1,
-        gpu_memory_utilization: float = 0.8,
+        batch_size: int,
+        nframes: int,
+        max_tokens: int,
+        max_model_len: int,
+        temperature: float,
+        tensor_parallel_size: int,
+        gpu_memory_utilization: float,
         **kwargs
     ):
         super().__init__(model_name, **kwargs)

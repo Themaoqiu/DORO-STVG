@@ -133,6 +133,9 @@ def save_annotated_video(
             if (sample_idx + 1) % 100 == 0:
                 logger.info(f"  Processed {sample_idx + 1}/{len(frame_indices)} frames")
         
+        if 'annotated_frame_bgr' in locals():
+            out.write(annotated_frame_bgr)
+            
         cap.release()
         out.release()
         logger.info(f"Saved annotated video to: {output_file}")
