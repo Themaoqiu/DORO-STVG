@@ -177,6 +177,26 @@ def process_video(
 
         if os.path.exists(annotated_video_path):
             logger.info(f"Using existing annotated video: {annotated_video_path}")
+            cap = cv2.VideoCapture(annotated_video_path)
+            if not cap.isOpened():
+                raise ValueError(f"Cannot open annotated video: {annotated_video_path}")
+            
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            cap.release()
+            
+            frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int).tolist()
+            frame_times = [idx / fps for idx in frame_indices]
+            
+            video_metadata = {
+                'fps': fps,
+                'frames_indices': frame_indices,
+                'total_num_frames': total_frames,
+                'num_frames_sampled': num_frames,
+                'frame_times': frame_times,
+                'video_duration': (total_frames - 1) / fps,
+                'annotated_video_path': annotated_video_path,
+            }
             video_path = annotated_video_path
         else:
             cap = cv2.VideoCapture(video_path)

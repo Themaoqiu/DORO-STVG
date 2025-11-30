@@ -2,7 +2,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from .runner import run_from_config
+from eval.runner import run_from_config
 
 
 def setup_logger(output_dir: Path) -> logging.Logger:
