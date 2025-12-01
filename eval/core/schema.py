@@ -50,7 +50,8 @@ class Result:
     def to_dict(self) -> dict:
         return {
             'item_id': self.item_id,
+            "video_metadata": self.video_metadata,
             'pred_temporal_bound': self.pred_temporal_bound,
             'pred_bboxes': self.pred_bboxes,
-            'metadata': self.metadata
+            'metadata': self.metadata["raw_output"]
         }

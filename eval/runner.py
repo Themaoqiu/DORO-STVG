@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional
 import yaml
+import logging
 
 from .dataset_registry import DatasetRegistry
 from .model_registry import ModelRegistry
@@ -13,7 +14,7 @@ class EvalRunner:
     
     def __init__(self, config: dict, logger=None):
         self.config = config
-        self.logger = logger
+        self.logger = logger or logging.getLogger(__name__)
         
         self._log("[Runner] Loading dataset...")
         self.dataset = DatasetRegistry.build(
@@ -23,13 +24,11 @@ class EvalRunner:
             subset=config['dataset'].get('subset', 'test')
         )
         
-        self._log("[Runner] Loading model...")
         self.model = ModelRegistry.build(
             model_name=config['model']['name'],
             **config['model']
         )
         
-        self._log("[Runner] Initializing evaluator...")
         self.evaluator = STVGEvaluator(
             dataset=self.dataset,
             iou_thresholds=config['evaluation'].get('iou_thresholds', [0.3, 0.5]),
@@ -38,8 +37,16 @@ class EvalRunner:
         
         self.batch_size = config['model'].get('batch_size', 4)
         self.save_predictions = config['evaluation'].get('save_predictions', False)
-        self.output_dir = Path(config['evaluation'].get('output_dir', './results'))
+
+        model_name = config['model']['name']
+        output_dir_template = config['evaluation']['output_dir']
+        output_dir_str = output_dir_template.format(model_name=model_name)
+
+        self.output_dir = Path(output_dir_str)
+
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        self.video_dir = Path(config['dataset']['video_dir'])
     
     def run(self) -> Dict[str, float]:
         self._log("[Runner] Starting evaluation...")
@@ -54,24 +61,12 @@ class EvalRunner:
             self._log(f"[Runner] Processing batch {batch_start // self.batch_size + 1} "
                      f"({batch_start + 1}-{batch_end}/{num_samples})")
             
-            try:
-                batch_predictions = self.model.predict_batch(
-                    batch_samples,
-                    output_folder=self.output_dir / 'annotated_videos'
-                )
-                all_predictions.extend(batch_predictions)
-            except Exception as e:
-                self._log(f"[Error] Batch prediction failed: {e}")
-
-                for sample in batch_samples:
-                    all_predictions.append(Result(
-                        item_id=sample.item_id,
-                        pred_temporal_bound=(0, 0),
-                        pred_bboxes={},
-                        metadata={'error': str(e)}
-                    ))
+            batch_predictions = self.model.predict_batch(
+                batch_samples,
+                output_folder=self.video_dir / 'annotated_videos'
+            )
+            all_predictions.extend(batch_predictions)
         
-        self._log("[Runner] Computing metrics...")
         self.evaluator.update(all_predictions)
         
         metrics = self.evaluator.compute_metrics()
@@ -88,14 +83,13 @@ class EvalRunner:
         predictions: List[Result], 
         metrics: Dict[str, float]
     ):
-        pred_file = self.output_dir / 'response.json'
+        pred_file = self.output_dir / 'results.json'
         with open(pred_file, 'w') as f:
             json.dump(
                 [pred.to_dict() for pred in predictions],
                 f,
                 indent=2
             )
-        self._log(f"[Runner] Predictions saved to: {pred_file}")
         
         metrics_file = self.output_dir / 'status.json'
         with open(metrics_file, 'w') as f:
@@ -110,8 +104,6 @@ class EvalRunner:
         for key, value in sorted(metrics.items()):
             self._log(f"{key:30s}: {value:.4f}")
         
-        self._log("=" * 60 + "\n")
-    
     def _log(self, message: str):
         if self.logger:
             self.logger.info(message)

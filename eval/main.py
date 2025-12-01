@@ -9,23 +9,26 @@ def setup_logger(output_dir: Path) -> logging.Logger:
     logger = logging.getLogger('STVG_Eval')
     logger.setLevel(logging.INFO)
     
-    # 控制台输出
+    logger.handlers.clear()
+    
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
     
-    # 文件输出
     output_dir.mkdir(parents=True, exist_ok=True)
     file_handler = logging.FileHandler(output_dir / 'eval.log')
     file_handler.setLevel(logging.INFO)
     
     formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        '[%(asctime)s] %(levelname)s %(filename)s:%(lineno)d: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
     )
     console_handler.setFormatter(formatter)
     file_handler.setFormatter(formatter)
     
     logger.addHandler(console_handler)
     logger.addHandler(file_handler)
+    
+    logger.propagate = False
     
     return logger
 
@@ -56,10 +59,14 @@ def main():
     if args.output_dir:
         config['evaluation']['output_dir'] = args.output_dir
     
-    output_dir = Path(config['evaluation']['output_dir'])
+    model_name = config['model']['name']
+    output_dir_template = config['evaluation']['output_dir']
+    output_dir_str = output_dir_template.format(model_name=model_name)
+    output_dir = Path(output_dir_str)
     
     logger = setup_logger(output_dir)
     logger.info(f"Starting evaluation with config: {args.config}")
+    logger.info(f"Output directory: {output_dir}")
     
     try:
         metrics = run_from_config(args.config, logger=logger)

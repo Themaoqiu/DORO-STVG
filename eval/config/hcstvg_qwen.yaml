@@ -5,10 +5,10 @@ dataset:
   subset: "test"
 
 model:
-  name: "Qwen3-VL-2B"
-  model_path: "/home/wangxingjian/model/Qwen3-VL-2B-Instruct"
+  name: "Qwen3-VL-8B"
+  model_path: "/home/wangxingjian/model/Qwen3-VL-8B-Instruct"
   batch_size: 1
-  nframes: 80
+  nframes: 100
   max_tokens: 1024
   max_model_len: 32768
   temperature: 0.0
@@ -18,4 +18,4 @@ model:
 evaluation:
   iou_thresholds: [0.3, 0.5]
   save_predictions: true
-  output_dir: "./results/hcstvg_qwen"
+  output_dir: "./res/hcstvg_{model_name}"

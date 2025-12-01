@@ -1,6 +1,6 @@
 from typing import Dict, Type, Callable
 from .base_model import BaseModel
-from .qwen_family import Qwen3
+from .qwen_family import Qwen2_5VL, Qwen3VL
 
 
 class ModelRegistry:
@@ -33,6 +33,12 @@ class ModelRegistry:
 
 
 
-@ModelRegistry.register("qwen")
-def build_qwen_model(model_name: str, **kwargs) -> Qwen3:
-    return Qwen3(model_name=model_name, **kwargs)
+@ModelRegistry.register("qwen2.5")
+@ModelRegistry.register("qwen2_5vl")
+def build_qwen_model(model_name: str, **kwargs) -> Qwen2_5VL:
+    return Qwen2_5VL(model_name=model_name, **kwargs)
+
+
+@ModelRegistry.register("qwen3")
+def build_qwen3vl_model(model_name: str, **kwargs) -> Qwen3VL:
+    return Qwen3VL(model_name=model_name, **kwargs)
