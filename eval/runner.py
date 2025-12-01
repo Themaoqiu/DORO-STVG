@@ -49,8 +49,6 @@ class EvalRunner:
         self.video_dir = Path(config['dataset']['video_dir'])
     
     def run(self) -> Dict[str, float]:
-        self._log("[Runner] Starting evaluation...")
-        
         all_predictions = []
         num_samples = len(self.dataset)
         

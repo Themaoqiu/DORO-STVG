@@ -73,5 +73,5 @@ source scripts/activate_env.sh /path/to/another/env
 ## Quick Start
 
 ```bash
-python
+bash eval/run_eval.sh
 ```
