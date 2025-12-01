@@ -8,6 +8,7 @@ cache/
 data/
 attention_data/
 results/
+res/
 checkpoint/
 checkpoints/
 notebooks/
