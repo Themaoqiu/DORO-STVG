@@ -1,81 +1,112 @@
-import argparse
 import logging
+import sys
 from pathlib import Path
 
-from eval.runner import run_from_config
+import fire
 
 
-def setup_logger(output_dir: Path) -> logging.Logger:
-    logger = logging.getLogger('STVG_Eval')
-    logger.setLevel(logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+
+class STVGEvaluator:
     
-    logger.handlers.clear()
+    def run(
+        self,
+        model_name: str,
+        model_path: str,
+        data_name: str,
+        annotation_path: str,
+        video_dir: str,
+        output_dir: str = "./res",
+        annotated_video_dir: str = "./annotated_videos",
+        num_frames: int = 100,
+        batch_size: int = 1,
+        max_tokens: int = 512,
+        max_model_len: int = 8192,
+        temperature: float = 0.0,
+        tensor_parallel_size: int = 1,
+        gpu_memory_utilization: float = 0.9,
+        cleanup_after: bool = False,
+    ):
+        logger.info(f"Model: {model_name}")
+        logger.info(f"Model Path: {model_path}")
+        logger.info(f"Data Name: {data_name}")
+        logger.info(f"Annotation: {annotation_path}")
+        logger.info(f"Video Dir: {video_dir}")
+        logger.info(f"Output Dir: {output_dir}")
+        logger.info(f"Num Frames: {num_frames}")
+        logger.info(f"Batch Size: {batch_size}")
+        
+        if model_name.lower() in ['qwen2.5vl', 'qwen2.5-vl']:
+            from models.qwen import Qwen2_5VL
+            model = Qwen2_5VL(
+                model_path=model_path,
+                batch_size=batch_size,
+                nframes=num_frames,
+                max_tokens=max_tokens,
+                max_model_len=max_model_len,
+                temperature=temperature,
+                tensor_parallel_size=tensor_parallel_size,
+                gpu_memory_utilization=gpu_memory_utilization,
+            )
+        elif model_name.lower() in ['qwen3vl', 'qwen3-vl']:
+            from models.qwen import Qwen3VL
+            model = Qwen3VL(
+                model_path=model_path,
+                batch_size=batch_size,
+                nframes=num_frames,
+                max_tokens=max_tokens,
+                max_model_len=max_model_len,
+                temperature=temperature,
+                tensor_parallel_size=tensor_parallel_size,
+                gpu_memory_utilization=gpu_memory_utilization,
+            )
+        else:
+            raise ValueError(f"Unknown model: {model_name}")
+
+        if data_name.lower() in ['hcstvg', 'hc-stvg', 'hcstvg2', 'hc-stvg2']:
+            from pipelines.hcstvg import HCSTVGPipeline
+            
+            pipeline = HCSTVGPipeline(
+                model=model,
+                annotation_path=annotation_path,
+                video_dir=video_dir,
+                output_dir=output_dir,
+                annotated_video_dir=annotated_video_dir,
+                num_frames=num_frames,
+                batch_size=batch_size,
+            )
+            
+            results, avg_metrics = pipeline.run_evaluation()
+        
+            if cleanup_after:
+                logger.info("Cleaning up annotated videos...")
+                pipeline.cleanup_annotated_videos()
+        
     
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    
-    output_dir.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.FileHandler(output_dir / 'eval.log')
-    file_handler.setLevel(logging.INFO)
-    
-    formatter = logging.Formatter(
-        '[%(asctime)s] %(levelname)s %(filename)s:%(lineno)d: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    console_handler.setFormatter(formatter)
-    file_handler.setFormatter(formatter)
-    
-    logger.addHandler(console_handler)
-    logger.addHandler(file_handler)
-    
-    logger.propagate = False
-    
-    return logger
+    def cleanup(self, annotated_video_dir: str = "./annotated_videos"):
+        import shutil
+        
+        video_dir = Path(annotated_video_dir)
+        if video_dir.exists():
+            logger.info(f"Cleaning up {video_dir}")
+            shutil.rmtree(video_dir)
+            video_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("Cleanup completed!")
+        else:
+            logger.warning(f"Directory {video_dir} does not exist")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='STVG MLLM Evaluation Framework'
-    )
-    parser.add_argument(
-        '--config',
-        type=str,
-        required=True,
-        help='Path to YAML config file'
-    )
-    parser.add_argument(
-        '--output_dir',
-        type=str,
-        default=None,
-        help='Override output directory in config'
-    )
-    
-    args = parser.parse_args()
-    
-    import yaml
-    with open(args.config, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    if args.output_dir:
-        config['evaluation']['output_dir'] = args.output_dir
-    
-    model_name = config['model']['name']
-    output_dir_template = config['evaluation']['output_dir']
-    output_dir_str = output_dir_template.format(model_name=model_name)
-    output_dir = Path(output_dir_str)
-    
-    logger = setup_logger(output_dir)
-    logger.info(f"Starting evaluation with config: {args.config}")
-    logger.info(f"Output directory: {output_dir}")
-    
-    try:
-        metrics = run_from_config(args.config, logger=logger)
-        logger.info("Evaluation completed successfully!")
-        return metrics
-    except Exception as e:
-        logger.error(f"Evaluation failed: {e}", exc_info=True)
-        raise
+    fire.Fire(STVGEvaluator)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

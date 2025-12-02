@@ -165,7 +165,7 @@ def process_video(
     annotate_frames: bool = True,
     annotation_position: str = "bottom_right",
     annotation_font_size: int = 40,
-    annotation_color: Tuple[int, int, int] = (255, 255, 0),
+    annotation_color: Tuple[int, int, int] = (255, 0, 0),
     annotation_font_path: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     

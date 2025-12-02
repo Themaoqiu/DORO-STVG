@@ -43,7 +43,7 @@ def compute_siou(box1: List[float], box2: List[float]) -> float:
     return inter_area / union_area if union_area > 0 else 0.0
 
 
-def compute_stvg_metrics(
+def compute_metrics(
     gt_span: Tuple[int, int],
     pred_span: Tuple[int, int],
     gt_bboxes: Dict[int, List[float]],

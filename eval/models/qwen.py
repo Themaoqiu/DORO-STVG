@@ -1,40 +1,38 @@
-from typing import List
+"""
+Qwen-VL model family for STVG evaluation.
+"""
+import os
+from typing import List, Dict, Any
 from pathlib import Path
+
 from vllm import LLM, SamplingParams
 from transformers import AutoProcessor
-import os
-
-from .base_model import BaseModel
-from ..core.schema import STVGSample, Result
-from ..prompts.stvg import STVGPromptTemplate
 
 os.environ["DECORD_EOF_RETRY_MAX"] = "20480"
 
 
-class QwenVLBase(BaseModel):
+class QwenVLBase:
+    """Base class for Qwen-VL models."""
     
     def __init__(
         self, 
-        model_name: str,
         model_path: str,
-        batch_size: int,
-        nframes: int,
-        max_tokens: int,
-        max_model_len: int,
-        temperature: float,
-        tensor_parallel_size: int,
-        gpu_memory_utilization: float,
-        **kwargs
+        batch_size: int = 1,
+        nframes: int = 100,
+        max_tokens: int = 512,
+        max_model_len: int = 8192,
+        temperature: float = 0.0,
+        tensor_parallel_size: int = 1,
+        gpu_memory_utilization: float = 0.9,
     ):
-        super().__init__(model_name, **kwargs)
         self.model_path = model_path
         self.batch_size = batch_size
         self.nframes = nframes
         self.max_tokens = max_tokens
+        self.max_model_len = max_model_len
         self.temperature = temperature
         self.tensor_parallel_size = tensor_parallel_size
         self.gpu_memory_utilization = gpu_memory_utilization
-        self.max_model_len = max_model_len
 
         self.sampling_params = SamplingParams(
             temperature=self.temperature,
@@ -48,15 +46,20 @@ class QwenVLBase(BaseModel):
         self.load_model()
     
     def load_model(self):
+        """To be implemented by subclass."""
         raise NotImplementedError
     
-    def _prepare_messages(self, sample: STVGSample, annotated_video_path: str) -> list:
-        query_text = STVGPromptTemplate.format_grounding_query(sample.query)
-        
+    def prepare_messages(
+        self, 
+        query: str, 
+        annotated_video_path: str,
+        system_prompt: str
+    ) -> List[Dict[str, Any]]:
+        """Prepare messages for model input."""
         messages = [
             {
                 "role": "system",
-                "content": STVGPromptTemplate.SYSTEM_PROMPT
+                "content": system_prompt
             },
             {
                 "role": "user",
@@ -69,32 +72,30 @@ class QwenVLBase(BaseModel):
                     },
                     {
                         "type": "text",
-                        "text": query_text
+                        "text": query
                     }
                 ]
             }
         ]
         return messages
     
-    def postprocess_output(self, pred_text: str, sample: STVGSample) -> Result:
-        parsed = STVGPromptTemplate.parse_stvg_output(pred_text)
+    def predict_batch(
+        self, 
+        queries: List[str],
+        annotated_video_paths: List[str],
+        system_prompt: str
+    ) -> List[str]:
+        """
+        Batch inference.
         
-        pred_temporal = parsed.get('temporal_span', (0, 99))
-        pred_bboxes = parsed['spatial_bboxes']
-        
-        return Result(
-            item_id=sample.item_id,
-            pred_temporal_bound=pred_temporal,
-            pred_bboxes=pred_bboxes,
-            video_metadata=sample.video_metadata,
-            metadata={
-                'raw_output': pred_text,
-                'parsed': parsed
-            }
-        )
+        Returns:
+            List of model response strings (full responses).
+        """
+        raise NotImplementedError
 
 
 class Qwen2_5VL(QwenVLBase):
+    """Qwen2.5-VL model."""
 
     def load_model(self):
         self.llm = LLM(
@@ -111,24 +112,15 @@ class Qwen2_5VL(QwenVLBase):
     
     def predict_batch(
         self, 
-        samples: List[STVGSample],
-        **kwargs
-    ) -> List[Result]:
-        from utils.stvg_video_utils import process_video
+        queries: List[str],
+        annotated_video_paths: List[str],
+        system_prompt: str
+    ) -> List[str]:
         from qwen_vl_utils import process_vision_info
         
-        output_folder = Path(kwargs.get('output_folder', './annotated_videos'))
         batch_messages = []
-        
-        for sample in samples:
-            annotated_video_path, video_metadata = process_video(
-                video_path=sample.video_path,
-                output_folder=str(output_folder),
-                num_frames=self.nframes,
-                annotate_frames=True
-            )
-            sample.video_metadata = video_metadata
-            messages = self._prepare_messages(sample, annotated_video_path)
+        for query, video_path in zip(queries, annotated_video_paths):
+            messages = self.prepare_messages(query, video_path, system_prompt)
             batch_messages.append(messages)
         
         prompts = [
@@ -159,18 +151,14 @@ class Qwen2_5VL(QwenVLBase):
         
         outputs = self.llm.generate(llm_inputs, sampling_params=self.sampling_params)
         
-        predictions = []
-        for sample, output in zip(samples, outputs):
-            pred_text = output.outputs[0].text
-            pred_result = self.postprocess_output(pred_text, sample)
-            predictions.append(pred_result)
-        
-        return predictions
+        responses = [output.outputs[0].text for output in outputs]
+        return responses
 
 
 class Qwen3VL(QwenVLBase):
+    """Qwen3-VL model."""
+    
     def load_model(self):
-        
         self.llm = LLM(
             model=self.model_path,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -189,28 +177,16 @@ class Qwen3VL(QwenVLBase):
     
     def predict_batch(
         self, 
-        samples: List[STVGSample],
-        **kwargs
-    ) -> List[Result]:
-        from utils.stvg_video_utils import process_video
+        queries: List[str],
+        annotated_video_paths: List[str],
+        system_prompt: str
+    ) -> List[str]:
         from qwen_vl_utils import process_vision_info
         
-        output_folder = Path(kwargs.get('output_folder', './annotated_videos'))
-        batch_messages = []
-        
-        for sample in samples:
-            annotated_video_path, video_metadata = process_video(
-                video_path=sample.video_path,
-                output_folder=str(output_folder),
-                num_frames=self.nframes,
-                annotate_frames=True
-            )
-            sample.video_metadata = video_metadata
-            messages = self._prepare_messages(sample, annotated_video_path)
-            batch_messages.append(messages)
-        
         llm_inputs = []
-        for messages in batch_messages:
+        for query, video_path in zip(queries, annotated_video_paths):
+            messages = self.prepare_messages(query, video_path, system_prompt)
+            
             text = self.processor.apply_chat_template(
                 messages, 
                 tokenize=False, 
@@ -238,10 +214,5 @@ class Qwen3VL(QwenVLBase):
         
         outputs = self.llm.generate(llm_inputs, sampling_params=self.sampling_params)
         
-        predictions = []
-        for sample, output in zip(samples, outputs):
-            pred_text = output.outputs[0].text
-            pred_result = self.postprocess_output(pred_text, sample)
-            predictions.append(pred_result)
-        
-        return predictions
+        responses = [output.outputs[0].text for output in outputs]
+        return responses
