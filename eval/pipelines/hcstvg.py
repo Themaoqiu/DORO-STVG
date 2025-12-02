@@ -21,6 +21,8 @@ class HCSTVGPipeline:
     def __init__(
         self,
         model,
+        model_name: str,
+        data_name: str,
         annotation_path: str,
         video_dir: str,
         output_dir: str,
@@ -29,6 +31,8 @@ class HCSTVGPipeline:
         batch_size: int = 1,
     ):
         self.model = model
+        self.model_name = model_name
+        self.data_name = data_name
         self.annotation_path = Path(annotation_path)
         self.video_dir = Path(video_dir)
         self.output_dir = Path(output_dir)
@@ -56,10 +60,17 @@ class HCSTVGPipeline:
                 self._map_frame_to_sampled(ed_frame_orig, sampled_indices)
             )
             
+            width = anno['width']
+            height = anno['height']
+            
             gt_bboxes_sampled = {}
             for frame_idx, bbox in enumerate(anno['bbox'], start=st_frame_orig):
                 x, y, w, h = bbox
-                bbox_normalized = [x, y, x + w, y + h]
+                x1_norm = x / width
+                y1_norm = y / height
+                x2_norm = (x + w) / width
+                y2_norm = (y + h) / height
+                bbox_normalized = [x1_norm, y1_norm, x2_norm, y2_norm]
                 
                 sampled_frame_idx = self._map_frame_to_sampled(frame_idx, sampled_indices)
                 gt_bboxes_sampled[sampled_frame_idx] = bbox_normalized
@@ -220,24 +231,31 @@ class HCSTVGPipeline:
     
     def _save_results(self, results: List[Dict[str, Any]], avg_metrics: Dict[str, float]):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        results_file = self.output_dir / f"hcstvg_results_{timestamp}.json"
 
+        eval_folder_name = f"{self.data_name}_{self.model_name}_{timestamp}"
+        eval_folder = self.output_dir / eval_folder_name
+        eval_folder.mkdir(parents=True, exist_ok=True)
+        
+        results_file = eval_folder / "results.json"
         with open(results_file, 'w', encoding='utf-8') as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
+        logger.info(f"Detailed results saved to {results_file}")
         
         summary = {
-            'dataset': 'HC-STVG',
+            'dataset': self.data_name,
+            'model': self.model_name,
             'num_samples': len(results),
             'num_frames': self.num_frames,
             'timestamp': timestamp,
             'average_metrics': avg_metrics,
         }
-        summary_file = self.output_dir / f"hcstvg_status_{timestamp}.json"
+        summary_file = eval_folder / "status.json"
         with open(summary_file, 'w', encoding='utf-8') as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
+        logger.info(f"Summary saved to {summary_file}")
         
-        logger.info(f"\nAverage Metrics:")
+        logger.info(f"Evaluation results saved to: {eval_folder}")
+        logger.info(f"Average Metrics:")
         logger.info(f"  tIoU: {avg_metrics['tIoU']:.4f}")
         logger.info(f"  sIoU: {avg_metrics['sIoU']:.4f}")
         logger.info(f"  m_vIoU: {avg_metrics['m_vIoU']:.4f}")

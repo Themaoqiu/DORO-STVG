@@ -71,11 +71,13 @@ class STVGEvaluator:
         else:
             raise ValueError(f"Unknown model: {model_name}")
 
-        if data_name.lower() in ['hcstvg', 'hc-stvg', 'hcstvg2', 'hc-stvg2']:
+        if data_name.lower() in ['hcstvg', 'hc-stvg', 'hcstvg2', 'hc-stvg2', 'hcstvg1']:
             from pipelines.hcstvg import HCSTVGPipeline
             
             pipeline = HCSTVGPipeline(
                 model=model,
+                model_name=model_name,
+                data_name=data_name,
                 annotation_path=annotation_path,
                 video_dir=video_dir,
                 output_dir=output_dir,
