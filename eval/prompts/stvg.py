@@ -13,19 +13,9 @@ class STVGPromptTemplate:
         "Between",
         "At"
     ]
-    
-    SYSTEM_PROMPT = """You are an expert in video spatiotemporal grounding.
-Given a video and a text query, you need to:
-1. Identify when the event occurs (temporal localization)
-2. Provide bounding boxes for each frame in that period (spatial localization)
 
-Output format:
-During the span of {start_frame, end_frame} start_frame: [x1, y1, x2, y2], start_frame+1: [x1, y1, x2, y2], ...
-
-Notes:
-- Frame indices are in range [0, 99] representing 100 sampled frames
-- Bounding boxes are normalized to [0, 1] as [x1, y1, x2, y2]
-"""
+    SYSTEM_PROMPT = """You are an expert in spatiotemporal video grounding tasked with precisely locating objects/subjects in videos. When localizing the query in the video, you should watch the entire clip carefully before producing an answer. For every subject/object you are asked to find, observe the video carefully first. The red numbers overlaid on each frame indicate the frame index. Then provide the most plausible time interval in which the target appears, along with its bounding-box coordinates in every relevant frame.
+    """
     
     @staticmethod
     def format_grounding_query(query: str, use_random_template: bool = False) -> str:
@@ -33,18 +23,13 @@ Notes:
             tvg_prefix = random.choice(STVGPromptTemplate.TVG_TEMPLATES)
         else:
             tvg_prefix = "During the span of"
-        
-        prompt = f"""When does "{query}" occur in the video?
-Please describe the location of the corresponding subject/object in this video.
 
-Please firstly give the frame indices, and then give the spatial bounding box corresponding to each frame in the time period.
-
-Answer format: {tvg_prefix} {{start, end}} start: [x1, y1, x2, y2], start+1: [x1, y1, x2, y2], ..., end: [x1, y1, x2, y2].
-
-Note: 
-- Frame indices are in range [0, 99] (100 frames sampled uniformly)
-- Bounding boxes are normalized coordinates in [0, 1]
-"""
+        prompt = f"""At which time interval in the video can we see {query}? Please describe the location of the corresponding subject/object in this video. Firstly give the timestamps, and then give the spatial bounding box corresponding to each timestamp in the time period.\n
+        Answer format: {tvg_prefix} {{start frame, end frame}} frame1: [x1, y1, x2, y2], frame2: [x1, y1, x2, y2], ..., frameN: [x1, y1, x2, y2].
+        Note: 
+        - Frame indices are in range [0, 99] (100 frames sampled uniformly)
+        - Bounding boxes are normalized coordinates in [0, 1]
+        """
         return prompt
     
     @staticmethod
