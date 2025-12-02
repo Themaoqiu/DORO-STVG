@@ -19,22 +19,12 @@ def format_prompt(query: str) -> str:
 
 
 def parse_response(response_text: str) -> Dict[str, Any]:
-    """
-    Parse model response to extract temporal span and spatial bounding boxes.
-    
-    Returns:
-        {
-            'temporal_span': (start_frame, end_frame) or None,
-            'spatial_bboxes': {frame_idx: [x1, y1, x2, y2], ...}
-        }
-    """
     result = {
         'temporal_span': None,
         'spatial_bboxes': {}
     }
     
-    # Extract temporal span: {start, end}
-    temporal_pattern = r'\{(\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)\}'
+    temporal_pattern = r'[\{\[](\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)[\}\]]'
     temporal_match = re.search(temporal_pattern, response_text)
     
     if temporal_match:
@@ -42,7 +32,6 @@ def parse_response(response_text: str) -> Dict[str, Any]:
         end = int(round(float(temporal_match.group(2))))
         result['temporal_span'] = (start, end)
     
-    # Extract spatial bboxes: frame: [x1, y1, x2, y2]
     spatial_pattern = r'(\d+(?:\.\d+)?)\s*:\s*\[([^\]]+)\]'
     spatial_matches = re.findall(spatial_pattern, response_text)
     
@@ -52,7 +41,6 @@ def parse_response(response_text: str) -> Dict[str, Any]:
             coords = [float(x.strip()) for x in bbox_str.split(',')]
             
             if len(coords) == 4:
-                # Clamp to [0, 1]
                 coords = [max(0.0, min(1.0, c)) for c in coords]
                 result['spatial_bboxes'][frame_idx] = coords
                 
