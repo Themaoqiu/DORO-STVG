@@ -92,6 +92,27 @@ class STVGEvaluator:
                 logger.info("Cleaning up annotated videos...")
                 pipeline.cleanup_annotated_videos()
         
+        elif data_name.lower() in ['vidstg', 'vid-stg']:
+            from pipelines.vidstg import VidSTGPipeline
+            
+            pipeline = VidSTGPipeline(
+                model=model,
+                model_name=model_name,
+                data_name=data_name,
+                annotation_path=annotation_path,
+                video_dir=video_dir,
+                output_dir=output_dir,
+                annotated_video_dir=annotated_video_dir,
+                num_frames=num_frames,
+                batch_size=batch_size,
+            )
+            
+            results, avg_metrics = pipeline.run_evaluation()
+        
+            if cleanup_after:
+                logger.info("Cleaning up annotated videos...")
+                pipeline.cleanup_annotated_videos()
+        
     
     def cleanup(self, annotated_video_dir: str = "./annotated_videos"):
         import shutil
