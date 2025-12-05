@@ -1,6 +1,6 @@
 #!/bin/bash
 export FORCE_QWENVL_VIDEO_READER=decord
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=2
 
 # Default parameters
 MODEL_NAME="qwen3vl"

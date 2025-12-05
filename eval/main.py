@@ -45,7 +45,7 @@ class STVGEvaluator:
         logger.info(f"Batch Size: {batch_size}")
         
         if model_name.lower() in ['qwen2.5vl', 'qwen2.5-vl']:
-            from eval.models.qwen_family import Qwen2_5VL
+            from models.qwen_family import Qwen2_5VL
             model = Qwen2_5VL(
                 model_path=model_path,
                 batch_size=batch_size,
@@ -57,7 +57,7 @@ class STVGEvaluator:
                 gpu_memory_utilization=gpu_memory_utilization,
             )
         elif model_name.lower() in ['qwen3vl', 'qwen3-vl']:
-            from eval.models.qwen_family import Qwen3VL
+            from models.qwen_family import Qwen3VL
             model = Qwen3VL(
                 model_path=model_path,
                 batch_size=batch_size,

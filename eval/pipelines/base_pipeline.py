@@ -145,7 +145,7 @@ class BasePipeline(ABC):
             
             result = {
                 'video_name': sample['video_name'],
-                'query_en': sample['query_en'],
+                'query_en': sample['query'],
                 'full_response': full_response,
                 'parsed': parsed,
                 
