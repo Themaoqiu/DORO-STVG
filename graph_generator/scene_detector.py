@@ -134,3 +134,24 @@ class SceneDetector:
         
         with open(output_file, 'a', encoding='utf-8') as f:
             f.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+
+if __name__ == '__main__':
+    import traceback
+    TEST_VIDEO = Path(__file__).resolve().parents[1] / "anno_videos" / "50_TM5MPJIq1Is_annotated_100frames.mp4"
+    OUTPUT_JSONL = Path(__file__).resolve().parent / "scene_results.jsonl"
+
+    try:
+        if not TEST_VIDEO.exists():
+            print(f"Test video not found: {TEST_VIDEO}")
+        else:
+            det = SceneDetector(str(TEST_VIDEO), detector_type="adaptive", threshold=3.0, min_scene_duration=0.5)
+            clips = det.detect()
+            print(f"Detected {len(clips)} clips:")
+            for c in clips:
+                print(f"  id={c.clip_id} start={c.start_time:.3f}s end={c.end_time:.3f}s dur={c.duration:.3f}s frames={c.num_frames}")
+            det.save_to_jsonl(str(OUTPUT_JSONL), clips)
+            print(f"Saved JSONL to {OUTPUT_JSONL}")
+    except Exception:
+        print("Error while running detection:\n")
+        traceback.print_exc()
