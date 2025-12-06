@@ -1,17 +1,18 @@
 """
-Run a quick test of graph_generator.scene_detector.SceneDetector.
-If dependencies are missing it prints install instructions.
+Test SceneDetector with JSONL save functionality.
 """
 import sys
+import json
 import traceback
 from pathlib import Path
 
 TEST_VIDEO = Path(__file__).resolve().parents[1] / "anno_videos" / "50_TM5MPJIq1Is_annotated_100frames.mp4"
+OUTPUT_JSONL = Path(__file__).resolve().parent / "scene_results.jsonl"
 
 
 def main():
     try:
-        from graph_generator.scene_detector import SceneDetector
+        from graph_generator.scene_detector import SceneDetector, SceneClip
     except ImportError as e:
         print("ImportError:", e)
         print()
@@ -26,11 +27,30 @@ def main():
         return 2
 
     try:
-        det = SceneDetector(str(TEST_VIDEO), detector_type="adaptive", threshold=3.0, min_scene_duration=0.5)
+        print(f"Testing SceneDetector on {TEST_VIDEO.name}...\n")
+        
+        det = SceneDetector(
+            str(TEST_VIDEO),
+            detector_type="adaptive",
+            threshold=3.0,
+            min_scene_duration=0.5
+        )
+        
+        print(f"Detecting scenes...")
         clips = det.detect()
-        print(f"Detected {len(clips)} clips:")
+        
+        print(f"Detected {len(clips)} clips:\n")
         for c in clips:
-            print(f"  id={c.clip_id} start={c.start_time:.3f}s end={c.end_time:.3f}s dur={c.duration:.3f}s frames={c.num_frames}")
+            print(f"  {c}")
+        
+        print(f"\nSaving to JSONL: {OUTPUT_JSONL}")
+        det.save_to_jsonl(str(OUTPUT_JSONL), clips)
+        
+        print(f"\nJSONL content:")
+        with open(OUTPUT_JSONL, 'r') as f:
+            data = json.loads(f.readline())
+            print(json.dumps(data, indent=2, ensure_ascii=False))
+        
         return 0
     except Exception:
         print("Error while running detection:\n")
