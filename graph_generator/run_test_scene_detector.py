@@ -11,7 +11,7 @@ TEST_VIDEO = Path(__file__).resolve().parents[1] / "anno_videos" / "50_TM5MPJIq1
 
 def main():
     try:
-        from .scene_detector import SceneDetector
+        from graph_generator.scene_detector import SceneDetector
     except ImportError as e:
         print("ImportError:", e)
         print()
