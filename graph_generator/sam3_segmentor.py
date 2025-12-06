@@ -178,3 +178,34 @@ class SAM3Segmentor:
                     
                     mask = (frame_data['mask'] * 255).astype(np.uint8)
                     cv2.imwrite(str(mask_dir / f"frame_{frame_idx:06d}.png"), mask)
+
+
+if __name__ == '__main__':
+    import traceback
+    TEST_VIDEO = Path(__file__).resolve().parents[1] / "anno_videos" / "50_TM5MPJIq1Is_annotated_100frames.mp4"
+    TRACKS_OUT = Path(__file__).resolve().parent / "sam3_tracks.jsonl"
+    MASKS_OUT = Path(__file__).resolve().parent / "sam3_masks"
+
+    try:
+        if not TEST_VIDEO.exists():
+            print(f"Test video not found: {TEST_VIDEO}")
+        else:
+            from .scene_detector import SceneDetector
+            sd = SceneDetector(str(TEST_VIDEO))
+            clips = sd.detect()
+            print(f"Detected {len(clips)} clips, processing first clip with SAM3 (max 8 frames)")
+
+            if not clips:
+                print("No clips to process")
+            else:
+                seg = SAM3Segmentor(max_frames_per_shot=8, text_prompt="person")
+                first = clips[0]
+                frames = seg.extract_shot_frames(str(TEST_VIDEO), first)
+                tracks = seg.process_shot(frames, first)
+                print(f"Found {sum(len(v.frames) for v in tracks)} frames across {len(tracks)} tracks")
+                seg.save_tracks_to_jsonl(str(TRACKS_OUT), str(TEST_VIDEO), {first.clip_id: tracks})
+                seg.save_masks(str(MASKS_OUT), str(TEST_VIDEO), {first.clip_id: tracks})
+                print(f"Saved tracks to {TRACKS_OUT} and masks to {MASKS_OUT}")
+    except Exception:
+        print("Error in SAM3 test:\n")
+        traceback.print_exc()
