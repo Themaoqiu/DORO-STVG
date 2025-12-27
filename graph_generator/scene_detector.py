@@ -1,9 +1,10 @@
-from dataclasses import dataclass, asdict
-from pathlib import Path
-from typing import List, Optional, Dict, Any
-import cv2
 import json
-from scenedetect import detect, ContentDetector, AdaptiveDetector
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import cv2
+from scenedetect import AdaptiveDetector, ContentDetector, detect
 
 
 @dataclass

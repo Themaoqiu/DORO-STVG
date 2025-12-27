@@ -1,11 +1,11 @@
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Dict, Optional, Any
-import json
-import fire
+from typing import Any, Dict, List, Optional
 
-from scene_detector import SceneDetector, SceneClip
-from yolo_tracker import YOLOTracker, GlobalTrack
+import fire
+from scene_detector import SceneClip, SceneDetector
+from yolo_tracker import GlobalTrack, YOLOTracker
 
 
 @dataclass
@@ -16,20 +16,26 @@ class ObjectNode:
     start_frame: int
     end_frame: int
     clip_ids: List[int]
+    bboxes: Optional[Dict[int, List[float]]] = None
     is_dynamic: Optional[bool] = None
     appearance: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data = {
             'node_id': self.node_id,
             'global_track_id': self.global_track_id,
             'object_class': self.object_class,
             'start_frame': self.start_frame,
             'end_frame': self.end_frame,
             'clip_ids': self.clip_ids,
-            'is_dynamic': self.is_dynamic,
-            'appearance': self.appearance,
         }
+        if self.bboxes:
+            data['bboxes'] = self.bboxes
+        if self.is_dynamic is not None:
+            data['is_dynamic'] = self.is_dynamic
+        if self.appearance:
+            data['appearance'] = self.appearance
+        return data
 
 
 @dataclass
@@ -163,6 +169,11 @@ class SceneGraphGenerator:
         # Step 3: Build Object Nodes
         print(f"[3/3] Building object nodes...")
         for g_track in global_tracks:
+            bboxes = {}
+            for local_track in g_track.local_tracks:
+                for frame_idx, frame_data in local_track.frames.items():
+                    bboxes[frame_idx] = frame_data['box']
+            
             obj_node = ObjectNode(
                 node_id=f"obj_{g_track.object_class}_{g_track.global_id}",
                 global_track_id=g_track.global_id,
@@ -170,6 +181,7 @@ class SceneGraphGenerator:
                 start_frame=g_track.start_frame,
                 end_frame=g_track.end_frame,
                 clip_ids=list(set(t.clip_id for t in g_track.local_tracks)),
+                bboxes=bboxes,
             )
             graph.object_nodes.append(obj_node.to_dict())
             

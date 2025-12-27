@@ -1,12 +1,12 @@
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Dict, Optional, Any
-import json
+from typing import Any, Dict, List, Optional
+
 import cv2
 import numpy as np
-from ultralytics import YOLO
-
 from scene_detector import SceneClip
+from ultralytics import YOLO
 
 
 @dataclass
@@ -247,6 +247,7 @@ class YOLOTracker:
 
 if __name__ == '__main__':
     import traceback
+
     from .scene_detector import SceneDetector
     
     TEST_VIDEO = Path(__file__).resolve().parents[1] / "anno_videos" / "50_TM5MPJIq1Is_annotated_100frames.mp4"
