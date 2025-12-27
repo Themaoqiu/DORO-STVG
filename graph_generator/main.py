@@ -4,8 +4,8 @@ from typing import List, Dict, Optional, Any
 import json
 import fire
 
-from .scene_detector import SceneDetector, SceneClip
-from .yolo_tracker import YOLOTracker, GlobalTrack
+from scene_detector import SceneDetector, SceneClip
+from yolo_tracker import YOLOTracker, GlobalTrack
 
 
 @dataclass

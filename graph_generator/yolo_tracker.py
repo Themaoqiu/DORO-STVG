@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-from .scene_detector import SceneClip
+from scene_detector import SceneClip
 
 
 @dataclass
