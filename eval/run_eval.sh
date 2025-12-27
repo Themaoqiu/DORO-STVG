@@ -52,7 +52,7 @@ echo "=========================================="
 echo ""
 
 # Run evaluation
-python eval/main.py run \
+python main.py run \
   --model_name="$MODEL_NAME" \
   --model_path="$MODEL_PATH" \
   --data_name="$DATA_NAME" \

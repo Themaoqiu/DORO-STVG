@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+import sys
 import json
 import cv2
 import numpy as np
@@ -8,7 +9,14 @@ import torch
 from transformers import Sam3VideoModel, Sam3VideoProcessor
 from accelerate import Accelerator
 
-from .scene_detector import SceneClip
+project_root = Path(__file__).resolve().parents[1]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+try:
+    from .scene_detector import SceneClip, SceneDetector
+except (ImportError, ValueError):
+    from graph_generator.scene_detector import SceneClip, SceneDetector
 
 
 @dataclass
@@ -85,8 +93,8 @@ class SAM3Segmentor:
         inference_session = self.processor.init_video_session(
             video=frames,
             inference_device=self.device,
-            processing_device="cpu",
-            video_storage_device="cpu",
+            processing_device=self.device,
+            video_storage_device=self.device,
             dtype=self.dtype,
         )
         
@@ -185,26 +193,31 @@ if __name__ == '__main__':
     TEST_VIDEO = Path(__file__).resolve().parents[1] / "anno_videos" / "50_TM5MPJIq1Is_annotated_100frames.mp4"
     TRACKS_OUT = Path(__file__).resolve().parent / "sam3_tracks.jsonl"
     MASKS_OUT = Path(__file__).resolve().parent / "sam3_masks"
+    model_name = "/home/wangxingjian/model/sam3"
 
     try:
         if not TEST_VIDEO.exists():
             print(f"Test video not found: {TEST_VIDEO}")
         else:
-            from .scene_detector import SceneDetector
             sd = SceneDetector(str(TEST_VIDEO))
             clips = sd.detect()
-            print(f"Detected {len(clips)} clips, processing first clip with SAM3 (max 8 frames)")
+            print(f"Detected {len(clips)} clips, processing all clips with SAM3 (max 128 frames each)")
 
             if not clips:
                 print("No clips to process")
             else:
-                seg = SAM3Segmentor(max_frames_per_shot=8, text_prompt="person")
-                first = clips[0]
-                frames = seg.extract_shot_frames(str(TEST_VIDEO), first)
-                tracks = seg.process_shot(frames, first)
-                print(f"Found {sum(len(v.frames) for v in tracks)} frames across {len(tracks)} tracks")
-                seg.save_tracks_to_jsonl(str(TRACKS_OUT), str(TEST_VIDEO), {first.clip_id: tracks})
-                seg.save_masks(str(MASKS_OUT), str(TEST_VIDEO), {first.clip_id: tracks})
+                seg = SAM3Segmentor(model_name, max_frames_per_shot=128, text_prompt="person")
+                all_tracks = {}
+                for idx, clip in enumerate(clips):
+                    print(f"Processing clip {idx} (clip_id={clip.clip_id}, start={clip.start_frame}, frames={clip.num_frames})")
+                    frames = seg.extract_shot_frames(str(TEST_VIDEO), clip)
+                    tracks = seg.process_shot(frames, clip)
+                    print(f"  -> Found {sum(len(t.frames) for t in tracks)} mask-frames across {len(tracks)} tracks for clip_id={clip.clip_id}")
+                    all_tracks[clip.clip_id] = tracks
+
+                # 保存所有 clip 的结果
+                seg.save_tracks_to_jsonl(str(TRACKS_OUT), str(TEST_VIDEO), all_tracks)
+                seg.save_masks(str(MASKS_OUT), str(TEST_VIDEO), all_tracks)
                 print(f"Saved tracks to {TRACKS_OUT} and masks to {MASKS_OUT}")
     except Exception:
         print("Error in SAM3 test:\n")

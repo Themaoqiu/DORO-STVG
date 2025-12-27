@@ -26,6 +26,12 @@ source scripts/activate_env.sh ~/.virtualenvs/stvg/dev
 ### 4. Install package
 
 ```bash
+# install eval
+cd eval
+uv sync --active
+
+# install graph_generator
+cd graph_generator
 uv sync --active
 ```
 
@@ -73,5 +79,11 @@ source scripts/activate_env.sh /path/to/another/env
 ## Quick Start
 
 ```bash
-bash eval/run_eval.sh
+# run eval
+cd eval
+bash run_eval.sh
+
+# run graph_generator
+cd graph_generator
+bash run_generator.sh
 ```

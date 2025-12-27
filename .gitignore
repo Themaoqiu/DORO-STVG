@@ -13,6 +13,7 @@ checkpoint/
 checkpoints/
 notebooks/
 wandb/
+anno_videos/
 sweeps/
 cankao/
 .virtualenvs/
