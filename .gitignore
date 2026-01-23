@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 helpers/__pycache__
 models/__pycache__
+
 cache/
 data/
 attention_data/
@@ -16,6 +17,8 @@ wandb/
 anno_videos/
 sweeps/
 cankao/
+graph_generator/models/
+output/
 .virtualenvs/
 anno_videos/
 BREEDS-Benchmarks/

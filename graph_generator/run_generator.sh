@@ -1,9 +1,9 @@
 #!/bin/bash
-export CUDA_VISIBLE_DEVICES=4
+export CUDA_VISIBLE_DEVICES=6
 
 python -m main \
-    --video /home/wangxingjian/DORO-STVG/anno_videos/50_TM5MPJIq1Is_annotated_100frames.mp4 \
+    --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is.mkv \
     --output scene_graphs.jsonl \
-    --yolo_model /home/wangxingjian/DORO-STVG/graph_generator/models/yolo11x/yolo11x.pt \
+    --yolo_model /home/wangxingjian/DORO-STVG/graph_generator/models/yolo26x/yolo26x.pt \
     --tracker_config /home/wangxingjian/DORO-STVG/graph_generator/models/yolo11x/botsort.yaml \
-    --conf 0.3
+    --conf 0.5
