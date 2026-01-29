@@ -77,7 +77,6 @@ class SceneGraphVisualizer:
         show_labels: bool = True,
         show_ids: bool = True,
     ):
-        # 自动创建输出目录
         output_dir = Path(output_path).parent
         output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -123,7 +122,6 @@ class SceneGraphVisualizer:
         output_path: str,
         fps: Optional[float] = None,
     ):
-        # 自动创建输出目录
         output_dir = Path(output_path).parent
         output_dir.mkdir(parents=True, exist_ok=True)
         

@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
-from scene_detector import SceneClip
+from .scene_detector import SceneClip
 from ultralytics import YOLO
 
 
@@ -76,17 +76,21 @@ class GlobalTrack:
 class YOLOTracker:
     def __init__(
         self,
-        model_path: str = "yolo11x.pt",
+        model_path: str = "yolo26x.pt",
         tracker_config: str = "botsort.yaml",
         conf: float = 0.3,
         iou: float = 0.5,
         use_seg: bool = False,
+        gap_threshold: int = 5,
+        min_track_length: int = 10,
     ):
         self.model = YOLO(model_path)
         self.tracker_config = tracker_config
         self.conf = conf
         self.iou = iou
         self.use_seg = use_seg
+        self.gap_threshold = gap_threshold
+        self.min_track_length = min_track_length
         self.class_names = self.model.names
     
     def track_shot(self, video_path: str, clip: SceneClip) -> Dict[int, YOLOTrack]:
@@ -135,8 +139,10 @@ class YOLOTracker:
                 tracks[tid].add_frame(global_frame, box.tolist(), conf, mask)
         
         cap.release()
+
         return tracks
-    
+
+
     def track_video(self, video_path: str, clips: List[SceneClip]) -> Dict[int, Dict[int, YOLOTrack]]:
         all_tracks = {}
         for clip in clips:
