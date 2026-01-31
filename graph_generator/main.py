@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import fire
 from modules.scene_detector import SceneDetector
-from modules.yolo_tracker import YOLOTracker
+from modules.yolo_detector import YOLOKeyframeDetector
 from modules.graph_filter import GraphFilter, SAM3QualityFilter
 
 
@@ -122,39 +122,33 @@ class SceneGraph:
 class SceneGraphGenerator:
     def __init__(
         self,
-        yolo_model: str = "yolo11n.pt",
-        tracker_config: str = "botsort.yaml",
+        yolo_model: str,
         scene_threshold: float = 3.0,
         min_scene_duration: float = 1.0,
         conf: float = 0.25,
         iou: float = 0.5,
-        gap_threshold: int = 5,
-        min_track_length: int = 10,
         use_sam3: bool = False,
         sam3_model: str = "sam3.pt",
         sam3_redetection_interval: int = 15,
+        sam3_iou_threshold: float = 0.3,
+        skip_filter: bool = False,
         filter_min_frames: int = 30,
         filter_max_gap_ratio: float = 0.5,
         filter_min_temporal_coverage: float = 0.1,
-        filter_max_flicker_segments: int = 3,
-        filter_min_stable_segment_length: int = 15,
     ):
         self.yolo_model = yolo_model
-        self.tracker_config = tracker_config
         self.scene_threshold = scene_threshold
         self.min_scene_duration = min_scene_duration
         self.conf = conf
         self.iou = iou
-        self.gap_threshold = gap_threshold
-        self.min_track_length = min_track_length
         self.use_sam3 = use_sam3
         self.sam3_model = sam3_model
         self.sam3_redetection_interval = sam3_redetection_interval
+        self.sam3_iou_threshold = sam3_iou_threshold
+        self.skip_filter = skip_filter
         self.filter_min_frames = filter_min_frames
         self.filter_max_gap_ratio = filter_max_gap_ratio
         self.filter_min_temporal_coverage = filter_min_temporal_coverage
-        self.filter_max_flicker_segments = filter_max_flicker_segments
-        self.filter_min_stable_segment_length = filter_min_stable_segment_length
     
     def process_video(self, video_path: str, output_path: str) -> SceneGraph:
         video_name = Path(video_path).stem
@@ -167,38 +161,42 @@ class SceneGraphGenerator:
             min_scene_duration=self.min_scene_duration,
         )
         clips = scene_detector.detect()
-        fps = scene_detector._fps
 
         graph.temporal_nodes = [clip.to_dict() for clip in clips]
         print(f"  Found {len(clips)} scenes")
 
-        print(f"[2/5] Tracking objects with YOLO...")
-        tracker = YOLOTracker(
-            model_path=self.yolo_model,
-            tracker_config=self.tracker_config,
-            conf=self.conf,
-            iou=self.iou,
-            gap_threshold=self.gap_threshold,
-            min_track_length=self.min_track_length,
-        )
-        all_shot_tracks = tracker.track_video(video_path, clips)
-        global_tracks = tracker.merge_tracks(all_shot_tracks, fps=fps)
-
-        total_local = sum(len(t) for t in all_shot_tracks.values())
-        print(f"  Tracked {total_local} local tracks -> {len(global_tracks)} global tracks")
-
         if self.use_sam3:
-            print(f"[3/5] Enhancing tracks with SAM3...")
-            from modules.sam3_tracker import SAM3Tracker
+            print(f"[2/5] Detecting keyframes with YOLO...")
+            keyframe_detector = YOLOKeyframeDetector(
+                model_path=self.yolo_model,
+                conf=self.conf,
+                iou=self.iou,
+                keyframe_interval=self.sam3_redetection_interval,
+            )
+            all_detections = keyframe_detector.detect_keyframes(video_path, clips)
+            print(all_detections)
+            det_count = sum(len(dets) for clip_dets in all_detections.values() for dets in clip_dets.values())
+            print(f"  Detected {det_count} objects on keyframes")
 
+            print(f"[3/5] Tracking with SAM3...")
+            from modules.sam3_tracker import SAM3Tracker
             sam3_tracker = SAM3Tracker(
                 model_path=self.sam3_model,
-                redetection_interval=self.sam3_redetection_interval,
+                iou_threshold=self.sam3_iou_threshold,
             )
-            global_tracks = sam3_tracker.enhance_tracks(video_path, global_tracks, clips)
-            print(f"  Enhanced {len(global_tracks)} tracks with SAM3")
+            global_tracks = sam3_tracker.track_video(video_path, clips, all_detections)
+            print(f"  Tracked {len(global_tracks)} objects")
         else:
-            print(f"[3/5] Skipping SAM3 enhancement")
+            print(f"[2/5] Detecting with YOLO (no tracking)...")
+            keyframe_detector = YOLOKeyframeDetector(
+                model_path=self.yolo_model,
+                conf=self.conf,
+                iou=self.iou,
+                keyframe_interval=self.sam3_redetection_interval,
+            )
+            all_detections = keyframe_detector.detect_keyframes(video_path, clips)
+            global_tracks = keyframe_detector.detections_to_tracks(all_detections)
+            print(f"  Detected {len(global_tracks)} objects")
 
         print(f"[4/5] Building object nodes...")
         for g_track in global_tracks:
@@ -229,31 +227,35 @@ class SceneGraphGenerator:
 
         print(f"  Created {len(graph.object_nodes)} object nodes, {len(graph.edges)} edges")
 
-        print(f"[5/5] Filtering graph...")
-        if self.use_sam3:
-            graph_filter = SAM3QualityFilter(
-                min_frames=self.filter_min_frames,
-                max_gap_ratio=self.filter_max_gap_ratio,
-                min_temporal_coverage=self.filter_min_temporal_coverage,
-                max_flicker_segments=self.filter_max_flicker_segments,
-                min_stable_segment_length=self.filter_min_stable_segment_length,
-            )
+        if self.skip_filter:
+            print(f"[5/5] Skipping graph filtering")
+            print(f"  Final graph: {len(graph.object_nodes)} object nodes, {len(graph.edges)} edges")
         else:
-            graph_filter = GraphFilter(
-                min_frames=self.filter_min_frames,
-                max_gap_ratio=self.filter_max_gap_ratio,
-                min_temporal_coverage=self.filter_min_temporal_coverage,
-                max_flicker_segments=self.filter_max_flicker_segments,
-                min_stable_segment_length=self.filter_min_stable_segment_length,
-            )
+            print(f"[5/5] Filtering graph...")
+            if self.use_sam3:
+                graph_filter = SAM3QualityFilter(
+                    min_frames=self.filter_min_frames,
+                    max_gap_ratio=self.filter_max_gap_ratio,
+                    min_temporal_coverage=self.filter_min_temporal_coverage,
+                )
+            else:
+                graph_filter = GraphFilter(
+                    min_frames=self.filter_min_frames,
+                    max_gap_ratio=self.filter_max_gap_ratio,
+                    min_temporal_coverage=self.filter_min_temporal_coverage,
+                )
 
-        graph_dict = graph.to_dict()
-        filtered_graph_dict = graph_filter.filter_graph(graph_dict)
+            graph_dict = graph.to_dict()
+            filtered_graph_dict = graph_filter.filter_graph(graph_dict)
 
-        graph.object_nodes = filtered_graph_dict['object_nodes']
-        graph.edges = filtered_graph_dict['edges']
+            filtered_objects = len(filtered_graph_dict['object_nodes'])
+            removed_objects = len(graph.object_nodes) - filtered_objects
+            print(f"  Kept {filtered_objects} objects, removed {removed_objects} objects")
 
-        print(f"  Filtered to {len(graph.object_nodes)} object nodes, {len(graph.edges)} edges")
+            graph.object_nodes = filtered_graph_dict['object_nodes']
+            graph.edges = filtered_graph_dict['edges']
+
+            print(f"  Final graph: {len(graph.object_nodes)} object nodes, {len(graph.edges)} edges")
 
         graph.save_to_jsonl(output_path)
         print(f"Saved scene graph to {output_path}")
@@ -280,24 +282,34 @@ def run(
     video: str = None,
     video_dir: str = None,
     output: str = "output/scene_graphs.jsonl",
-    yolo_model: str = "yolo11n.pt",
-    tracker_config: str = "botsort.yaml",
+    yolo_model: str = "yolo26x.pt",
     scene_threshold: float = 3.0,
     min_scene_duration: float = 1.0,
     conf: float = 0.25,
     iou: float = 0.5,
-    gap_threshold: int = 5,
-    min_track_length: int = 10,
+    use_sam3: bool = True,
+    sam3_model: str = "sam3.pt",
+    sam3_redetection_interval: int = 15,
+    sam3_iou_threshold: float = 0.15,
+    skip_filter: bool = False,
+    filter_min_frames: int = 30,
+    filter_max_gap_ratio: float = 0.5,
+    filter_min_temporal_coverage: float = 0.1,
 ):
     generator = SceneGraphGenerator(
         yolo_model=yolo_model,
-        tracker_config=tracker_config,
         scene_threshold=scene_threshold,
         min_scene_duration=min_scene_duration,
         conf=conf,
         iou=iou,
-        gap_threshold=gap_threshold,
-        min_track_length=min_track_length,
+        use_sam3=use_sam3,
+        sam3_model=sam3_model,
+        sam3_iou_threshold = sam3_iou_threshold,
+        sam3_redetection_interval=sam3_redetection_interval,
+        skip_filter=skip_filter,
+        filter_min_frames=filter_min_frames,
+        filter_max_gap_ratio=filter_max_gap_ratio,
+        filter_min_temporal_coverage=filter_min_temporal_coverage,
     )
     
     if video:

@@ -1,268 +1,264 @@
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Tuple
 import sys
+import os
+import torch
 import cv2
-import numpy as np
-from ultralytics.models.sam import SAM3SemanticPredictor
 
 project_root = Path(__file__).resolve().parents[1]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
+sam3_path = project_root / "sam3"
+if str(sam3_path) not in sys.path:
+    sys.path.insert(0, str(sam3_path))
+
 from modules.scene_detector import SceneClip
-from modules.yolo_tracker import GlobalTrack
-from modules.keyframe_clustering import KeyframeClustering
+from modules.yolo_tracker import YOLOTrack, GlobalTrack
+from sam3.model_builder import build_sam3_video_predictor
+from sam3.model.sam3_tracker_utils import mask_to_box
 
 
 class SAM3Tracker:
-    def __init__(
-        self,
-        model_path: str = "sam3.pt",
-        conf: float = 0.25,
-        redetection_interval: int = 15,
-        iou_threshold: float = 0.4,
-        overlap_threshold: float = 0.6,
-        smooth_alpha: float = 0.7,
-        smooth_window: int = 3,
-    ):
-        overrides = dict(
-            conf=conf,
-            task="segment",
-            mode="predict",
-            model=model_path,
-            half=True,
-            save=False,
-        )
-        self.predictor = SAM3SemanticPredictor(overrides=overrides)
-        self.redetection_interval = redetection_interval
+    def __init__(self, model_path: str = "sam3.pt", iou_threshold: float = 0.3):
+        self.video_predictor = build_sam3_video_predictor(checkpoint_path=model_path)
         self.iou_threshold = iou_threshold
-        self.overlap_threshold = overlap_threshold
-        self.smooth_alpha = smooth_alpha
-        self.smooth_window = smooth_window
-        self.keyframe_selector = KeyframeClustering(max_interval=redetection_interval)
 
-    def enhance_tracks(
+    def track_video(
         self,
         video_path: str,
-        global_tracks: List[GlobalTrack],
         clips: List[SceneClip],
+        detections: Dict[int, Dict[int, List]],
     ) -> List[GlobalTrack]:
         cap = cv2.VideoCapture(video_path)
-        video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         cap.release()
 
-        enhanced_tracks = []
+        all_global_tracks = []
+        global_track_id = 0
 
-        for g_track in global_tracks:
-            all_frames_dict = g_track.all_frames
-
-            keyframes = self.keyframe_selector.select_keyframes(
-                all_frames_dict, video_width, video_height
-            )
-
-            if len(keyframes) < 2:
-                enhanced_tracks.append(g_track)
+        for clip in clips:
+            clip_dets = detections.get(clip.clip_id, {})
+            if not clip_dets:
                 continue
 
-            sam3_bboxes = self._propagate_track(
-                video_path,
-                g_track,
-                keyframes,
-                all_frames_dict,
+            print(f"  Processing clip {clip.clip_id} (frames {clip.start_frame}-{clip.end_frame})...")
+            clip_tracks, global_track_id = self._track_clip(
+                video_path, clip, clip_dets, global_track_id
             )
+            all_global_tracks.extend(clip_tracks)
 
-            enhanced_track = self._merge_yolo_sam3(g_track, sam3_bboxes)
-            enhanced_tracks.append(enhanced_track)
+        return all_global_tracks
 
-        return enhanced_tracks
-
-    def _propagate_track(
+    def _track_clip(
         self,
         video_path: str,
-        track: GlobalTrack,
-        keyframes: List[int],
-        yolo_frames: Dict[int, Dict],
-    ) -> Dict[int, List[float]]:
-        all_bboxes = {}
+        clip: SceneClip,
+        clip_dets: Dict[int, List],
+        start_global_id: int,
+    ) -> Tuple[List[GlobalTrack], int]:
+        session_response = self.video_predictor.handle_request(
+            request=dict(type="start_session", resource_path=video_path)
+        )
+        session_id = session_response["session_id"]
 
-        for i in range(len(keyframes)):
-            keyframe_global = keyframes[i]
-            next_keyframe = keyframes[i + 1] if i + 1 < len(keyframes) else track.end_frame
+        tracked_instances: Dict[int, Dict[int, List[float]]] = {}
+        instance_classes: Dict[int, str] = {}
+        current_obj_id = 0
 
-            segment_bboxes = self._propagate_segment(
-                video_path,
-                keyframe_global,
-                next_keyframe,
-                yolo_frames,
+        sorted_frames = sorted(clip_dets.keys())
+        if not sorted_frames:
+            self.video_predictor.handle_request(
+                request=dict(type="close_session", session_id=session_id)
+            )
+            return [], start_global_id
+
+        first_frame = sorted_frames[0]
+        first_dets = clip_dets[first_frame]
+        print(f"    First frame {first_frame}: {len(first_dets)} detections")
+
+        for det in first_dets:
+            bbox = det['box']
+            det_class = det['class']
+            bbox_xywh = self._xyxy_to_xywh_norm(bbox)
+
+            response = self.video_predictor.handle_request(
+                request=dict(
+                    type="add_prompt",
+                    session_id=session_id,
+                    frame_index=first_frame,
+                    text=det_class,
+                    bounding_boxes=[bbox_xywh],
+                    bounding_box_labels=[1],
+                )
             )
 
-            all_bboxes.update(segment_bboxes)
+            obj_id = current_obj_id
+            current_obj_id += 1
+            instance_classes[obj_id] = det_class
+            tracked_instances[obj_id] = {first_frame: bbox}
 
-        smoothed_bboxes = self._temporal_smooth(all_bboxes)
-        return smoothed_bboxes
+            self._propagate_and_collect(
+                session_id, first_frame, clip, obj_id, tracked_instances
+            )
 
-    def _propagate_segment(
+        for frame_idx in sorted_frames[1:]:
+            frame_dets = clip_dets[frame_idx]
+            for det in frame_dets:
+                bbox = det['box']
+                det_class = det['class']
+
+                match_id = self._find_matching_instance(bbox, det_class, frame_idx, tracked_instances, instance_classes)
+
+                if match_id is None:
+                    bbox_xywh = self._xyxy_to_xywh_norm(bbox)
+                    self.video_predictor.handle_request(
+                        request=dict(type="reset_session", session_id=session_id)
+                    )
+                    self.video_predictor.handle_request(
+                        request=dict(
+                            type="add_prompt",
+                            session_id=session_id,
+                            frame_index=frame_idx,
+                            text=det_class,
+                            bounding_boxes=[bbox_xywh],
+                            bounding_box_labels=[1],
+                        )
+                    )
+
+                    obj_id = current_obj_id
+                    current_obj_id += 1
+                    instance_classes[obj_id] = det_class
+                    tracked_instances[obj_id] = {frame_idx: bbox}
+
+                    self._propagate_and_collect(
+                        session_id, frame_idx, clip, obj_id, tracked_instances
+                    )
+                    print(f"    New {det_class} at frame {frame_idx}, obj_id={obj_id}")
+
+        self.video_predictor.handle_request(
+            request=dict(type="close_session", session_id=session_id)
+        )
+
+        global_tracks = self._convert_to_global_tracks(
+            tracked_instances, instance_classes, clip, start_global_id
+        )
+        print(f"    Found {len(global_tracks)} objects in clip {clip.clip_id}")
+        return global_tracks, start_global_id + len(global_tracks)
+
+    def _propagate_and_collect(
         self,
-        video_path: str,
+        session_id: str,
         start_frame: int,
-        end_frame: int,
-        yolo_frames: Dict[int, Dict],
-    ) -> Dict[int, List[float]]:
-        cap = cv2.VideoCapture(video_path)
-        bboxes = {}
+        clip: SceneClip,
+        obj_id: int,
+        tracked_instances: Dict[int, Dict[int, List[float]]],
+    ):
+        propagate_request = dict(
+            type="propagate_in_video",
+            session_id=session_id,
+            propagation_direction="both",
+            start_frame_index=start_frame,
+        )
 
-        if start_frame not in yolo_frames:
-            cap.release()
-            return bboxes
-
-        initial_bbox = yolo_frames[start_frame]['box']
-        frame_counter = 0
-
-        for frame_idx in range(start_frame, end_frame + 1):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame = cap.read()
-
-            if not ret:
-                break
-
-            if frame_idx == start_frame:
-                bboxes[frame_idx] = initial_bbox
+        for response in self.video_predictor.handle_stream_request(propagate_request):
+            frame_idx = response["frame_index"]
+            if frame_idx < clip.start_frame or frame_idx > clip.end_frame:
                 continue
 
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            self.predictor.set_image(frame_rgb)
+            outputs = response.get("outputs", {})
+            out_masks = outputs.get("out_binary_masks", None)
 
-            current_bbox = bboxes.get(frame_idx - 1, initial_bbox)
+            if out_masks is not None and len(out_masks) > 0:
+                mask_tensor = torch.tensor(out_masks[0]).unsqueeze(0).unsqueeze(0)
+                bbox_tensor = mask_to_box(mask_tensor)
+                bbox = bbox_tensor[0, 0].tolist()
+                if bbox[2] > bbox[0] and bbox[3] > bbox[1]:
+                    tracked_instances[obj_id][frame_idx] = bbox
 
-            try:
-                results = self.predictor(bboxes=[current_bbox])
+    def _xyxy_to_xywh_norm(self, bbox: List[float]) -> List[float]:
+        x1, y1, x2, y2 = bbox
+        return [
+            x1 / self.video_width,
+            y1 / self.video_height,
+            (x2 - x1) / self.video_width,
+            (y2 - y1) / self.video_height,
+        ]
 
-                if results and len(results) > 0 and hasattr(results[0], 'masks'):
-                    masks = results[0].masks
-                    if masks is not None and len(masks) > 0:
-                        mask = masks.data[0].cpu().numpy()
-                        sam_bbox = self._mask_to_bbox(mask)
-
-                        frame_counter += 1
-
-                        if frame_counter % self.redetection_interval == 0 and frame_idx in yolo_frames:
-                            yolo_box = yolo_frames[frame_idx]['box']
-
-                            if self._should_redetect(sam_bbox, yolo_box):
-                                bboxes[frame_idx] = yolo_box
-                                continue
-
-                        bboxes[frame_idx] = sam_bbox
-                    else:
-                        if frame_idx in yolo_frames:
-                            bboxes[frame_idx] = yolo_frames[frame_idx]['box']
-                else:
-                    if frame_idx in yolo_frames:
-                        bboxes[frame_idx] = yolo_frames[frame_idx]['box']
-
-            except Exception:
-                if frame_idx in yolo_frames:
-                    bboxes[frame_idx] = yolo_frames[frame_idx]['box']
-
-        cap.release()
-        return bboxes
-
-    def _mask_to_bbox(self, mask: np.ndarray) -> List[float]:
-        if mask.sum() == 0:
-            return [0, 0, 0, 0]
-
-        coords = np.where(mask > 0.5)
-        y_coords, x_coords = coords
-
-        if len(x_coords) == 0 or len(y_coords) == 0:
-            return [0, 0, 0, 0]
-
-        x1 = float(x_coords.min())
-        y1 = float(y_coords.min())
-        x2 = float(x_coords.max())
-        y2 = float(y_coords.max())
-
-        return [x1, y1, x2, y2]
-
-    def _should_redetect(self, sam_box: List[float], yolo_box: List[float]) -> bool:
-        iou = self._compute_iou(sam_box, yolo_box)
-        if iou < self.iou_threshold:
-            return True
-
-        overlap_ratio = self._compute_overlap_ratio(sam_box, yolo_box)
-        if overlap_ratio < self.overlap_threshold:
-            return True
-
-        return False
-
-    def _compute_iou(self, box1: List[float], box2: List[float]) -> float:
-        x1_inter = max(box1[0], box2[0])
-        y1_inter = max(box1[1], box2[1])
-        x2_inter = min(box1[2], box2[2])
-        y2_inter = min(box1[3], box2[3])
-
-        if x2_inter <= x1_inter or y2_inter <= y1_inter:
-            return 0.0
-
-        inter_area = (x2_inter - x1_inter) * (y2_inter - y1_inter)
-        box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
-        box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
-        union_area = box1_area + box2_area - inter_area
-
-        if union_area <= 0:
-            return 0.0
-
-        return inter_area / union_area
-
-    def _compute_overlap_ratio(self, box1: List[float], box2: List[float]) -> float:
-        x1_inter = max(box1[0], box2[0])
-        y1_inter = max(box1[1], box2[1])
-        x2_inter = min(box1[2], box2[2])
-        y2_inter = min(box1[3], box2[3])
-
-        if x2_inter <= x1_inter or y2_inter <= y1_inter:
-            return 0.0
-
-        inter_area = (x2_inter - x1_inter) * (y2_inter - y1_inter)
-        box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
-
-        if box1_area <= 0:
-            return 0.0
-
-        return inter_area / box1_area
-
-    def _temporal_smooth(self, bboxes: Dict[int, List[float]]) -> Dict[int, List[float]]:
-        if len(bboxes) <= 1:
-            return bboxes
-
-        sorted_frames = sorted(bboxes.keys())
-        smoothed = {}
-
-        for i, frame_idx in enumerate(sorted_frames):
-            if i == 0:
-                smoothed[frame_idx] = bboxes[frame_idx]
-                continue
-
-            recent_frames = sorted_frames[max(0, i - self.smooth_window):i]
-            recent_boxes = np.array([bboxes[f] for f in recent_frames])
-            avg_box = np.mean(recent_boxes, axis=0)
-
-            current_box = np.array(bboxes[frame_idx])
-            smooth_box = self.smooth_alpha * current_box + (1 - self.smooth_alpha) * avg_box
-
-            smoothed[frame_idx] = smooth_box.tolist()
-
-        return smoothed
-
-    def _merge_yolo_sam3(
+    def _find_matching_instance(
         self,
-        yolo_track: GlobalTrack,
-        sam3_bboxes: Dict[int, List[float]],
-    ) -> GlobalTrack:
-        for local_track in yolo_track.local_tracks:
-            for frame_idx in local_track.frames.keys():
-                if frame_idx in sam3_bboxes:
-                    local_track.frames[frame_idx]['box'] = sam3_bboxes[frame_idx]
+        det_bbox: List[float],
+        det_class: str,
+        frame_idx: int,
+        tracked_instances: Dict[int, Dict[int, List[float]]],
+        instance_classes: Dict[int, str],
+    ) -> int:
+        best_match_id = None
+        best_iou = self.iou_threshold
 
-        return yolo_track
+        for obj_id, frames_dict in tracked_instances.items():
+            if instance_classes[obj_id] != det_class:
+                continue
+            if frame_idx in frames_dict:
+                tracked_bbox = frames_dict[frame_idx]
+                iou = self._compute_iou(det_bbox, tracked_bbox)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_match_id = obj_id
+
+        return best_match_id
+
+    @staticmethod
+    def _compute_iou(box1: List[float], box2: List[float]) -> float:
+        x1_min, y1_min, x1_max, y1_max = box1
+        x2_min, y2_min, x2_max, y2_max = box2
+
+        inter_xmin = max(x1_min, x2_min)
+        inter_ymin = max(y1_min, y2_min)
+        inter_xmax = min(x1_max, x2_max)
+        inter_ymax = min(y1_max, y2_max)
+
+        inter_area = max(0, inter_xmax - inter_xmin) * max(0, inter_ymax - inter_ymin)
+        area1 = (x1_max - x1_min) * (y1_max - y1_min)
+        area2 = (x2_max - x2_min) * (y2_max - y2_min)
+        union = area1 + area2 - inter_area
+
+        return inter_area / union if union > 0 else 0
+
+    def _convert_to_global_tracks(
+        self,
+        tracked_instances: Dict[int, Dict[int, List[float]]],
+        instance_classes: Dict[int, str],
+        clip: SceneClip,
+        start_global_id: int,
+    ) -> List[GlobalTrack]:
+        global_tracks = []
+        global_track_id = start_global_id
+
+        for obj_id, frames_dict in tracked_instances.items():
+            if len(frames_dict) < 1:
+                continue
+
+            object_class = instance_classes[obj_id]
+            print(f"    {object_class} obj_id={obj_id}: tracked {len(frames_dict)} frames")
+
+            local_track = YOLOTrack(
+                track_id=obj_id,
+                object_class=object_class,
+                clip_id=clip.clip_id,
+                frames={
+                    f_idx: {'box': bbox, 'conf': 1.0}
+                    for f_idx, bbox in frames_dict.items()
+                },
+            )
+
+            global_track = GlobalTrack(
+                global_id=global_track_id,
+                object_class=object_class,
+                local_tracks=[local_track],
+            )
+            global_tracks.append(global_track)
+            global_track_id += 1
+
+        return global_tracks

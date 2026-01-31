@@ -2,11 +2,14 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import os
 
 import cv2
 import numpy as np
 from .scene_detector import SceneClip
 from ultralytics import YOLO
+
+os.environ['YOLO_VERBOSE'] = 'False'
 
 
 @dataclass
@@ -84,7 +87,7 @@ class YOLOTracker:
         gap_threshold: int = 5,
         min_track_length: int = 10,
     ):
-        self.model = YOLO(model_path)
+        self.model = YOLO(model_path, verbose=False)
         self.tracker_config = tracker_config
         self.conf = conf
         self.iou = iou
@@ -112,6 +115,7 @@ class YOLOTracker:
                 conf=self.conf,
                 iou=self.iou,
                 verbose=False,
+                imgsz=640,
             )[0]
             
             if results.boxes is None or not results.boxes.is_track:
