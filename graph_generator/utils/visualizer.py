@@ -2,7 +2,7 @@ import json
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 import random
 
 
@@ -76,6 +76,7 @@ class SceneGraphVisualizer:
         fps: Optional[float] = None,
         show_labels: bool = True,
         show_ids: bool = True,
+        use_ffmpeg: bool = True,  # 新增:使用ffmpeg后处理
     ):
         output_dir = Path(output_path).parent
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -93,8 +94,16 @@ class SceneGraphVisualizer:
         
         print(f"Video info: {width}x{height}, {fps:.2f} fps")
         
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        # 使用ffmpeg时,先写入临时文件
+        if use_ffmpeg:
+            import tempfile
+            temp_output = tempfile.NamedTemporaryFile(suffix='.avi', delete=False).name
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')  # MJPEG兼容性好
+            out = cv2.VideoWriter(temp_output, fourcc, fps, (width, height))
+        else:
+            # 直接输出(可能变绿)
+            fourcc = cv2.VideoWriter_fourcc(*'avc1')  # 尝试H.264
+            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
         
         if not out.isOpened():
             raise ValueError(f"Cannot create output video: {output_path}")
@@ -114,13 +123,50 @@ class SceneGraphVisualizer:
         
         cap.release()
         out.release()
-        print(f"Saved annotated video to {output_path}")
+        
+        # 使用ffmpeg重新编码为高兼容性mp4
+        if use_ffmpeg:
+            print("Re-encoding with ffmpeg for better compatibility...")
+            import subprocess
+            import os
+            import shutil
+            
+            cmd = [
+                "ffmpeg",  # 使用系统PATH中的ffmpeg
+                "-i", temp_output,
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-crf", "18",  # 高质量
+                "-pix_fmt", "yuv420p",  # 兼容性色彩格式
+                "-movflags", "+faststart",
+                "-y",
+                output_path
+            ]
+            
+            try:
+                subprocess.run(cmd, check=True, capture_output=True)
+                os.remove(temp_output)  # 删除临时文件
+                print(f"✅ Saved annotated video to {output_path}")
+            except subprocess.CalledProcessError as e:
+                print(f"⚠️  FFmpeg failed, using temporary file: {temp_output}")
+                print(f"Error: {e.stderr.decode()}")
+                # 如果ffmpeg失败,至少保留临时文件
+                shutil.move(temp_output, output_path)
+                print(f"Saved (without re-encoding) to {output_path}")
+            except FileNotFoundError:
+                print("⚠️  FFmpeg not found. Please install: brew install ffmpeg")
+                print("   Using OpenCV output (may have compatibility issues)")
+                shutil.move(temp_output, output_path)
+                print(f"Saved to {output_path}")
+        else:
+            print(f"Saved annotated video to {output_path}")
     
     def visualize_scene(
         self,
         clip_id: int,
         output_path: str,
         fps: Optional[float] = None,
+        use_ffmpeg: bool = True,  # 新增
     ):
         output_dir = Path(output_path).parent
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -142,8 +188,14 @@ class SceneGraphVisualizer:
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        if use_ffmpeg:
+            import tempfile
+            temp_output = tempfile.NamedTemporaryFile(suffix='.avi', delete=False).name
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+            out = cv2.VideoWriter(temp_output, fourcc, fps, (width, height))
+        else:
+            fourcc = cv2.VideoWriter_fourcc(*'avc1')
+            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
         
         cap.set(cv2.CAP_PROP_POS_FRAMES, clip['start_frame'])
         
@@ -157,7 +209,39 @@ class SceneGraphVisualizer:
         
         cap.release()
         out.release()
-        print(f"Saved clip {clip_id} to {output_path}")
+        
+        if use_ffmpeg:
+            print("Re-encoding with ffmpeg...")
+            import subprocess
+            import os
+            import shutil
+            
+            cmd = [
+                "ffmpeg",  # 使用系统PATH中的ffmpeg
+                "-i", temp_output,
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-crf", "18",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                "-y",
+                output_path
+            ]
+            
+            try:
+                subprocess.run(cmd, check=True, capture_output=True)
+                os.remove(temp_output)
+                print(f"✅ Saved clip {clip_id} to {output_path}")
+            except subprocess.CalledProcessError as e:
+                print(f"⚠️  FFmpeg failed: {e.stderr.decode()}")
+                shutil.move(temp_output, output_path)
+                print(f"Saved clip {clip_id} to {output_path}")
+            except FileNotFoundError:
+                print("⚠️  FFmpeg not found. Please install: brew install ffmpeg")
+                shutil.move(temp_output, output_path)
+                print(f"Saved clip {clip_id} to {output_path}")
+        else:
+            print(f"Saved clip {clip_id} to {output_path}")
     
     def print_summary(self):
         print(f"\n{'='*60}")

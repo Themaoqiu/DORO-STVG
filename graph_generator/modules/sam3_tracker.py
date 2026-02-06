@@ -115,6 +115,7 @@ class SAM3Tracker:
                 ret, frame_image = cap.read()
                 if not ret:
                     frame_image = None
+            sam3_boxes = self._collect_frame_boxes(tracked_instances, frame_idx)
             for det_index, det in enumerate(frame_dets):
                 det_mask = self._get_detection_mask(
                     session_id=session_id,
@@ -150,6 +151,7 @@ class SAM3Tracker:
                         det_class=det["class"],
                         match_id=match_id,
                         match_info=match_info,
+                        sam3_boxes=sam3_boxes,
                     )
 
                 if match_id is not None:
@@ -348,6 +350,7 @@ class SAM3Tracker:
         det_class: str,
         match_id: Optional[int],
         match_info: Dict[str, Any],
+        sam3_boxes: List[Tuple[int, List[float]]],
     ) -> None:
         base_dir = self.match_output_dir
         if not base_dir:
@@ -355,6 +358,19 @@ class SAM3Tracker:
         os.makedirs(base_dir, exist_ok=True)
 
         image = frame.copy()
+        for obj_id, box in sam3_boxes:
+            x1, y1, x2, y2 = map(int, box)
+            cv2.rectangle(image, (x1, y1), (x2, y2), (255, 128, 0), 1)
+            cv2.putText(
+                image,
+                f"id:{obj_id}",
+                (x1, max(0, y1 - 4)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (255, 128, 0),
+                1,
+                cv2.LINE_AA,
+            )
         det_x1, det_y1, det_x2, det_y2 = map(int, det_box)
         cv2.rectangle(image, (det_x1, det_y1), (det_x2, det_y2), (0, 255, 0), 2)
         cv2.putText(
@@ -387,6 +403,22 @@ class SAM3Tracker:
         filename = f"clip_{clip_id}_frame_{frame_idx}_det_{det_index}.jpg"
         path = os.path.join(base_dir, filename)
         cv2.imwrite(path, image)
+
+    @staticmethod
+    def _collect_frame_boxes(
+        tracked_instances: Dict[int, Dict[int, Dict[str, Any]]],
+        frame_idx: int,
+    ) -> List[Tuple[int, List[float]]]:
+        boxes: List[Tuple[int, List[float]]] = []
+        for obj_id, frames_dict in tracked_instances.items():
+            frame_data = frames_dict.get(frame_idx)
+            if not frame_data:
+                continue
+            box = frame_data.get("box")
+            if box is None:
+                continue
+            boxes.append((obj_id, box))
+        return boxes
 
     def _xyxy_to_xywh_norm(self, bbox: List[float]) -> List[float]:
         x1, y1, x2, y2 = bbox
