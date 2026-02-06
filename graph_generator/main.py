@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import fire
 from modules.scene_detector import SceneDetector
@@ -131,6 +131,9 @@ class SceneGraphGenerator:
         sam3_model: str = "sam3.pt",
         sam3_redetection_interval: int = 15,
         sam3_iou_threshold: float = 0.3,
+        sam3_mask_output_dir: Optional[str] = None,
+        sam3_match_output_dir: Optional[str] = None,
+        sam3_match_log_path: Optional[str] = None,
         skip_filter: bool = False,
         filter_min_frames: int = 30,
         filter_max_gap_ratio: float = 0.5,
@@ -145,6 +148,9 @@ class SceneGraphGenerator:
         self.sam3_model = sam3_model
         self.sam3_redetection_interval = sam3_redetection_interval
         self.sam3_iou_threshold = sam3_iou_threshold
+        self.sam3_mask_output_dir = sam3_mask_output_dir
+        self.sam3_match_output_dir = sam3_match_output_dir
+        self.sam3_match_log_path = sam3_match_log_path
         self.skip_filter = skip_filter
         self.filter_min_frames = filter_min_frames
         self.filter_max_gap_ratio = filter_max_gap_ratio
@@ -174,15 +180,15 @@ class SceneGraphGenerator:
                 keyframe_interval=self.sam3_redetection_interval,
             )
             all_detections = keyframe_detector.detect_keyframes(video_path, clips)
-            print(all_detections)
-            det_count = sum(len(dets) for clip_dets in all_detections.values() for dets in clip_dets.values())
-            print(f"  Detected {det_count} objects on keyframes")
 
             print(f"[3/5] Tracking with SAM3...")
             from modules.sam3_tracker import SAM3Tracker
             sam3_tracker = SAM3Tracker(
                 model_path=self.sam3_model,
                 iou_threshold=self.sam3_iou_threshold,
+                mask_output_dir=self.sam3_mask_output_dir,
+                match_output_dir=self.sam3_match_output_dir,
+                match_log_path=self.sam3_match_log_path,
             )
             global_tracks = sam3_tracker.track_video(video_path, clips, all_detections)
             print(f"  Tracked {len(global_tracks)} objects")
@@ -290,7 +296,10 @@ def run(
     use_sam3: bool = True,
     sam3_model: str = "sam3.pt",
     sam3_redetection_interval: int = 15,
-    sam3_iou_threshold: float = 0.15,
+    sam3_iou_threshold: float = 0.4,
+    sam3_mask_output_dir: str = None,
+    sam3_match_output_dir: str = None,
+    sam3_match_log_path: str = None,
     skip_filter: bool = False,
     filter_min_frames: int = 30,
     filter_max_gap_ratio: float = 0.5,
@@ -306,6 +315,9 @@ def run(
         sam3_model=sam3_model,
         sam3_iou_threshold = sam3_iou_threshold,
         sam3_redetection_interval=sam3_redetection_interval,
+        sam3_mask_output_dir=sam3_mask_output_dir,
+        sam3_match_output_dir=sam3_match_output_dir,
+        sam3_match_log_path=sam3_match_log_path,
         skip_filter=skip_filter,
         filter_min_frames=filter_min_frames,
         filter_max_gap_ratio=filter_max_gap_ratio,

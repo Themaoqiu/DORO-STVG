@@ -1,8 +1,7 @@
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 import sys
 import cv2
-import numpy as np
 from ultralytics import YOLO
 
 project_root = Path(__file__).resolve().parents[1]
@@ -43,6 +42,8 @@ class YOLOKeyframeDetector:
             for frame_idx in range(clip.start_frame, clip.end_frame + 1, self.keyframe_interval):
                 cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
                 ret, frame = cap.read()
+                if not ret:
+                    continue
 
                 results = self.model(
                     frame,
@@ -61,9 +62,11 @@ class YOLOKeyframeDetector:
 
                 detections = []
                 for box, cls, conf in zip(boxes, classes, confs):
+                    class_name = self.class_names[cls]
+                    x1, y1, x2, y2 = box.tolist()
                     detections.append({
-                        'box': box.tolist(),
-                        'class': self.class_names[cls],
+                        'box': [x1, y1, x2, y2],
+                        'class': class_name,
                         'conf': conf,
                     })
 
