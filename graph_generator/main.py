@@ -62,15 +62,22 @@ class ActionNode:
     action_label: str
     frame_idx: int
     confidence: float
+    start_frame: Optional[int] = None
+    end_frame: Optional[int] = None
     
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data = {
             'node_id': self.node_id,
             'object_node_id': self.object_node_id,
             'action_label': self.action_label,
             'frame_idx': self.frame_idx,
             'confidence': self.confidence,
         }
+        if self.start_frame is not None:
+            data['start_frame'] = self.start_frame
+        if self.end_frame is not None:
+            data['end_frame'] = self.end_frame
+        return data
 
 
 @dataclass
@@ -134,6 +141,13 @@ class SceneGraphGenerator:
         sam3_mask_output_dir: Optional[str] = None,
         sam3_match_output_dir: Optional[str] = None,
         sam3_match_log_path: Optional[str] = None,
+        use_action_detection: bool = False,
+        action_config: Optional[str] = None,
+        action_checkpoint: Optional[str] = None,
+        action_label_map: Optional[str] = None,
+        action_score_thr: float = 0.2,
+        action_topk: int = 3,
+        action_frame_interval: int = 15,
         skip_filter: bool = False,
         filter_min_frames: int = 30,
         filter_max_gap_ratio: float = 0.5,
@@ -151,6 +165,13 @@ class SceneGraphGenerator:
         self.sam3_mask_output_dir = sam3_mask_output_dir
         self.sam3_match_output_dir = sam3_match_output_dir
         self.sam3_match_log_path = sam3_match_log_path
+        self.use_action_detection = use_action_detection
+        self.action_config = action_config
+        self.action_checkpoint = action_checkpoint
+        self.action_label_map = action_label_map
+        self.action_score_thr = action_score_thr
+        self.action_topk = action_topk
+        self.action_frame_interval = action_frame_interval
         self.skip_filter = skip_filter
         self.filter_min_frames = filter_min_frames
         self.filter_max_gap_ratio = filter_max_gap_ratio
@@ -263,6 +284,31 @@ class SceneGraphGenerator:
 
             print(f"  Final graph: {len(graph.object_nodes)} object nodes, {len(graph.edges)} edges")
 
+        if self.use_action_detection:
+            from modules.action_detector import VideoMAEActionDetector, add_actions_to_graph
+
+            if not self.action_config or not self.action_checkpoint:
+                raise ValueError("Action detection requires action_config and action_checkpoint.")
+
+            action_detector = VideoMAEActionDetector(
+                config_path=self.action_config,
+                checkpoint_path=self.action_checkpoint,
+                label_map_path=self.action_label_map,
+            )
+            graph_dict = add_actions_to_graph(
+                graph.to_dict(),
+                video_path,
+                detector=action_detector,
+                fps=scene_detector._fps,
+                frame_interval=self.action_frame_interval,
+                score_thr=self.action_score_thr,
+                topk=self.action_topk,
+            )
+            graph.action_nodes = graph_dict['action_nodes']
+            graph.edges = graph_dict['edges']
+
+            print(f"  Added {len(graph.action_nodes)} action nodes")
+
         graph.save_to_jsonl(output_path)
         print(f"Saved scene graph to {output_path}")
 
@@ -300,6 +346,13 @@ def run(
     sam3_mask_output_dir: str = None,
     sam3_match_output_dir: str = None,
     sam3_match_log_path: str = None,
+    use_action_detection: bool = False,
+    action_config: str = None,
+    action_checkpoint: str = None,
+    action_label_map: str = None,
+    action_score_thr: float = 0.2,
+    action_topk: int = 3,
+    action_frame_interval: int = 15,
     skip_filter: bool = False,
     filter_min_frames: int = 30,
     filter_max_gap_ratio: float = 0.5,
@@ -318,6 +371,13 @@ def run(
         sam3_mask_output_dir=sam3_mask_output_dir,
         sam3_match_output_dir=sam3_match_output_dir,
         sam3_match_log_path=sam3_match_log_path,
+        use_action_detection=use_action_detection,
+        action_config=action_config,
+        action_checkpoint=action_checkpoint,
+        action_label_map=action_label_map,
+        action_score_thr=action_score_thr,
+        action_topk=action_topk,
+        action_frame_interval=action_frame_interval,
         skip_filter=skip_filter,
         filter_min_frames=filter_min_frames,
         filter_max_gap_ratio=filter_max_gap_ratio,
