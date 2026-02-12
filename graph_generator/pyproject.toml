@@ -15,14 +15,14 @@ dependencies = [
     "iopath>=0.1.10",
     "kernels>=0.11.3",
     "lap>=0.5.12",
-    "mmcv>=2.0.0rc4,<2.2.0",
-    "mmdet>=3.3.0",
-    "mmengine>=0.10.7",
+    "openai>=2.17.0",
     "opencv-python>=4.12.0.88",
     "pycocotools>=2.0.11",
+    "qwen-vl-utils>=0.0.14",
     "scenedetect>=0.6.7.1",
     "scikit-learn>=1.8.0",
     "setuptools>=80.9.0",
+    "timm>=1.0.24",
     "torch>=2.9.1",
     "torchvision>=0.24.1",
     "tqdm>=4.67.1",
@@ -31,7 +31,4 @@ dependencies = [
     "ultralytics>=8.4.6",
 ]
 
-[[tool.uv.index]]
-url = "https://download.openmmlab.com/mmcv/dist/cu128/torch2.9/"
-default = true
 

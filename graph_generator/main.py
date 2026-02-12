@@ -16,7 +16,7 @@ class ObjectNode:
     object_class: str
     start_frame: int
     end_frame: int
-    clip_ids: List[int]
+    shot_ids: List[int]
     bboxes: Optional[Dict[int, List[float]]] = None
     is_dynamic: Optional[bool] = None
     appearance: Optional[str] = None
@@ -28,7 +28,7 @@ class ObjectNode:
             'object_class': self.object_class,
             'start_frame': self.start_frame,
             'end_frame': self.end_frame,
-            'clip_ids': self.clip_ids,
+            'shot_ids': self.shot_ids,
         }
         if self.bboxes:
             data['bboxes'] = self.bboxes
@@ -238,21 +238,12 @@ class SceneGraphGenerator:
                 object_class=g_track.object_class,
                 start_frame=g_track.start_frame,
                 end_frame=g_track.end_frame,
-                clip_ids=list(set(t.clip_id for t in g_track.local_tracks)),
+                shot_ids=list(set(t.clip_id for t in g_track.local_tracks)),
                 bboxes=bboxes,
             )
             graph.object_nodes.append(obj_node.to_dict())
 
-            for clip_id in obj_node.clip_ids:
-                edge = Edge(
-                    edge_id=f"edge_in_shot_{obj_node.node_id}_{clip_id}",
-                    source_id=obj_node.node_id,
-                    target_id=f"shot_{clip_id}",
-                    edge_type="appears_in",
-                )
-                graph.edges.append(edge.to_dict())
-
-        print(f"  Created {len(graph.object_nodes)} object nodes, {len(graph.edges)} edges")
+        print(f"  Created {len(graph.object_nodes)} object nodes")
 
         if self.skip_filter:
             print(f"[5/5] Skipping graph filtering")

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import json
+import os
 
 import cv2
 import numpy as np
@@ -58,12 +59,6 @@ class VideoMAEActionDetector:
         return pipeline_cfg
 
     def _load_label_map(self, label_map_path: Optional[str]) -> Tuple[Dict[int, str], List[int]]:
-        if label_map_path is None:
-            label_map_path = self.cfg.get("label_file")
-        if label_map_path is None:
-            default_path = Path(__file__).resolve().parents[1] / "mmaction2/tools/data/ava/label_map.txt"
-            if default_path.exists():
-                label_map_path = str(default_path)
         if label_map_path is not None:
             label_map_path = str(label_map_path)
             path_obj = Path(label_map_path)
@@ -72,8 +67,6 @@ class VideoMAEActionDetector:
                 candidate = (config_dir / path_obj).resolve()
                 if candidate.exists():
                     label_map_path = str(candidate)
-        if label_map_path is None:
-            return {}, []
         with open(label_map_path, "r", encoding="utf-8") as f:
             label_map, _ = read_labelmap(f)
             if not label_map:
@@ -228,6 +221,8 @@ def add_actions_to_graph(
 ) -> Dict:
     boxes_by_frame: Dict[int, List[Tuple[str, List[float]]]] = {}
     for obj_node in graph.get("object_nodes", []):
+        if obj_node.get("object_class") != "person":
+            continue
         node_id = obj_node["node_id"]
         bboxes = obj_node.get("bboxes", {})
         for frame_key, box in bboxes.items():
@@ -256,7 +251,7 @@ def add_actions_to_graph(
                 "object_node_id": result.object_id,
                 "action_label": label,
                 "frame_idx": result.frame_idx,
-                "confidence": score,
+                # "confidence": score,
                 "start_frame": result.window[0],
                 "end_frame": result.window[1],
             })
@@ -274,12 +269,40 @@ def _load_graph(jsonl_path: str, video_path: str) -> Dict:
     raise ValueError(f"No graph found for video {video_path}")
 
 
+def _match_video(graph: Dict, video_path: str) -> bool:
+    graph_video = graph.get("video_path", "")
+    if graph_video == video_path:
+        return True
+    return Path(graph_video).stem == Path(video_path).stem
+
+
+def _update_jsonl_inplace(jsonl_path: str, video_path: str, graph: Dict) -> None:
+    input_path = Path(jsonl_path)
+    temp_path = input_path.with_suffix(input_path.suffix + ".tmp")
+
+    replaced = False
+    with open(input_path, "r", encoding="utf-8") as f_in, open(temp_path, "w", encoding="utf-8") as f_out:
+        for line in f_in:
+            data = json.loads(line)
+            if _match_video(data, video_path):
+                f_out.write(json.dumps(graph, ensure_ascii=False) + "\n")
+                replaced = True
+            else:
+                f_out.write(line)
+
+    if not replaced:
+        with open(temp_path, "a", encoding="utf-8") as f_out:
+            f_out.write(json.dumps(graph, ensure_ascii=False) + "\n")
+
+    os.replace(temp_path, input_path)
+
+
 def main(
     config: str,
     checkpoint: str,
     jsonl: str,
     video: str,
-    output: str,
+    output: Optional[str] = None,
     label_map: Optional[str] = None,
     fps: Optional[float] = None,
     frame_interval: int = 15,
@@ -301,10 +324,13 @@ def main(
         score_thr=score_thr,
         topk=topk,
     )
-    output_path = Path(output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(json.dumps(graph, ensure_ascii=False) + "\n")
+    if output and output != jsonl:
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(graph, ensure_ascii=False) + "\n")
+    else:
+        _update_jsonl_inplace(jsonl, video, graph)
 
 
 if __name__ == "__main__":
