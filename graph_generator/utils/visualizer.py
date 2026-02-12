@@ -255,12 +255,23 @@ class SceneGraphVisualizer:
         print(f"\nObject Nodes: {len(self.graph_data['object_nodes'])}")
         for obj in self.graph_data['object_nodes']:
             num_frames = len(obj.get('bboxes', {}))
-            print(f"  {obj['node_id']}: {num_frames} frames, clips {obj['clip_ids']}")
+            shot_ids = obj.get('shot_ids', [])
+            print(f"  {obj['node_id']}: {num_frames} frames, shots {shot_ids}")
         
         print(f"\nEdges: {len(self.graph_data['edges'])}")
         edge_types = {}
         for edge in self.graph_data['edges']:
-            edge_type = edge['edge_type']
+            if 'edge_type' in edge:
+                edge_type = edge['edge_type']
+            else:
+                if 'attention_relationship' in edge:
+                    edge_type = 'attention_relationship'
+                elif 'spatial_relationship' in edge:
+                    edge_type = 'spatial_relationship'
+                elif 'contacting_relationship' in edge:
+                    edge_type = 'contacting_relationship'
+                else:
+                    edge_type = 'unknown'
             edge_types[edge_type] = edge_types.get(edge_type, 0) + 1
         for edge_type, count in edge_types.items():
             print(f"  {edge_type}: {count}")
