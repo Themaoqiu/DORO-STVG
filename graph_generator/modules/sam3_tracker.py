@@ -276,16 +276,17 @@ class SAM3Tracker:
         frame_idx: int,
         det: Dict,
     ) -> Optional[np.ndarray]:
-        bbox_xywh = self._xyxy_to_xywh_norm(det["box"])
+        det_class = det["class"]
         self.video_predictor.handle_request(
             request=dict(type="reset_session", session_id=session_id)
         )
+        bbox_xywh = self._xyxy_to_xywh_norm(det["box"])
         response = self.video_predictor.handle_request(
             request=dict(
                 type="add_prompt",
                 session_id=session_id,
                 frame_index=frame_idx,
-                text=det["class"],
+                text=det_class,
                 bounding_boxes=[bbox_xywh],
                 bounding_box_labels=[1],
             )
