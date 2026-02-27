@@ -69,6 +69,15 @@ def _normalize_api_keys(api_keys: Union[str, Iterable[str]]) -> List[str]:
     return [str(key).strip() for key in api_keys if str(key).strip()]
 
 
+def _resolve_api_keys(api_keys: Optional[Union[str, Iterable[str]]]) -> List[str]:
+    if api_keys is None:
+        api_keys = os.getenv("API_KEYS", "")
+    keys = _normalize_api_keys(api_keys)
+    if not keys:
+        raise ValueError("api_keys is required (pass --api_keys or set API_KEYS in env)")
+    return keys
+
+
 def _load_graph(jsonl_path: str, video_path: str) -> Dict[str, Any]:
     with open(jsonl_path, "r", encoding="utf-8") as f:
         for line in f:
@@ -362,13 +371,11 @@ class RelationGenerator:
     def __init__(
         self,
         model_name: str,
-        api_keys: Union[str, Iterable[str]],
+        api_keys: Optional[Union[str, Iterable[str]]],
         max_concurrent_per_key: int = 100,
         max_retries: int = 5,
     ) -> None:
-        api_keys = _normalize_api_keys(api_keys)
-        if not api_keys:
-            raise ValueError("api_keys is required")
+        api_keys = _resolve_api_keys(api_keys)
         self.generator = StreamGenerator(
             model_name=model_name,
             api_keys=api_keys,
@@ -488,7 +495,7 @@ async def generate_relation_edges(
     graph: Dict[str, Any],
     video_path: str,
     model_name: str,
-    api_keys: Union[str, Iterable[str]],
+    api_keys: Optional[Union[str, Iterable[str]]],
     crop_output_dir: str,
     keyframe_count: int = 4,
     padding_ratio: float = 0.1,
@@ -526,7 +533,7 @@ def run(
     jsonl: str,
     video: str,
     model_name: str,
-    api_keys: Union[str, Iterable[str]],
+    api_keys: Optional[Union[str, Iterable[str]]] = None,
     output: Optional[str] = None,
     crop_output_dir: str = "output/relation_crops",
     keyframe_count: int = 4,

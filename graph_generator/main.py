@@ -130,14 +130,17 @@ class SceneGraphGenerator:
     def __init__(
         self,
         yolo_model: str,
+        tracker_backend: str = "sam3",
         scene_threshold: float = 3.0,
         min_scene_duration: float = 1.0,
         conf: float = 0.25,
         iou: float = 0.5,
-        use_sam3: bool = False,
         sam3_model: str = "sam3.pt",
+        sam2_model_cfg: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
+        sam2_checkpoint: Optional[str] = None,
         sam3_redetection_interval: int = 15,
         sam3_iou_threshold: float = 0.3,
+        sam3_overlap_threshold: float = 0.6,
         sam3_mask_output_dir: Optional[str] = None,
         sam3_match_output_dir: Optional[str] = None,
         sam3_match_log_path: Optional[str] = None,
@@ -154,14 +157,17 @@ class SceneGraphGenerator:
         filter_min_temporal_coverage: float = 0.1,
     ):
         self.yolo_model = yolo_model
+        self.tracker_backend = tracker_backend
         self.scene_threshold = scene_threshold
         self.min_scene_duration = min_scene_duration
         self.conf = conf
         self.iou = iou
-        self.use_sam3 = use_sam3
         self.sam3_model = sam3_model
+        self.sam2_model_cfg = sam2_model_cfg
+        self.sam2_checkpoint = sam2_checkpoint
         self.sam3_redetection_interval = sam3_redetection_interval
         self.sam3_iou_threshold = sam3_iou_threshold
+        self.sam3_overlap_threshold = sam3_overlap_threshold
         self.sam3_mask_output_dir = sam3_mask_output_dir
         self.sam3_match_output_dir = sam3_match_output_dir
         self.sam3_match_log_path = sam3_match_log_path
@@ -192,38 +198,51 @@ class SceneGraphGenerator:
         graph.temporal_nodes = [clip.to_dict() for clip in clips]
         print(f"  Found {len(clips)} scenes")
 
-        if self.use_sam3:
-            print(f"[2/5] Detecting keyframes with YOLO...")
-            keyframe_detector = YOLOKeyframeDetector(
-                model_path=self.yolo_model,
-                conf=self.conf,
-                iou=self.iou,
-                keyframe_interval=self.sam3_redetection_interval,
-            )
-            all_detections = keyframe_detector.detect_keyframes(video_path, clips)
+        print(f"[2/5] Detecting keyframes with YOLO...")
+        keyframe_detector = YOLOKeyframeDetector(
+            model_path=self.yolo_model,
+            conf=self.conf,
+            iou=self.iou,
+            keyframe_interval=self.sam3_redetection_interval,
+        )
+        all_detections = keyframe_detector.detect_keyframes(video_path, clips)
 
+        if self.tracker_backend == "groundedsam2":
+            print(f"[3/5] Tracking with Grounded-SAM2...")
+            from modules.groundingedsam2_tracker import GroundedSAM2Tracker
+
+            tracker = GroundedSAM2Tracker(
+                sam2_model_cfg=self.sam2_model_cfg,
+                sam2_checkpoint=self.sam2_checkpoint,
+                iou_threshold=self.sam3_iou_threshold,
+                overlap_threshold=self.sam3_overlap_threshold,
+                redetection_interval=self.sam3_redetection_interval,
+            )
+            global_tracks = tracker.track_video(video_path, clips, all_detections)
+            print(f"  Tracked {len(global_tracks)} objects")
+        elif self.tracker_backend == "sam3":
             print(f"[3/5] Tracking with SAM3...")
             from modules.sam3_tracker import SAM3Tracker
-            sam3_tracker = SAM3Tracker(
+
+            tracker = SAM3Tracker(
                 model_path=self.sam3_model,
                 iou_threshold=self.sam3_iou_threshold,
+                overlap_threshold=self.sam3_overlap_threshold,
+                redetection_interval=self.sam3_redetection_interval,
                 mask_output_dir=self.sam3_mask_output_dir,
                 match_output_dir=self.sam3_match_output_dir,
                 match_log_path=self.sam3_match_log_path,
             )
-            global_tracks = sam3_tracker.track_video(video_path, clips, all_detections)
+            global_tracks = tracker.track_video(video_path, clips, all_detections)
             print(f"  Tracked {len(global_tracks)} objects")
-        else:
-            print(f"[2/5] Detecting with YOLO (no tracking)...")
-            keyframe_detector = YOLOKeyframeDetector(
-                model_path=self.yolo_model,
-                conf=self.conf,
-                iou=self.iou,
-                keyframe_interval=self.sam3_redetection_interval,
-            )
-            all_detections = keyframe_detector.detect_keyframes(video_path, clips)
+        elif self.tracker_backend == "yolo":
+            print(f"[3/5] Using YOLO detections only (no tracking)...")
             global_tracks = keyframe_detector.detections_to_tracks(all_detections)
             print(f"  Detected {len(global_tracks)} objects")
+        else:
+            raise ValueError(
+                "Invalid tracker_backend. Expected one of: sam3, groundedsam2, yolo"
+            )
 
         print(f"[4/5] Building object nodes...")
         for g_track in global_tracks:
@@ -250,7 +269,7 @@ class SceneGraphGenerator:
             print(f"  Final graph: {len(graph.object_nodes)} object nodes, {len(graph.edges)} edges")
         else:
             print(f"[5/5] Filtering graph...")
-            if self.use_sam3:
+            if self.tracker_backend == "sam3":
                 graph_filter = SAM3QualityFilter(
                     min_frames=self.filter_min_frames,
                     max_gap_ratio=self.filter_max_gap_ratio,
@@ -326,14 +345,17 @@ def run(
     video_dir: str = None,
     output: str = "output/scene_graphs.jsonl",
     yolo_model: str = "yolo26x.pt",
+    tracker_backend: str = "sam3",
     scene_threshold: float = 3.0,
     min_scene_duration: float = 1.0,
     conf: float = 0.25,
     iou: float = 0.5,
-    use_sam3: bool = True,
     sam3_model: str = "sam3.pt",
+    sam2_model_cfg: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
+    sam2_checkpoint: str = None,
     sam3_redetection_interval: int = 15,
     sam3_iou_threshold: float = 0.4,
+    sam3_overlap_threshold: float = 0.6,
     sam3_mask_output_dir: str = None,
     sam3_match_output_dir: str = None,
     sam3_match_log_path: str = None,
@@ -351,13 +373,16 @@ def run(
 ):
     generator = SceneGraphGenerator(
         yolo_model=yolo_model,
+        tracker_backend=tracker_backend,
         scene_threshold=scene_threshold,
         min_scene_duration=min_scene_duration,
         conf=conf,
         iou=iou,
-        use_sam3=use_sam3,
         sam3_model=sam3_model,
+        sam2_model_cfg=sam2_model_cfg,
+        sam2_checkpoint=sam2_checkpoint,
         sam3_iou_threshold = sam3_iou_threshold,
+        sam3_overlap_threshold=sam3_overlap_threshold,
         sam3_redetection_interval=sam3_redetection_interval,
         sam3_mask_output_dir=sam3_mask_output_dir,
         sam3_match_output_dir=sam3_match_output_dir,
