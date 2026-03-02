@@ -88,6 +88,8 @@ class PairFrameInfo:
 class SingleFrameInfo:
     object_id: str
     object_class: str
+    object_start_frame: int
+    object_end_frame: int
     frame_idx: int
     image_path: str
 
@@ -145,10 +147,6 @@ def _update_jsonl_inplace(jsonl_path: str, video_path: str, graph: Dict[str, Any
     os.replace(temp_path, input_path)
 
 
-def _relation_list_text(items: List[str]) -> str:
-    return ", ".join(items)
-
-
 def _normalize_token(value: str) -> str:
     return "".join(ch for ch in value.lower() if ch.isalnum())
 
@@ -180,13 +178,6 @@ def _extract_relations(response: str) -> Optional[Dict[str, Optional[str]]]:
         "spatial_relationship": spatial,
         "contacting_relationship": contacting,
     }
-
-
-def _validate_relation(response: str) -> Union[Dict[str, Optional[str]], bool]:
-    relations = _extract_relations(response)
-    if relations is None:
-        return False
-    return relations
 
 
 def _extract_implicit_relations(response: str) -> Optional[List[Dict[str, str]]]:
@@ -251,13 +242,6 @@ def _extract_implicit_relations(response: str) -> Optional[List[Dict[str, str]]]
     return out
 
 
-def _validate_implicit_relation(response: str) -> Union[List[Dict[str, str]], bool]:
-    result = _extract_implicit_relations(response)
-    if result is None:
-        return False
-    return result
-
-
 def _select_evenly(items: List[int], count: int) -> List[int]:
     if count <= 0 or len(items) <= count:
         return items
@@ -305,25 +289,6 @@ def _draw_box_only(frame: Any, bbox: List[float], color: Tuple[int, int, int] = 
         return False
     cv2.rectangle(frame, (draw_x1, draw_y1), (draw_x2, draw_y2), color, 3)
     return True
-
-
-def _build_implicit_relation_prompt(object_class: str) -> str:
-    return IMPLICIT_RELATION_PROMPT.format(
-        object_class=object_class,
-        attention_list=_relation_list_text(ATTENTION_OPTIONS),
-        spatial_list=_relation_list_text(SPATIAL_OPTIONS),
-        contacting_list=_relation_list_text(CONTACTING_OPTIONS),
-    )
-
-
-def _build_prompt(object_class_a: str, object_class_b: str) -> str:
-    return PROMPT_TEMPLATE.format(
-        attention_list=_relation_list_text(ATTENTION_OPTIONS),
-        spatial_list=_relation_list_text(SPATIAL_OPTIONS),
-        contacting_list=_relation_list_text(CONTACTING_OPTIONS),
-        class_a=object_class_a,
-        class_b=object_class_b,
-    )
 
 
 def _collect_pair_crops(
@@ -382,19 +347,23 @@ def _collect_pair_crops(
     return used_frames, crop_paths, overlap_start_frame, overlap_end_frame
 
 
-def _select_single_frame(bboxes: Dict[str, List[float]]) -> Optional[int]:
+def _select_object_keyframes(
+    bboxes: Dict[str, List[float]],
+    keyframe_count: int,
+) -> List[int]:
     if not bboxes:
-        return None
+        return []
     frames = sorted(int(k) for k in bboxes.keys())
     if not frames:
-        return None
-    return frames[len(frames) // 2]
+        return []
+    return _select_evenly(frames, keyframe_count)
 
 
 def _collect_single_object_images(
     graph: Dict[str, Any],
     video_path: str,
     output_dir: str,
+    keyframe_count: int,
 ) -> List[SingleFrameInfo]:
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -406,30 +375,33 @@ def _collect_single_object_images(
 
     for obj in graph.get("object_nodes", []):
         bboxes = obj.get("bboxes", {})
-        frame_idx = _select_single_frame(bboxes)
-        if frame_idx is None:
+        keyframes = _select_object_keyframes(bboxes, keyframe_count)
+        if not keyframes:
             continue
-        box = bboxes.get(str(frame_idx))
-        if box is None:
-            continue
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        annotated = frame.copy()
-        if not _draw_box_only(annotated, box):
-            continue
+        for frame_idx in keyframes:
+            box = bboxes.get(str(frame_idx)) or bboxes.get(frame_idx)
+            if box is None:
+                continue
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            annotated = frame.copy()
+            if not _draw_box_only(annotated, box):
+                continue
 
-        image_path = obj_dir / f"{obj['node_id']}_frame_{frame_idx}.jpg"
-        cv2.imwrite(str(image_path), annotated)
-        out.append(
-            SingleFrameInfo(
-                object_id=obj["node_id"],
-                object_class=obj.get("object_class", "object"),
-                frame_idx=frame_idx,
-                image_path=str(image_path),
+            image_path = obj_dir / f"{obj['node_id']}_frame_{frame_idx}.jpg"
+            cv2.imwrite(str(image_path), annotated)
+            out.append(
+                SingleFrameInfo(
+                    object_id=obj["node_id"],
+                    object_class=obj.get("object_class", "object"),
+                    object_start_frame=int(obj.get("start_frame", frame_idx)),
+                    object_end_frame=int(obj.get("end_frame", frame_idx)),
+                    frame_idx=frame_idx,
+                    image_path=str(image_path),
+                )
             )
-        )
 
     cap.release()
     return out
@@ -488,9 +460,12 @@ def build_prompts(
                     {"type": "image", "image": path_img},
                     {
                         "type": "text",
-                        "text": _build_prompt(
-                            obj_a.get("object_class", "object"),
-                            obj_b.get("object_class", "object"),
+                        "text": PROMPT_TEMPLATE.format(
+                            attention_list=", ".join(ATTENTION_OPTIONS),
+                            spatial_list=", ".join(SPATIAL_OPTIONS),
+                            contacting_list=", ".join(CONTACTING_OPTIONS),
+                            class_a=obj_a.get("object_class", "object"),
+                            class_b=obj_b.get("object_class", "object"),
                         ),
                     },
                 ]
@@ -524,7 +499,15 @@ def _build_implicit_relation_prompts(
         prompt_id = f"{info.object_id}|{info.frame_idx}"
         prompt = [
             {"type": "image", "image": info.image_path},
-            {"type": "text", "text": _build_implicit_relation_prompt(info.object_class)},
+            {
+                "type": "text",
+                "text": IMPLICIT_RELATION_PROMPT.format(
+                    object_class=info.object_class,
+                    attention_list=", ".join(ATTENTION_OPTIONS),
+                    spatial_list=", ".join(SPATIAL_OPTIONS),
+                    contacting_list=", ".join(CONTACTING_OPTIONS),
+                ),
+            },
         ]
         prompts.append({"id": prompt_id, "prompt": prompt})
         prompt_map[prompt_id] = info
@@ -576,7 +559,7 @@ async def _generate_implicit_relations(
     async for item in generator.generate_stream(
         prompts=prompts,
         system_prompt=system_prompt,
-        validate_func=_validate_implicit_relation,
+        validate_func=lambda response: result if (result := _extract_implicit_relations(response)) is not None else False,
     ):
         if not item:
             continue
@@ -615,7 +598,7 @@ class RelationGenerator:
         async for item in self.generator.generate_stream(
             prompts=prompts,
             system_prompt=system_prompt,
-            validate_func=_validate_relation,
+            validate_func=lambda response: result if (result := _extract_relations(response)) is not None else False,
         ):
             if not item:
                 continue
@@ -736,22 +719,52 @@ def add_implicit_relation_edges(
             if edge.get("edge_scope") != "implicit" and "implicit_relationship" not in edge
         ]
 
-    edge_index = len(edges)
+    relation_frames: Dict[Tuple[str, str, str], List[Tuple[int, str, int, int]]] = {}
     for prompt_id, relations in implicit_results.items():
         info = prompt_map.get(prompt_id)
         if info is None:
             continue
         for rel in relations:
-            relation_type = rel["relation_type"]
+            relation_type = rel.get("relation_type")
+            relation_value = rel.get("relationship")
+            target_object = rel.get("other_object")
+            if not relation_type or not relation_value or not target_object:
+                continue
+            key = (info.object_id, target_object, relation_type)
+            relation_frames.setdefault(key, []).append(
+                (
+                    info.frame_idx,
+                    relation_value,
+                    info.object_start_frame,
+                    info.object_end_frame,
+                )
+            )
+
+    edge_index = len(edges)
+    for (source_id, target_object, relation_type), frame_values in relation_frames.items():
+        if not frame_values:
+            continue
+        frame_values.sort(key=lambda item: item[0])
+        keyframes = [item[0] for item in frame_values]
+        relations = [item[1] for item in frame_values]
+        object_start_frame = min(item[2] for item in frame_values)
+        object_end_frame = max(item[3] for item in frame_values)
+        segments = _aggregate_segments(
+            keyframes,
+            relations,
+            first_segment_start=object_start_frame,
+            last_segment_end=object_end_frame,
+        )
+        for relation, start_frame, end_frame in segments:
             edges.append(
                 {
                     "edge_id": f"edge_rel_implicit_{edge_index}",
-                    "source_id": info.object_id,
-                    "target_object": rel["other_object"],
-                    relation_type: rel["relationship"],
+                    "source_id": source_id,
+                    "target_object": target_object,
+                    relation_type: relation,
                     "edge_scope": "implicit",
-                    "start_frame": info.frame_idx,
-                    "end_frame": info.frame_idx,
+                    "start_frame": start_frame,
+                    "end_frame": end_frame,
                 }
             )
             edge_index += 1
@@ -804,6 +817,7 @@ async def generate_relation_edges(
             graph=graph,
             video_path=video_path,
             output_dir=implicit_output_dir,
+            keyframe_count=keyframe_count,
         )
         implicit_prompts, prompt_map = _build_implicit_relation_prompts(single_infos)
         if implicit_prompts:

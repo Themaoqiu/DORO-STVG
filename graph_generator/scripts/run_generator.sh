@@ -22,7 +22,8 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #     --iou 0.5 \
 #     --sam2_model_cfg "${SAM2_MODEL_CFG}" \
 #     --sam2_checkpoint "${SAM2_CHECKPOINT}" \
-#     --sam3_redetection_interval=15 \
+#     --sam3_redetection_interval 15 \
+#     --filter_min_frames 5
 
 # source /home/wangxingjian/DORO-STVG/graph_generator/.venv/mmaction/bin/activate
 # export PYTHONPATH="/home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2:${PYTHONPATH}"
@@ -38,15 +39,15 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
 #   --model_name gemini-3-flash-preview
 
-python -m modules.relation_generator \
-  --jsonl scene_graphs.jsonl \
-  --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
-  --model_name gemini-3-flash-preview \
-
-# python -m modules.reference_edge_generator \
+# python -m modules.relation_generator \
 #   --jsonl scene_graphs.jsonl \
 #   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
 #   --model_name gemini-3-flash-preview \
-#   --max_pairs_per_object 3 \
-#   --similarity_threshold 0.35 \
-#   --verbose True
+
+python -m modules.reference_edge_generator \
+  --jsonl scene_graphs.jsonl \
+  --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
+  --model_name gemini-3-flash-preview \
+  --max_pairs_per_object 3 \
+  --similarity_threshold 0.35 \
+  --verbose True

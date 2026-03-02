@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Union
 import fire
 from modules.scene_detector import SceneDetector
 from modules.yolo_detector import YOLOKeyframeDetector
-from modules.graph_filter import GraphFilter, SAM3QualityFilter
+from modules.graph_filter import GraphFilter
 
 
 @dataclass
@@ -152,9 +152,7 @@ class SceneGraphGenerator:
         action_topk: int = 3,
         action_frame_interval: int = 15,
         skip_filter: bool = False,
-        filter_min_frames: int = 30,
-        filter_max_gap_ratio: float = 0.5,
-        filter_min_temporal_coverage: float = 0.1,
+        filter_min_frames: int = 5,
     ):
         self.yolo_model = yolo_model
         self.tracker_backend = tracker_backend
@@ -180,8 +178,6 @@ class SceneGraphGenerator:
         self.action_frame_interval = action_frame_interval
         self.skip_filter = skip_filter
         self.filter_min_frames = filter_min_frames
-        self.filter_max_gap_ratio = filter_max_gap_ratio
-        self.filter_min_temporal_coverage = filter_min_temporal_coverage
     
     def process_video(self, video_path: str, output_path: str) -> SceneGraph:
         video_name = Path(video_path).stem
@@ -269,18 +265,7 @@ class SceneGraphGenerator:
             print(f"  Final graph: {len(graph.object_nodes)} object nodes, {len(graph.edges)} edges")
         else:
             print(f"[5/5] Filtering graph...")
-            if self.tracker_backend == "sam3":
-                graph_filter = SAM3QualityFilter(
-                    min_frames=self.filter_min_frames,
-                    max_gap_ratio=self.filter_max_gap_ratio,
-                    min_temporal_coverage=self.filter_min_temporal_coverage,
-                )
-            else:
-                graph_filter = GraphFilter(
-                    min_frames=self.filter_min_frames,
-                    max_gap_ratio=self.filter_max_gap_ratio,
-                    min_temporal_coverage=self.filter_min_temporal_coverage,
-                )
+            graph_filter = GraphFilter(min_frames=self.filter_min_frames)
 
             graph_dict = graph.to_dict()
             filtered_graph_dict = graph_filter.filter_graph(graph_dict)
@@ -367,9 +352,7 @@ def run(
     action_topk: int = 3,
     action_frame_interval: int = 15,
     skip_filter: bool = False,
-    filter_min_frames: int = 30,
-    filter_max_gap_ratio: float = 0.5,
-    filter_min_temporal_coverage: float = 0.1,
+    filter_min_frames: int = 5,
 ):
     generator = SceneGraphGenerator(
         yolo_model=yolo_model,
@@ -396,8 +379,6 @@ def run(
         action_frame_interval=action_frame_interval,
         skip_filter=skip_filter,
         filter_min_frames=filter_min_frames,
-        filter_max_gap_ratio=filter_max_gap_ratio,
-        filter_min_temporal_coverage=filter_min_temporal_coverage,
     )
     
     if video:
