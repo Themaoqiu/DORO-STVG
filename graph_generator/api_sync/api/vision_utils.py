@@ -83,8 +83,8 @@ def build_image_message(user_prompt: List[Dict[str, Any]]) -> Tuple[List[Dict[st
             if image_value is None:
                 raise ValueError("Image item must provide 'image' or 'image_path'")
             processed_content.append({
-                "type": "image",
-                "image": image_value
+                "type": "image_url",
+                "image_url": {"url": image_value},
             })
         else:
             processed_content.append(item)

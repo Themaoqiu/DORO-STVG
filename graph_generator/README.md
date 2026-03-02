@@ -2,9 +2,9 @@
 
 ## Install dependencies
 
-### yolo and sam3
+### yolo and sam
 
-Install yolo and sam3 dependencies.
+Install yolo and sam dependencies.
 ```bash
 cd graph_generator
 uv venv .venv/main --python 3.11
@@ -12,10 +12,12 @@ source .venv/main/bin/activate
 uv sync
 ```
 
-Download yolo weights and sam3 checkpoint.
+Download yolo weights and sam checkpoint.
 ```bash
-hf download Ultralytics/YOLO11 yolo11x.pt --local-dir /path
-hf download facebook/sam3 --local-dir /path
+hf download Ultralytics/YOLO26 yolo26x.pt --local-dir /path
+
+cd graph_generator/dependence/GroundedSAM2/checkpoints
+bash download_ckpts.sh
 ```
 
 ### action detector

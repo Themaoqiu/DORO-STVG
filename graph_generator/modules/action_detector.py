@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import json
 import os
+import sys
 
 import cv2
 import numpy as np
@@ -10,6 +11,11 @@ import torch
 from mmengine import Config
 from mmengine.dataset import Compose, pseudo_collate
 from mmengine.registry import init_default_scope
+
+GRAPH_GENERATOR_ROOT = Path(__file__).resolve().parents[1]
+MMACTION2_ROOT = GRAPH_GENERATOR_ROOT / "dependence" / "mmaction2"
+if str(MMACTION2_ROOT) not in sys.path:
+    sys.path.insert(0, str(MMACTION2_ROOT))
 
 from mmaction.apis import init_recognizer
 from mmaction.evaluation import read_labelmap

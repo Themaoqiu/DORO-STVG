@@ -12,7 +12,7 @@ from .scene_detector import SceneClip
 from .yolo_tracker import GlobalTrack, YOLOTrack
 
 GRAPH_GENERATOR_ROOT = Path(__file__).resolve().parents[1]
-GROUNDEDSAM2_ROOT = GRAPH_GENERATOR_ROOT / "GroundedSAM2"
+GROUNDEDSAM2_ROOT = GRAPH_GENERATOR_ROOT / "dependence" / "GroundedSAM2"
 if str(GROUNDEDSAM2_ROOT) not in sys.path:
     sys.path.insert(0, str(GROUNDEDSAM2_ROOT))
 

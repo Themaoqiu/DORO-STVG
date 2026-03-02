@@ -1,8 +1,15 @@
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
 import torch
+
+GRAPH_GENERATOR_ROOT = Path(__file__).resolve().parents[1]
+DEPENDENCE_ROOT = GRAPH_GENERATOR_ROOT / "dependence"
+if str(DEPENDENCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(DEPENDENCE_ROOT))
 
 from modules.scene_detector import SceneClip
 from modules.yolo_tracker import GlobalTrack, YOLOTrack

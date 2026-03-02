@@ -4,6 +4,9 @@ import logging
 import asyncio
 import os
 import json
+import base64
+import mimetypes
+from pathlib import Path
 from .vision_utils import build_multimodal_message
 
 logger = logging.getLogger(__name__)
@@ -174,6 +177,9 @@ class QAWrapper:
                     logger.debug(f"  Video content: {video_obj}")
                     content.append(video_obj)
                 
+                elif item.get('type') == 'video_url':
+                    content.append(item)
+                
                 elif item.get('type') == 'text':
                     text_obj = {
                         "type": "text",
@@ -190,12 +196,16 @@ class QAWrapper:
                     )
                     if image_value is None:
                         raise ValueError("Image item must include 'image' or 'image_path'")
+                    image_url = self._to_image_url(image_value)
                     image_obj = {
-                        "type": "image",
-                        "image": image_value  # Local path or URL
+                        "type": "image_url",
+                        "image_url": {"url": image_url},
                     }
                     logger.debug(f"  Image content: {image_obj}")
                     content.append(image_obj)
+
+                elif item.get('type') == 'image_url':
+                    content.append(item)
             
             logger.info(f"Making API request:")
             logger.info(f"  Model: {self.model_name}")
@@ -229,6 +239,32 @@ class QAWrapper:
             if hasattr(e, 'response'):
                 logger.error(f"  Response: {e.response}")
             raise
+
+    @staticmethod
+    def _to_image_url(image_value: str) -> str:
+        """
+        Normalize image input into an API-compatible image URL.
+        - Keep http(s)/data URLs as-is
+        - Convert local file paths to data URLs
+        """
+        if not isinstance(image_value, str):
+            image_value = str(image_value)
+
+        lowered = image_value.lower()
+        if lowered.startswith("http://") or lowered.startswith("https://") or lowered.startswith("data:"):
+            return image_value
+
+        image_path = Path(image_value).expanduser()
+        if not image_path.exists():
+            return image_value
+
+        mime_type, _ = mimetypes.guess_type(str(image_path))
+        if mime_type is None:
+            mime_type = "image/jpeg"
+
+        with open(image_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("utf-8")
+        return f"data:{mime_type};base64,{encoded}"
 
     def get_stats(self) -> Dict[str, int]:
         """Get usage statistics for this API instance."""

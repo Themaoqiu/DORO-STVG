@@ -14,7 +14,8 @@ from api_sync.utils.parser import JSONParser
 
 PROMPT_TEMPLATE = (
     "You will see two objects from different shots of the same video. "
-    "Images are ordered as: full frame A, crop A, full frame B, crop B. "
+    "Images are ordered as: all boxed frames of object A first, then all boxed frames of object B. "
+    "In each image, the target object is highlighted by a green bounding box. "
     "Use both the images and the appearance descriptions to decide if they are the same real-world entity. "
     "If you are unsure, output unsure. "
     "Return strict JSON only:\n"
@@ -22,14 +23,16 @@ PROMPT_TEMPLATE = (
     "Object A class: {class_a}. Appearance A: {appearance_a}. "
     "Object B class: {class_b}. Appearance B: {appearance_b}."
 )
+TEST_VISION_PROMPT = (
+    "Please describe what you see. "
+)
 
 
 @dataclass
 class ObjectView:
     frame_idx: int
     shot_id: int
-    full_path: str
-    crop_path: str
+    boxed_path: str
 
 
 @dataclass
@@ -100,36 +103,54 @@ def _appearance_similarity(text_a: str, text_b: str) -> float:
     return SequenceMatcher(None, text_a.lower(), text_b.lower()).ratio()
 
 
-def _select_frame_in_shot(
+def _select_frames_in_shot(
     shot: Dict[str, Any],
     bboxes: Dict[str, List[float]],
-) -> Optional[int]:
+    views_per_shot: int,
+) -> List[int]:
     start = shot["start_frame"]
     end = shot["end_frame"]
     frames = sorted(int(k) for k in bboxes.keys() if start <= int(k) <= end)
     if not frames:
-        return None
-    return frames[len(frames) // 2]
+        return []
+    if views_per_shot <= 1 or len(frames) <= 1:
+        return [frames[len(frames) // 2]]
+    if len(frames) <= views_per_shot:
+        return frames
+
+    last = len(frames) - 1
+    indices = [round(i * last / (views_per_shot - 1)) for i in range(views_per_shot)]
+    return [frames[i] for i in sorted(set(indices))]
 
 
-def _crop_with_padding(
+def _draw_box_on_frame(
     frame: Any,
     bbox: List[float],
-    padding_ratio: float,
+    object_class: str,
 ) -> Optional[Any]:
     height, width = frame.shape[:2]
     x1, y1, x2, y2 = bbox
-    box_w = x2 - x1
-    box_h = y2 - y1
-    pad_w = box_w * padding_ratio
-    pad_h = box_h * padding_ratio
-    crop_x1 = max(0, int(x1 - pad_w))
-    crop_y1 = max(0, int(y1 - pad_h))
-    crop_x2 = min(width, int(x2 + pad_w))
-    crop_y2 = min(height, int(y2 + pad_h))
-    if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
+    draw_x1 = max(0, min(width - 1, int(x1)))
+    draw_y1 = max(0, min(height - 1, int(y1)))
+    draw_x2 = max(0, min(width - 1, int(x2)))
+    draw_y2 = max(0, min(height - 1, int(y2)))
+    if draw_x2 <= draw_x1 or draw_y2 <= draw_y1:
         return None
-    return frame[crop_y1:crop_y2, crop_x1:crop_x2]
+    annotated = frame.copy()
+    cv2.rectangle(annotated, (draw_x1, draw_y1), (draw_x2, draw_y2), (0, 255, 0), 3)
+    if object_class:
+        text_org = (draw_x1, max(20, draw_y1 - 8))
+        cv2.putText(
+            annotated,
+            object_class,
+            text_org,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
+    return annotated
 
 
 def _build_object_bundles(
@@ -138,6 +159,7 @@ def _build_object_bundles(
     output_dir: str,
     max_views_per_object: Optional[int],
     padding_ratio: float,
+    views_per_shot: int,
 ) -> List[ObjectBundle]:
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -162,34 +184,36 @@ def _build_object_bundles(
             if shot_id not in temporal_nodes:
                 continue
             shot = temporal_nodes[shot_id]
-            frame_idx = _select_frame_in_shot(shot, bboxes)
-            if frame_idx is None:
-                continue
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame = cap.read()
-            if not ret:
-                continue
-            bbox = bboxes.get(str(frame_idx))
-            if bbox is None:
-                continue
-            crop = _crop_with_padding(frame, bbox, padding_ratio)
-            if crop is None:
-                continue
-
-            obj_dir = base_output / obj["node_id"]
-            obj_dir.mkdir(parents=True, exist_ok=True)
-            full_path = obj_dir / f"shot_{shot_id}_frame_{frame_idx}_full.jpg"
-            crop_path = obj_dir / f"shot_{shot_id}_frame_{frame_idx}_crop.jpg"
-            cv2.imwrite(str(full_path), frame)
-            cv2.imwrite(str(crop_path), crop)
-            views.append(
-                ObjectView(
-                    frame_idx=frame_idx,
-                    shot_id=shot_id,
-                    full_path=str(full_path),
-                    crop_path=str(crop_path),
+            frame_indices = _select_frames_in_shot(shot, bboxes, views_per_shot)
+            for frame_idx in frame_indices:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+                bbox = bboxes.get(str(frame_idx))
+                if bbox is None:
+                    continue
+                boxed = _draw_box_on_frame(
+                    frame=frame,
+                    bbox=bbox,
+                    object_class=obj.get("object_class", "object"),
                 )
-            )
+                if boxed is None:
+                    continue
+
+                obj_dir = base_output / obj["node_id"]
+                obj_dir.mkdir(parents=True, exist_ok=True)
+                boxed_path = obj_dir / f"shot_{shot_id}_frame_{frame_idx}_boxed.jpg"
+                cv2.imwrite(str(boxed_path), boxed)
+                views.append(
+                    ObjectView(
+                        frame_idx=frame_idx,
+                        shot_id=shot_id,
+                        boxed_path=str(boxed_path),
+                    )
+                )
+                if view_limit is not None and len(views) >= view_limit:
+                    break
             if view_limit is not None and len(views) >= view_limit:
                 break
 
@@ -313,28 +337,63 @@ def _build_prompts(
         candidates.sort(key=lambda item: item[0], reverse=True)
         for similarity, bundle_b in candidates[:max_pairs_per_object]:
             pair_key = f"{bundle_a.node_id}|{bundle_b.node_id}"
+            prompt_id = pair_key
+            content: List[Dict[str, Any]] = []
             for view_a in bundle_a.views:
-                for view_b in bundle_b.views:
-                    prompt_id = (
-                        f"{pair_key}|"
-                        f"{view_a.shot_id}:{view_a.frame_idx}|"
-                        f"{view_b.shot_id}:{view_b.frame_idx}"
-                    )
-                    content: List[Dict[str, Any]] = []
-                    content.append({"type": "image", "image": view_a.full_path})
-                    content.append({"type": "image", "image": view_a.crop_path})
-                    content.append({"type": "image", "image": view_b.full_path})
-                    content.append({"type": "image", "image": view_b.crop_path})
-                    content.append(
-                        {
-                            "type": "text",
-                            "text": _build_prompt(bundle_a, bundle_b),
-                        }
-                    )
-                    prompts.append({"id": prompt_id, "prompt": content})
-                    pair_map[prompt_id] = (pair_key, bundle_a, bundle_b)
+                content.append({"type": "image", "image": view_a.boxed_path})
+            for view_b in bundle_b.views:
+                content.append({"type": "image", "image": view_b.boxed_path})
+            content.append(
+                {
+                    "type": "text",
+                    "text": _build_prompt(bundle_a, bundle_b),
+                }
+            )
+            prompts.append({"id": prompt_id, "prompt": content})
+            pair_map[prompt_id] = (pair_key, bundle_a, bundle_b)
 
     return prompts, pair_map
+
+
+def _build_vision_test_prompts(
+    prompts: List[Dict[str, Any]],
+    max_prompts: int,
+) -> List[Dict[str, Any]]:
+    selected = prompts[:max_prompts]
+    out: List[Dict[str, Any]] = []
+    for item in selected:
+        prompt_id = str(item.get("id", "unknown"))
+        content = item.get("prompt", [])
+        images = [x for x in content if x.get("type") == "image"]
+        test_content: List[Dict[str, Any]] = list(images)
+        test_content.append({"type": "text", "text": TEST_VISION_PROMPT})
+        out.append({"id": prompt_id, "prompt": test_content})
+    return out
+
+
+async def _run_vision_input_test(
+    model_name: str,
+    api_keys: Optional[Union[str, Iterable[str]]],
+    prompts: List[Dict[str, Any]],
+    max_concurrent_per_key: int,
+    max_retries: int,
+) -> None:
+    if not prompts:
+        print("[test] no prompts to test")
+        return
+    generator = StreamGenerator(
+        model_name=model_name,
+        api_keys=_resolve_api_keys(api_keys),
+        max_concurrent_per_key=max_concurrent_per_key,
+        max_retries=max_retries,
+        rational=False,
+        with_unique_id=True,
+    )
+    print(f"[test] sending {len(prompts)} vision-test prompts")
+    async for item in generator.generate_stream(prompts=prompts, system_prompt="You are a visual assistant."):
+        if not item:
+            continue
+        print(f"[test] {item.get('id')} -> {item.get('result')}")
 
 
 def _confidence_score(value: Optional[float]) -> float:
@@ -396,6 +455,7 @@ async def generate_reference_edges(
     api_keys: Optional[Union[str, Iterable[str]]],
     crop_output_dir: str,
     max_views_per_object: Optional[int] = None,
+    views_per_shot: int = 3,
     max_pairs_per_object: int = 3,
     similarity_threshold: float = 0.35,
     padding_ratio: float = 0.1,
@@ -410,6 +470,7 @@ async def generate_reference_edges(
         output_dir=crop_output_dir,
         max_views_per_object=max_views_per_object,
         padding_ratio=padding_ratio,
+        views_per_shot=views_per_shot,
     )
     prompts, pair_map = _build_prompts(
         bundles=bundles,
@@ -438,14 +499,42 @@ def run(
     output: Optional[str] = None,
     crop_output_dir: str = "output/reference_crops",
     max_views_per_object: Optional[int] = None,
+    views_per_shot: int = 3,
     max_pairs_per_object: int = 3,
     similarity_threshold: float = 0.35,
     padding_ratio: float = 0.1,
     max_concurrent_per_key: int = 100,
     max_retries: int = 5,
     verbose: bool = False,
+    test_image_inputs_with_api: bool = False,
+    test_max_prompts: int = 3,
 ) -> None:
     graph = _load_graph(jsonl, video)
+    if test_image_inputs_with_api:
+        bundles = _build_object_bundles(
+            graph=graph,
+            video_path=video,
+            output_dir=crop_output_dir,
+            max_views_per_object=max_views_per_object,
+            padding_ratio=padding_ratio,
+            views_per_shot=views_per_shot,
+        )
+        prompts, _ = _build_prompts(
+            bundles=bundles,
+            max_pairs_per_object=max_pairs_per_object,
+            similarity_threshold=similarity_threshold,
+        )
+        test_prompts = _build_vision_test_prompts(prompts, max_prompts=test_max_prompts)
+        asyncio.run(
+            _run_vision_input_test(
+                model_name=model_name,
+                api_keys=api_keys,
+                prompts=test_prompts,
+                max_concurrent_per_key=max_concurrent_per_key,
+                max_retries=max_retries,
+            )
+        )
+        return
 
     graph = asyncio.run(
         generate_reference_edges(
@@ -455,6 +544,7 @@ def run(
             api_keys=api_keys,
             crop_output_dir=crop_output_dir,
             max_views_per_object=max_views_per_object,
+            views_per_shot=views_per_shot,
             max_pairs_per_object=max_pairs_per_object,
             similarity_threshold=similarity_threshold,
             padding_ratio=padding_ratio,

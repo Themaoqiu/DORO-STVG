@@ -14,15 +14,26 @@ from modules.keyframe_clustering import KeyframeClustering
 
 PROMPT_TEMPLATE = (
     "You will see multiple frames of the same object from a video at different times. "
-    "Write a single-sentence English caption that comprehensively describes the object's appearance. "
-    "Describe the object that is centered in the frame. "
-    "If the object is a person, specify whether they are an adult or a child, "
-    "and whether they are male or female, then describe their appearance. "
+    "The target object is highlighted by a bounding box in each frame. "
+    "Describe the object's appearance using 3-6 short English words or phrases, separated by commas. "
+    "Describe only the boxed object. "
+    "If the object is a person, specify whether they are an adult, a child, or a baby, "
+    "and whether they are male or female, then include visible appearance traits. "
     "If the object is an animal or an item, describe its species/type, color, and other visible attributes. "
-    "Do not describe actions or the background. "
+    "Start with the object category, then list attributes. "
+    "Examples: "
+    "\"cat, black-and-white coat, fluffy fur, tail raised\"; "
+    "\"adult, fair skin, off-white hoodie, dark inner shirt, white knee-length shorts, light-colored slippers\". "
+    "Do not describe actions or the background. Do not write full sentences. "
     "Output strict JSON only: "
     "{{\"caption\": \"...\"}}. "
     "Object class: {object_class}. Number of images: {num_images}."
+)
+
+TEST_VISION_PROMPT = (
+    "Please describe what you can actually see in these images. "
+    "Focus on the target object appearance, colors, clothing/materials, and notable visual details. "
+    "If any image is unclear or unreadable, say it explicitly."
 )
 
 
@@ -97,25 +108,36 @@ def _select_evenly(items: List[int], count: int) -> List[int]:
     return [items[i] for i in indices]
 
 
-def _crop_with_padding(
+def _draw_box_on_frame(
     frame: Any,
     bbox: List[float],
-    padding_ratio: float,
+    object_class: str,
 ) -> Optional[Any]:
     height, width = frame.shape[:2]
     x1, y1, x2, y2 = bbox
-    box_w = x2 - x1
-    box_h = y2 - y1
-    pad_w = box_w * padding_ratio
-    pad_h = box_h * padding_ratio
-    crop_x1 = max(0, int(x1 - pad_w))
-    crop_y1 = max(0, int(y1 - pad_h))
-    crop_x2 = min(width, int(x2 + pad_w))
-    crop_y2 = min(height, int(y2 + pad_h))
 
-    if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
+    draw_x1 = max(0, min(width - 1, int(x1)))
+    draw_y1 = max(0, min(height - 1, int(y1)))
+    draw_x2 = max(0, min(width - 1, int(x2)))
+    draw_y2 = max(0, min(height - 1, int(y2)))
+    if draw_x2 <= draw_x1 or draw_y2 <= draw_y1:
         return None
-    return frame[crop_y1:crop_y2, crop_x1:crop_x2]
+
+    annotated = frame.copy()
+    cv2.rectangle(annotated, (draw_x1, draw_y1), (draw_x2, draw_y2), (0, 255, 0), 3)
+    if object_class:
+        text_org = (draw_x1, max(20, draw_y1 - 8))
+        cv2.putText(
+            annotated,
+            object_class,
+            text_org,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
+    return annotated
 
 
 def _build_prompt(object_class: str, num_images: int) -> str:
@@ -209,14 +231,18 @@ def _collect_crops(
         if not ret:
             continue
         bbox = frames_dict[frame_idx]["box"]
-        crop = _crop_with_padding(frame, bbox, padding_ratio)
-        if crop is None:
+        boxed_frame = _draw_box_on_frame(
+            frame=frame,
+            bbox=bbox,
+            object_class=obj_node.get("object_class", "object"),
+        )
+        if boxed_frame is None:
             continue
 
         obj_dir = Path(output_dir) / obj_node["node_id"]
         obj_dir.mkdir(parents=True, exist_ok=True)
         crop_path = obj_dir / f"frame_{frame_idx}.jpg"
-        cv2.imwrite(str(crop_path), crop)
+        cv2.imwrite(str(crop_path), boxed_frame)
         crop_paths.append(str(crop_path))
 
     cap.release()
@@ -327,6 +353,47 @@ def build_prompts(
     return prompts, captures
 
 
+def _build_vision_test_prompts(
+    prompts: List[Dict[str, Any]],
+    max_prompts: int,
+) -> List[Dict[str, Any]]:
+    selected = prompts[:max_prompts]
+    out: List[Dict[str, Any]] = []
+    for item in selected:
+        prompt_id = str(item.get("id", "unknown"))
+        content = item.get("prompt", [])
+        images = [x for x in content if x.get("type") == "image"]
+        test_content: List[Dict[str, Any]] = list(images)
+        test_content.append({"type": "text", "text": TEST_VISION_PROMPT})
+        out.append({"id": prompt_id, "prompt": test_content})
+    return out
+
+
+async def _run_vision_input_test(
+    model_name: str,
+    api_keys: Optional[Union[str, Iterable[str]]],
+    prompts: List[Dict[str, Any]],
+    max_concurrent_per_key: int,
+    max_retries: int,
+) -> None:
+    if not prompts:
+        print("[test] no prompts to test")
+        return
+    generator = StreamGenerator(
+        model_name=model_name,
+        api_keys=_resolve_api_keys(api_keys),
+        max_concurrent_per_key=max_concurrent_per_key,
+        max_retries=max_retries,
+        rational=False,
+        with_unique_id=True,
+    )
+    print(f"[test] sending {len(prompts)} vision-test prompts")
+    async for item in generator.generate_stream(prompts=prompts, system_prompt="You are a visual assistant."):
+        if not item:
+            continue
+        print(f"[test] {item.get('id')} -> {item.get('result')}")
+
+
 async def generate_attribute_captions(
     graph: Dict[str, Any],
     video_path: str,
@@ -373,8 +440,31 @@ def run(
     max_retries: int = 5,
     default_caption: str = "unknown",
     overwrite: bool = True,
+    test_image_inputs_with_api: bool = False,
+    test_max_prompts: int = 3,
 ) -> None:
     graph = _load_graph(jsonl, video)
+    if test_image_inputs_with_api:
+        keyframe_selector = KeyframeClustering()
+        prompts, _ = build_prompts(
+            graph=graph,
+            video_path=video,
+            crop_output_dir=crop_output_dir,
+            keyframe_count=keyframe_count,
+            padding_ratio=padding_ratio,
+            keyframe_selector=keyframe_selector,
+        )
+        test_prompts = _build_vision_test_prompts(prompts, max_prompts=test_max_prompts)
+        asyncio.run(
+            _run_vision_input_test(
+                model_name=model_name,
+                api_keys=api_keys,
+                prompts=test_prompts,
+                max_concurrent_per_key=max_concurrent_per_key,
+                max_retries=max_retries,
+            )
+        )
+        return
 
     captions = asyncio.run(
         generate_attribute_captions(
