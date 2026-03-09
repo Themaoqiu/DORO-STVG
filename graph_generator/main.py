@@ -248,7 +248,7 @@ class SceneGraphGenerator:
                     bboxes[frame_idx] = frame_data['box']
 
             obj_node = ObjectNode(
-                node_id=f"obj_{g_track.object_class}_{g_track.global_id}",
+                node_id=f"{g_track.object_class}_{g_track.global_id}",
                 global_track_id=g_track.global_id,
                 object_class=g_track.object_class,
                 start_frame=g_track.start_frame,
@@ -323,7 +323,6 @@ class SceneGraphGenerator:
                 print(f"  Error: {e}")
         
         return graphs
-
 
 def run(
     video: str = None,

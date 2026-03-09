@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 export CUDA_VISIBLE_DEVICES=5
+export HF_ENDPOINT=https://hf-mirror.com
+
 
 set -a
 source /home/wangxingjian/DORO-STVG/graph_generator/.env
@@ -44,10 +46,22 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
 #   --model_name gemini-3-flash-preview \
 
-python -m modules.reference_edge_generator \
-  --jsonl scene_graphs.jsonl \
-  --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
-  --model_name gemini-3-flash-preview \
-  --max_pairs_per_object 3 \
-  --similarity_threshold 0.35 \
-  --verbose True
+# python -m modules.reference_edge_generator \
+#   --jsonl scene_graphs.jsonl \
+#   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
+#   --model_name gemini-3-flash-preview \
+#   --max_pairs_per_object 3 \
+#   --similarity_threshold 0.35 \
+
+# python3 scripts/export_groundedsam2_masks.py \
+#   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
+#   --sam2_checkpoint /home/wangxingjian/DORO-STVG/graph_generator/dependence/GroundedSAM2/checkpoints/sam2.1_hiera_large.pt \
+#   --yolo_model /home/wangxingjian/model/yolo26x/yolo26x.pt \
+#   --output_dir output/sam2_masks
+
+python /home/wangxingjian/model/traser/inference.py \
+    --model_path /home/wangxingjian/model/traser \
+    --video_path /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
+    --mask_path /home/wangxingjian/DORO-STVG/graph_generator/output/sam2_masks/50_TM5MPJIq1Is_2fps_sam2_masks.json \
+    --out_dir output
+

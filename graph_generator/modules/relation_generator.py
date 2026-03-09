@@ -692,7 +692,7 @@ def add_relation_edges(
             )
             for relation, start_frame, end_frame in segments:
                 edges.append({
-                    "edge_id": f"edge_rel_{edge_index}",
+                    "edge_id": f"rel_{edge_index}",
                     "source_id": pair_info.object_a,
                     "target_id": pair_info.object_b,
                     relation_type: relation,
@@ -758,7 +758,7 @@ def add_implicit_relation_edges(
         for relation, start_frame, end_frame in segments:
             edges.append(
                 {
-                    "edge_id": f"edge_rel_implicit_{edge_index}",
+                    "edge_id": f"rel_implicit_{edge_index}",
                     "source_id": source_id,
                     "target_object": target_object,
                     relation_type: relation,

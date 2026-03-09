@@ -433,7 +433,7 @@ def add_reference_edges(
     for pair_key in sorted(best_by_pair.keys()):
         entry = best_by_pair[pair_key]
         edge = {
-            "edge_id": f"edge_ref_{edge_index}",
+            "edge_id": f"ref_{edge_index}",
             "source_id": entry["bundle_a"].node_id,
             "target_id": entry["bundle_b"].node_id,
             "reference_relationship": "same_entity",

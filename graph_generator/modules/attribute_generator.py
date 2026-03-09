@@ -269,30 +269,17 @@ def add_attribute_nodes(
             node for node in attribute_nodes
             if node.get("attribute_type") != attribute_type
         ]
-        if removed_ids:
-            edges = [
-                edge for edge in edges
-                if edge.get("target_id") not in removed_ids
-            ]
+        edges = [
+            edge
+            for edge in edges
+            if edge.get("edge_type") != "has_attribute" and edge.get("target_id") not in removed_ids
+        ]
+    else:
+        pass
 
     for obj_node in graph.get("object_nodes", []):
         object_id = obj_node.get("node_id")
         caption = captions.get(object_id) or default_caption
-        attr_id = f"attr_{object_id}"
-
-        attribute_nodes.append({
-            "node_id": attr_id,
-            "object_node_id": object_id,
-            "attribute_type": attribute_type,
-            "description": caption,
-        })
-        edges.append({
-            "edge_id": f"edge_has_attribute_{object_id}",
-            "source_id": object_id,
-            "target_id": attr_id,
-            "edge_type": "has_attribute",
-            "relation": attribute_type,
-        })
         obj_node["appearance"] = caption
 
     graph["attribute_nodes"] = attribute_nodes
