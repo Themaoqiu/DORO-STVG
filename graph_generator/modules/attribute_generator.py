@@ -1,48 +1,196 @@
 import asyncio
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import cv2
+import fire
+import numpy as np
+import torch
+from PIL import Image
+from pycocotools import mask as mask_utils
 
 from api_sync.api import StreamGenerator
 from api_sync.utils.parser import JSONParser
-from modules.keyframe_clustering import KeyframeClustering
+from ..dependence.dam import DescribeAnythingModel, disable_torch_init
 
 
-PROMPT_TEMPLATE = (
-    "You will see multiple frames of the same object from a video at different times. "
-    "The target object is highlighted by a bounding box in each frame. "
-    "Describe the object's appearance using 3-6 short English words or phrases, separated by commas. "
-    "Describe only the boxed object. "
-    "If the object is a person, specify whether they are an adult, a child, or a baby, "
-    "and whether they are male or female, then include visible appearance traits. "
-    "If the object is an animal or an item, describe its species/type, color, and other visible attributes. "
-    "Start with the object category, then list attributes. "
-    "Examples: "
-    "\"cat, black-and-white coat, fluffy fur, tail raised\"; "
-    "\"adult, fair skin, off-white hoodie, dark inner shirt, white knee-length shorts, light-colored slippers\". "
-    "Do not describe actions or the background. Do not write full sentences. "
-    "Output strict JSON only: "
-    "{{\"caption\": \"...\"}}. "
-    "Object class: {object_class}. Number of images: {num_images}."
+VIDEO_QUERY_TEMPLATE = (
+    "Video: {image_tokens}\n"
+    "Given the video in the form of a sequence of frames above, describe the object in the masked region in the video in detail."
 )
 
-TEST_VISION_PROMPT = (
-    "Please describe what you can actually see in these images. "
-    "Focus on the target object appearance, colors, clothing/materials, and notable visual details. "
-    "If any image is unclear or unreadable, say it explicitly."
-)
+PROMPT_MODES = {
+    "focal_prompt": "full+focal_crop",
+}
+
+STRUCTURED_EXTRACTION_PROMPT = """## You are an expert in scene understanding. I will give you a short paragraph
+that describes a video clip.
+### Your task is to extract structured information about a single object described
+in the paragraph.
+### Please return a JSON with the following fields:
+-"object": The main object being described (e.g.,"person","dog", "car"). If the
+inference about the object is uncertain based on the description, add "(uncertain)"
+after the object name.
+- "attributes": A list of ONLY the visual/physical attributes that can be directly
+observed about the object itself. Include only:
+* Visual appearance: color, shape, size, texture, pattern, material appearance, style
+* Physical properties: state, transparency, reflectiveness, orientation, material
+* Design elements: stripes, dots, logos, decorative features. DO NOT include: implied
+states, inferred conditions, functional descriptions, or anything that describes the
+object’s interaction with its environment.
+- "relationships": A list of relationships between this object and other entities or the
+environment (e.g., "on top of table", "next to person", "inside container", "facing
+camera", "part of group").
+- "actions": A list of actions that the object is performing or movements it is making
+(e.g., "rotating", "moving", "falling", "bouncing", "sliding").
+### Important distinctions:
+- Attributes = What the object looks like (visual only). Please use ADJECTIVE
+form
+- Relationships = How the object relates to other things spatially, functionally, or
+contextually
+- Actions = What the object is doing or how it‘s moving
+Now process the following description:
+{description}"""
 
 
 @dataclass
-class AttributeCaption:
+class ObjectDescription:
     object_node_id: str
-    caption: str
-    keyframes: List[int]
-    crop_paths: List[str]
+    global_track_id: int
+    raw_description: str
+    category: str
+    attributes: List[str]
+    relationships: List[str]
+    actions: List[str]
+    sampled_frames: List[int]
+
+    @property
+    def appearance(self) -> str:
+        parts = [self.category] if self.category else []
+        parts.extend(attr for attr in self.attributes if attr)
+        return ", ".join(parts).strip(", ")
+
+
+def _load_graph(jsonl_path: str, video_path: str) -> Dict[str, Any]:
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line in f:
+            data = json.loads(line)
+            graph_video = data.get("video_path", "")
+            if graph_video == video_path or Path(graph_video).stem == Path(video_path).stem:
+                return data
+    raise ValueError(f"No graph found for video {video_path}")
+
+
+def _update_jsonl_inplace(jsonl_path: str, video_path: str, graph: Dict[str, Any]) -> None:
+    input_path = Path(jsonl_path)
+    temp_path = input_path.with_suffix(input_path.suffix + ".tmp")
+
+    replaced = False
+    with open(input_path, "r", encoding="utf-8") as f_in, open(temp_path, "w", encoding="utf-8") as f_out:
+        for line in f_in:
+            data = json.loads(line)
+            graph_video = data.get("video_path", "")
+            if graph_video == video_path or Path(graph_video).stem == Path(video_path).stem:
+                f_out.write(json.dumps(graph, ensure_ascii=False) + "\n")
+                replaced = True
+            else:
+                f_out.write(line)
+
+    if not replaced:
+        with open(temp_path, "a", encoding="utf-8") as f_out:
+            f_out.write(json.dumps(graph, ensure_ascii=False) + "\n")
+
+    temp_path.replace(input_path)
+
+
+def _select_evenly(items: List[int], count: int) -> List[int]:
+    if count <= 0 or len(items) <= count:
+        return items
+    if count == 1:
+        return [items[len(items) // 2]]
+    last_idx = len(items) - 1
+    indices = [round(i * last_idx / (count - 1)) for i in range(count)]
+    return [items[i] for i in indices]
+
+
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip(" \n\t,.;:[]{}\"'")
+
+
+def _normalize_string_list(raw_value: Any) -> List[str]:
+    if isinstance(raw_value, str):
+        raw_items = [item.strip() for item in raw_value.split(",")]
+    elif isinstance(raw_value, list):
+        raw_items = [str(item) for item in raw_value]
+    else:
+        raw_items = []
+
+    out: List[str] = []
+    seen = set()
+    for item in raw_items:
+        normalized = _normalize_text(item)
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(normalized)
+    return out
+
+
+def _strip_uncertainty_suffix(category: str) -> str:
+    return _normalize_text(re.sub(r"\s*\(uncertain\)\s*$", "", category, flags=re.IGNORECASE))
+
+
+def _parse_extraction(
+    raw_output: str,
+    default_category: str,
+) -> Tuple[str, List[str], List[str], List[str]]:
+    parsed = JSONParser.parse(raw_output)
+    if parsed is None:
+        match = re.search(r"\{.*\}", raw_output.strip(), flags=re.DOTALL)
+        if match is not None:
+            try:
+                parsed = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                parsed = None
+
+    if parsed is None:
+        parts = [_normalize_text(part) for part in raw_output.split(",")]
+        parts = [part for part in parts if part]
+        if not parts:
+            return default_category, [], [], []
+
+        category = parts[0] or default_category
+        attributes: List[str] = []
+        seen = {category.lower()}
+        for part in parts[1:]:
+            key = part.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            attributes.append(part)
+        return category, attributes, [], []
+
+    category = _normalize_text(
+        str(
+            parsed.get("object")
+            or parsed.get("category")
+            or default_category
+        )
+    )
+    attributes = _normalize_string_list(parsed.get("attributes", []))
+    relationships = _normalize_string_list(parsed.get("relationships", []))
+    actions = _normalize_string_list(parsed.get("actions", []))
+
+    category_key = category.lower()
+    attributes = [attr for attr in attributes if attr.lower() != category_key]
+    return category or default_category, attributes, relationships, actions
 
 
 def _normalize_api_keys(api_keys: Union[str, Iterable[str]]) -> List[str]:
@@ -60,201 +208,169 @@ def _resolve_api_keys(api_keys: Optional[Union[str, Iterable[str]]]) -> List[str
     return keys
 
 
-def _load_graph(jsonl_path: str, video_path: str) -> Dict[str, Any]:
-    with open(jsonl_path, "r", encoding="utf-8") as f:
-        for line in f:
-            data = json.loads(line)
-            graph_video = data.get("video_path", "")
-            if graph_video == video_path or Path(graph_video).stem == Path(video_path).stem:
-                return data
-    raise ValueError(f"No graph found for video {video_path}")
-
-
-def _match_video(graph: Dict[str, Any], video_path: str) -> bool:
-    graph_video = graph.get("video_path", "")
-    if graph_video == video_path:
-        return True
-    return Path(graph_video).stem == Path(video_path).stem
-
-
-def _update_jsonl_inplace(jsonl_path: str, video_path: str, graph: Dict[str, Any]) -> None:
-    input_path = Path(jsonl_path)
-    temp_path = input_path.with_suffix(input_path.suffix + ".tmp")
-
-    replaced = False
-    with open(input_path, "r", encoding="utf-8") as f_in, open(temp_path, "w", encoding="utf-8") as f_out:
-        for line in f_in:
-            data = json.loads(line)
-            if _match_video(data, video_path):
-                f_out.write(json.dumps(graph, ensure_ascii=False) + "\n")
-                replaced = True
-            else:
-                f_out.write(line)
-
-    if not replaced:
-        with open(temp_path, "a", encoding="utf-8") as f_out:
-            f_out.write(json.dumps(graph, ensure_ascii=False) + "\n")
-
-    os.replace(temp_path, input_path)
-
-
-def _select_evenly(items: List[int], count: int) -> List[int]:
-    if count <= 0 or len(items) <= count:
-        return items
-    if count == 1:
-        return [items[len(items) // 2]]
-    last_idx = len(items) - 1
-    indices = [round(i * last_idx / (count - 1)) for i in range(count)]
-    return [items[i] for i in indices]
-
-
-def _draw_box_on_frame(
-    frame: Any,
-    bbox: List[float],
-    object_class: str,
-) -> Optional[Any]:
-    height, width = frame.shape[:2]
-    x1, y1, x2, y2 = bbox
-
-    draw_x1 = max(0, min(width - 1, int(x1)))
-    draw_y1 = max(0, min(height - 1, int(y1)))
-    draw_x2 = max(0, min(width - 1, int(x2)))
-    draw_y2 = max(0, min(height - 1, int(y2)))
-    if draw_x2 <= draw_x1 or draw_y2 <= draw_y1:
-        return None
-
-    annotated = frame.copy()
-    cv2.rectangle(annotated, (draw_x1, draw_y1), (draw_x2, draw_y2), (0, 255, 0), 3)
-    if object_class:
-        text_org = (draw_x1, max(20, draw_y1 - 8))
-        cv2.putText(
-            annotated,
-            object_class,
-            text_org,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2,
-            cv2.LINE_AA,
-        )
-    return annotated
-
-
-def _build_prompt(object_class: str, num_images: int) -> str:
-    return PROMPT_TEMPLATE.format(
-        object_class=object_class,
-        num_images=num_images,
-    )
-
-
-def _validate_caption(response: str) -> Union[str, bool]:
+def _parse_structured_response(response: str) -> Optional[Dict[str, Any]]:
     parsed = JSONParser.parse(response)
-    if not parsed or "caption" not in parsed:
-        return False
-    caption = parsed.get("caption")
-    if not isinstance(caption, str):
-        return False
-    caption = caption.strip()
-    if not caption:
-        return False
-    return caption
-
-
-class AttributeCaptioner:
-    def __init__(
-        self,
-        model_name: str,
-        api_keys: Optional[Union[str, Iterable[str]]],
-        max_concurrent_per_key: int = 100,
-        max_retries: int = 5,
-    ) -> None:
-        api_keys = _resolve_api_keys(api_keys)
-        self.generator = StreamGenerator(
-            model_name=model_name,
-            api_keys=api_keys,
-            max_concurrent_per_key=max_concurrent_per_key,
-            max_retries=max_retries,
-            rational=False,
-            with_unique_id=True,
-        )
-
-    async def generate_captions(
-        self,
-        prompts: List[Dict[str, Any]],
-        system_prompt: str,
-    ) -> Dict[str, Optional[str]]:
-        results: Dict[str, Optional[str]] = {}
-        async for item in self.generator.generate_stream(
-            prompts=prompts,
-            system_prompt=system_prompt,
-            validate_func=_validate_caption,
-        ):
-            if not item:
-                continue
-            object_id = item.get("id")
-            result = item.get("result")
-            results[object_id] = result
-        return results
-
-
-def _collect_crops(
-    video_path: str,
-    obj_node: Dict[str, Any],
-    output_dir: str,
-    keyframe_count: int,
-    padding_ratio: float,
-    keyframe_selector: KeyframeClustering,
-) -> Tuple[List[int], List[str]]:
-    bboxes = obj_node.get("bboxes", {})
-    if not bboxes:
-        return [], []
-
-    frames_dict = {
-        int(frame_idx): {"box": box, "conf": 1.0}
-        for frame_idx, box in bboxes.items()
+    if parsed is None:
+        match = re.search(r"\{.*\}", response.strip(), flags=re.DOTALL)
+        if match is None:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(parsed, dict):
+        return None
+    return {
+        "object": _normalize_text(str(parsed.get("object") or parsed.get("category") or "")),
+        "attributes": _normalize_string_list(parsed.get("attributes", [])),
+        "relationships": _normalize_string_list(parsed.get("relationships", [])),
+        "actions": _normalize_string_list(parsed.get("actions", [])),
     }
 
+
+def _load_indexed_masks(mask_json_path: Path) -> Dict[int, Dict[int, np.ndarray]]:
+    with open(mask_json_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    frame_masks: Dict[int, Dict[int, np.ndarray]] = {}
+    for frame_idx, entries in enumerate(payload):
+        if not isinstance(entries, list):
+            raise ValueError(f"Invalid mask file format at frame {frame_idx}: expected a list.")
+        frame_map: Dict[int, np.ndarray] = {}
+        for entry in entries:
+            if "global_track_id" not in entry or "segmentation" not in entry:
+                raise ValueError(
+                    f"Mask file {mask_json_path} is legacy format without object ids. "
+                    "Please rerun main.py with --groundedsam2_mask_output_dir to produce "
+                    "*_sam2_masks_indexed.json."
+                )
+            global_track_id = int(entry["global_track_id"])
+            mask = mask_utils.decode(entry["segmentation"])
+            if mask.ndim == 3:
+                mask = mask[..., 0]
+            frame_map[global_track_id] = mask.astype(np.uint8)
+        if frame_map:
+            frame_masks[frame_idx] = frame_map
+    return frame_masks
+
+
+def _collect_object_views(
+    video_path: str,
+    global_track_id: int,
+    frame_masks: Dict[int, Dict[int, np.ndarray]],
+    max_frames: int,
+) -> Tuple[List[int], List[Image.Image], List[Image.Image]]:
+    candidate_frames = sorted(
+        frame_idx
+        for frame_idx, objects in frame_masks.items()
+        if global_track_id in objects and np.any(objects[global_track_id] > 0)
+    )
+    sampled_frames = _select_evenly(candidate_frames, max_frames)
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise ValueError(f"Cannot open video: {video_path}")
 
-    video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    keyframes = keyframe_selector.select_keyframes(frames_dict, video_width, video_height)
-    keyframes = _select_evenly(keyframes, keyframe_count)
-
-    crop_paths: List[str] = []
-    for frame_idx in keyframes:
+    masks: List[Image.Image] = []
+    valid_frames: List[int] = []
+    valid_images: List[Image.Image] = []
+    for frame_idx in sampled_frames:
+        mask_np = frame_masks[frame_idx][global_track_id]
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ret, frame = cap.read()
         if not ret:
             continue
-        bbox = frames_dict[frame_idx]["box"]
-        boxed_frame = _draw_box_on_frame(
-            frame=frame,
-            bbox=bbox,
-            object_class=obj_node.get("object_class", "object"),
-        )
-        if boxed_frame is None:
-            continue
-
-        obj_dir = Path(output_dir) / obj_node["node_id"]
-        obj_dir.mkdir(parents=True, exist_ok=True)
-        crop_path = obj_dir / f"frame_{frame_idx}.jpg"
-        cv2.imwrite(str(crop_path), boxed_frame)
-        crop_paths.append(str(crop_path))
-
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        valid_frames.append(frame_idx)
+        valid_images.append(Image.fromarray(frame_rgb))
+        masks.append(Image.fromarray((mask_np > 0).astype(np.uint8) * 255))
     cap.release()
-    return keyframes, crop_paths
+    return valid_frames, valid_images, masks
+
+
+class DAMAttributeGenerator:
+    def __init__(
+        self,
+        model_path: str,
+        prompt_mode: str = "focal_prompt",
+        conv_mode: str = "v1",
+        temperature: float = 0.0,
+        top_p: float = 0.9,
+        max_new_tokens: int = 256,
+    ) -> None:
+        if torch.cuda.is_available() and torch.cuda.get_device_properties(0).major >= 8:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        disable_torch_init()
+        self.model = DescribeAnythingModel(
+            model_path=model_path,
+            conv_mode=conv_mode,
+            prompt_mode=PROMPT_MODES.get(prompt_mode, prompt_mode),
+        ).to(self.device)
+        self.temperature = temperature
+        self.top_p = top_p
+        self.max_new_tokens = max_new_tokens
+
+    def describe_object(
+        self,
+        images: List[Image.Image],
+        masks: List[Image.Image],
+    ) -> str:
+        image_tokens = "<image>" * len(images)
+        raw_description = _normalize_text(self.model.get_description(
+            images,
+            masks,
+            VIDEO_QUERY_TEMPLATE.format(image_tokens=image_tokens),
+            streaming=False,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            num_beams=1,
+            max_new_tokens=self.max_new_tokens,
+        ))
+        print(f"[attribute_generator][dam_raw] {raw_description}")
+        return raw_description
+
+
+async def _extract_structured_descriptions(
+    model_name: str,
+    api_keys: Optional[Union[str, Iterable[str]]],
+    prompts: List[Dict[str, Any]],
+    max_concurrent_per_key: int,
+    max_retries: int,
+) -> Dict[str, Dict[str, Any]]:
+    if not prompts:
+        return {}
+
+    generator = StreamGenerator(
+        model_name=model_name,
+        api_keys=_resolve_api_keys(api_keys),
+        max_concurrent_per_key=max_concurrent_per_key,
+        max_retries=max_retries,
+        rational=False,
+        with_unique_id=True,
+    )
+    results: Dict[str, Dict[str, Any]] = {}
+    async for item in generator.generate_stream(
+        prompts=prompts,
+        system_prompt="You are a precise information extraction assistant.",
+        validate_func=lambda response: result if (result := _parse_structured_response(response)) is not None else False,
+    ):
+        if not item:
+            continue
+        object_id = item.get("id")
+        result = item.get("result")
+        if object_id is not None and isinstance(result, dict):
+            results[object_id] = result
+    return results
 
 
 def add_attribute_nodes(
     graph: Dict[str, Any],
-    captions: Dict[str, Optional[str]],
-    default_caption: str = "unknown",
+    descriptions: Dict[str, ObjectDescription],
     attribute_type: str = "appearance",
     overwrite: bool = True,
+    overwrite_object_class: bool = False,
 ) -> Dict[str, Any]:
     attribute_nodes = graph.get("attribute_nodes", [])
     edges = graph.get("edges", [])
@@ -272,146 +388,60 @@ def add_attribute_nodes(
         edges = [
             edge
             for edge in edges
-            if edge.get("edge_type") != "has_attribute" and edge.get("target_id") not in removed_ids
+            if not (
+                edge.get("edge_type") == "has_attribute"
+                and edge.get("target_id") in removed_ids
+            )
         ]
-    else:
-        pass
 
     for obj_node in graph.get("object_nodes", []):
         object_id = obj_node.get("node_id")
-        caption = captions.get(object_id) or default_caption
-        obj_node["appearance"] = caption
+        info = descriptions.get(object_id)
+        if info is None:
+            continue
+
+        obj_node["appearance"] = info.appearance
+        obj_node["dam_category"] = info.category
+        obj_node["attributes"] = info.attributes
+        obj_node["relationships"] = info.relationships
+        obj_node["actions"] = info.actions
+        obj_node["attribute_source"] = "dam+api+sam2_mask"
+        obj_node["attribute_frame_indices"] = info.sampled_frames
+        resolved_category = _strip_uncertainty_suffix(info.category)
+        current_class = _normalize_text(str(obj_node.get("object_class", "")))
+        if resolved_category and (
+            overwrite_object_class or resolved_category.lower() != current_class.lower()
+        ):
+            obj_node["object_class"] = resolved_category
+
+        attr_node_id = f"attr_{object_id}"
+        attribute_nodes.append(
+            {
+                "node_id": attr_node_id,
+                "object_node_id": object_id,
+                "attribute_type": attribute_type,
+                "description": info.appearance,
+                "category": info.category,
+                "attributes": info.attributes,
+                "relationships": info.relationships,
+                "actions": info.actions,
+                "frame_indices": info.sampled_frames,
+                "source": "dam+api+sam2_mask",
+            }
+        )
+        edges.append(
+            {
+                "edge_id": f"edge_has_attribute_{object_id}",
+                "source_id": object_id,
+                "target_id": attr_node_id,
+                "edge_type": "has_attribute",
+                "relation": attribute_type,
+            }
+        )
 
     graph["attribute_nodes"] = attribute_nodes
     graph["edges"] = edges
     return graph
-
-
-def build_prompts(
-    graph: Dict[str, Any],
-    video_path: str,
-    crop_output_dir: str,
-    keyframe_count: int,
-    padding_ratio: float,
-    keyframe_selector: KeyframeClustering,
-) -> Tuple[List[Dict[str, Any]], List[AttributeCaption]]:
-    prompts: List[Dict[str, Any]] = []
-    captures: List[AttributeCaption] = []
-
-    video_name = Path(video_path).stem
-    base_output = Path(crop_output_dir) / video_name
-    base_output.mkdir(parents=True, exist_ok=True)
-
-    for obj_node in graph.get("object_nodes", []):
-        keyframes, crop_paths = _collect_crops(
-            video_path=video_path,
-            obj_node=obj_node,
-            output_dir=str(base_output),
-            keyframe_count=keyframe_count,
-            padding_ratio=padding_ratio,
-            keyframe_selector=keyframe_selector,
-        )
-
-        captures.append(
-            AttributeCaption(
-                object_node_id=obj_node["node_id"],
-                caption="",
-                keyframes=keyframes,
-                crop_paths=crop_paths,
-            )
-        )
-
-        if not crop_paths:
-            continue
-
-        content: List[Dict[str, Any]] = [
-            {"type": "image", "image": path}
-            for path in crop_paths
-        ]
-        content.append({
-            "type": "text",
-            "text": _build_prompt(obj_node.get("object_class", "object"), len(crop_paths)),
-        })
-        prompts.append({
-            "id": obj_node["node_id"],
-            "prompt": content,
-        })
-
-    return prompts, captures
-
-
-def _build_vision_test_prompts(
-    prompts: List[Dict[str, Any]],
-    max_prompts: int,
-) -> List[Dict[str, Any]]:
-    selected = prompts[:max_prompts]
-    out: List[Dict[str, Any]] = []
-    for item in selected:
-        prompt_id = str(item.get("id", "unknown"))
-        content = item.get("prompt", [])
-        images = [x for x in content if x.get("type") == "image"]
-        test_content: List[Dict[str, Any]] = list(images)
-        test_content.append({"type": "text", "text": TEST_VISION_PROMPT})
-        out.append({"id": prompt_id, "prompt": test_content})
-    return out
-
-
-async def _run_vision_input_test(
-    model_name: str,
-    api_keys: Optional[Union[str, Iterable[str]]],
-    prompts: List[Dict[str, Any]],
-    max_concurrent_per_key: int,
-    max_retries: int,
-) -> None:
-    if not prompts:
-        print("[test] no prompts to test")
-        return
-    generator = StreamGenerator(
-        model_name=model_name,
-        api_keys=_resolve_api_keys(api_keys),
-        max_concurrent_per_key=max_concurrent_per_key,
-        max_retries=max_retries,
-        rational=False,
-        with_unique_id=True,
-    )
-    print(f"[test] sending {len(prompts)} vision-test prompts")
-    async for item in generator.generate_stream(prompts=prompts, system_prompt="You are a visual assistant."):
-        if not item:
-            continue
-        print(f"[test] {item.get('id')} -> {item.get('result')}")
-
-
-async def generate_attribute_captions(
-    graph: Dict[str, Any],
-    video_path: str,
-    model_name: str,
-    api_keys: Optional[Union[str, Iterable[str]]],
-    crop_output_dir: str,
-    keyframe_count: int = 4,
-    padding_ratio: float = 0.1,
-    max_concurrent_per_key: int = 100,
-    max_retries: int = 5,
-    system_prompt: str = "You are a professional visual description assistant. Please output JSON strictly in accordance with the requirements.",
-) -> Dict[str, Optional[str]]:
-    keyframe_selector = KeyframeClustering()
-    prompts, _ = build_prompts(
-        graph=graph,
-        video_path=video_path,
-        crop_output_dir=crop_output_dir,
-        keyframe_count=keyframe_count,
-        padding_ratio=padding_ratio,
-        keyframe_selector=keyframe_selector,
-    )
-    if not prompts:
-        return {}
-
-    captioner = AttributeCaptioner(
-        model_name=model_name,
-        api_keys=api_keys,
-        max_concurrent_per_key=max_concurrent_per_key,
-        max_retries=max_retries,
-    )
-    return await captioner.generate_captions(prompts, system_prompt=system_prompt)
 
 
 def run(
@@ -419,59 +449,119 @@ def run(
     video: str,
     model_name: str,
     api_keys: Optional[Union[str, Iterable[str]]] = None,
+    masks_json: Optional[str] = None,
+    model_path: str = "nvidia/DAM-3B-Video",
     output: Optional[str] = None,
-    crop_output_dir: str = "output/attribute_crops",
-    keyframe_count: int = 4,
-    padding_ratio: float = 0.1,
+    prompt_mode: str = "focal_prompt",
+    conv_mode: str = "v1",
+    max_frames: int = 8,
+    temperature: float = 0.0,
+    top_p: float = 0.9,
+    max_new_tokens: int = 256,
     max_concurrent_per_key: int = 100,
     max_retries: int = 5,
-    default_caption: str = "unknown",
     overwrite: bool = True,
-    test_image_inputs_with_api: bool = False,
-    test_max_prompts: int = 3,
+    overwrite_object_class: bool = True,
 ) -> None:
     graph = _load_graph(jsonl, video)
-    if test_image_inputs_with_api:
-        keyframe_selector = KeyframeClustering()
-        prompts, _ = build_prompts(
-            graph=graph,
-            video_path=video,
-            crop_output_dir=crop_output_dir,
-            keyframe_count=keyframe_count,
-            padding_ratio=padding_ratio,
-            keyframe_selector=keyframe_selector,
-        )
-        test_prompts = _build_vision_test_prompts(prompts, max_prompts=test_max_prompts)
-        asyncio.run(
-            _run_vision_input_test(
-                model_name=model_name,
-                api_keys=api_keys,
-                prompts=test_prompts,
-                max_concurrent_per_key=max_concurrent_per_key,
-                max_retries=max_retries,
-            )
-        )
-        return
+    mask_json_path = (
+        Path(masks_json)
+        if masks_json
+        else Path(__file__).resolve().parents[1] / "output" / "sam2_masks" / f"{Path(video).stem}_sam2_masks_indexed.json"
+    )
+    if not mask_json_path.exists():
+        raise FileNotFoundError(f"Mask json not found: {mask_json_path}")
 
-    captions = asyncio.run(
-        generate_attribute_captions(
-            graph=graph,
+    frame_masks = _load_indexed_masks(mask_json_path)
+    generator = DAMAttributeGenerator(
+        model_path=model_path,
+        prompt_mode=prompt_mode,
+        conv_mode=conv_mode,
+        temperature=temperature,
+        top_p=top_p,
+        max_new_tokens=max_new_tokens,
+    )
+
+    descriptions: Dict[str, ObjectDescription] = {}
+    structured_prompts: List[Dict[str, Any]] = []
+    pending_objects: Dict[str, Dict[str, Any]] = {}
+    for obj_node in graph.get("object_nodes", []):
+        object_id = obj_node.get("node_id")
+        global_track_id = int(obj_node.get("global_track_id"))
+        frame_indices, images, masks = _collect_object_views(
             video_path=video,
+            global_track_id=global_track_id,
+            frame_masks=frame_masks,
+            max_frames=max_frames,
+        )
+        if not images or not masks:
+            print(f"[attribute_generator] skip {object_id}: no valid SAM2 masks found")
+            continue
+
+        raw_description = generator.describe_object(
+            images=images,
+            masks=masks,
+        )
+        default_category = _normalize_text(str(obj_node.get("object_class", "object"))) or "object"
+        structured_prompts.append(
+            {
+                "id": object_id,
+                "prompt": STRUCTURED_EXTRACTION_PROMPT.format(description=raw_description),
+            }
+        )
+        pending_objects[object_id] = {
+            "global_track_id": global_track_id,
+            "raw_description": raw_description,
+            "default_category": default_category,
+            "sampled_frames": frame_indices,
+        }
+
+    structured_results = asyncio.run(
+        _extract_structured_descriptions(
             model_name=model_name,
             api_keys=api_keys,
-            crop_output_dir=crop_output_dir,
-            keyframe_count=keyframe_count,
-            padding_ratio=padding_ratio,
+            prompts=structured_prompts,
             max_concurrent_per_key=max_concurrent_per_key,
             max_retries=max_retries,
         )
     )
 
+    for object_id, info in pending_objects.items():
+        structured = structured_results.get(object_id)
+        raw_description = info["raw_description"]
+        default_category = info["default_category"]
+        if structured is None:
+            category, attributes, relationships, actions = _parse_extraction(
+                raw_description,
+                default_category=default_category,
+            )
+        else:
+            category = _normalize_text(str(structured.get("object") or default_category)) or default_category
+            attributes = _normalize_string_list(structured.get("attributes", []))
+            relationships = _normalize_string_list(structured.get("relationships", []))
+            actions = _normalize_string_list(structured.get("actions", []))
+
+        descriptions[object_id] = ObjectDescription(
+            object_node_id=object_id,
+            global_track_id=int(info["global_track_id"]),
+            raw_description=raw_description,
+            category=category,
+            attributes=attributes,
+            relationships=relationships,
+            actions=actions,
+            sampled_frames=list(info["sampled_frames"]),
+        )
+        print(
+            f"[attribute_generator] {object_id} -> "
+            f"category={category}; attributes={attributes}; "
+            f"relationships={relationships}; actions={actions}"
+        )
+
     graph = add_attribute_nodes(
         graph=graph,
-        captions=captions,
-        default_caption=default_caption,
+        descriptions=descriptions,
         overwrite=overwrite,
+        overwrite_object_class=overwrite_object_class,
     )
 
     if output and output != jsonl:
@@ -484,6 +574,4 @@ def run(
 
 
 if __name__ == "__main__":
-    import fire
-
     fire.Fire(run)

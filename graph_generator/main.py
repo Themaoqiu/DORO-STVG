@@ -141,6 +141,7 @@ class SceneGraphGenerator:
         sam3_redetection_interval: int = 15,
         sam3_iou_threshold: float = 0.3,
         sam3_overlap_threshold: float = 0.6,
+        groundedsam2_mask_output_dir: Optional[str] = None,
         sam3_mask_output_dir: Optional[str] = None,
         sam3_match_output_dir: Optional[str] = None,
         sam3_match_log_path: Optional[str] = None,
@@ -166,6 +167,7 @@ class SceneGraphGenerator:
         self.sam3_redetection_interval = sam3_redetection_interval
         self.sam3_iou_threshold = sam3_iou_threshold
         self.sam3_overlap_threshold = sam3_overlap_threshold
+        self.groundedsam2_mask_output_dir = groundedsam2_mask_output_dir
         self.sam3_mask_output_dir = sam3_mask_output_dir
         self.sam3_match_output_dir = sam3_match_output_dir
         self.sam3_match_log_path = sam3_match_log_path
@@ -213,6 +215,7 @@ class SceneGraphGenerator:
                 iou_threshold=self.sam3_iou_threshold,
                 overlap_threshold=self.sam3_overlap_threshold,
                 redetection_interval=self.sam3_redetection_interval,
+                mask_output_dir=self.groundedsam2_mask_output_dir,
             )
             global_tracks = tracker.track_video(video_path, clips, all_detections)
             print(f"  Tracked {len(global_tracks)} objects")
@@ -340,6 +343,7 @@ def run(
     sam3_redetection_interval: int = 15,
     sam3_iou_threshold: float = 0.4,
     sam3_overlap_threshold: float = 0.6,
+    groundedsam2_mask_output_dir: str = None,
     sam3_mask_output_dir: str = None,
     sam3_match_output_dir: str = None,
     sam3_match_log_path: str = None,
@@ -366,6 +370,7 @@ def run(
         sam3_iou_threshold = sam3_iou_threshold,
         sam3_overlap_threshold=sam3_overlap_threshold,
         sam3_redetection_interval=sam3_redetection_interval,
+        groundedsam2_mask_output_dir=groundedsam2_mask_output_dir,
         sam3_mask_output_dir=sam3_mask_output_dir,
         sam3_match_output_dir=sam3_match_output_dir,
         sam3_match_log_path=sam3_match_log_path,

@@ -3,6 +3,8 @@ set -e
 export CUDA_VISIBLE_DEVICES=5
 export HF_ENDPOINT=https://hf-mirror.com
 
+cd /home/wangxingjian/DORO-STVG
+
 
 set -a
 source /home/wangxingjian/DORO-STVG/graph_generator/.env
@@ -24,8 +26,15 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #     --iou 0.5 \
 #     --sam2_model_cfg "${SAM2_MODEL_CFG}" \
 #     --sam2_checkpoint "${SAM2_CHECKPOINT}" \
+#     --groundedsam2_mask_output_dir /home/wangxingjian/DORO-STVG/graph_generator/output/sam2_masks \
 #     --sam3_redetection_interval 15 \
 #     --filter_min_frames 5
+
+# python -m graph_generator.modules.attribute_generator \
+#   --jsonl /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
+#   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
+#   --masks_json /home/wangxingjian/DORO-STVG/graph_generator/output/sam2_masks/50_TM5MPJIq1Is_2fps_sam2_masks_indexed.json \
+#   --model_path /home/wangxingjian/model/DAM-3B-Video
 
 # source /home/wangxingjian/DORO-STVG/graph_generator/.venv/mmaction/bin/activate
 # export PYTHONPATH="/home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2:${PYTHONPATH}"
@@ -35,11 +44,6 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #   --label-map /home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2/tools/data/ava/label_map.txt \
 #   --jsonl /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
 #   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4
-
-# python -m modules.attribute_generator \
-#   --jsonl scene_graphs.jsonl \
-#   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
-#   --model_name gemini-3-flash-preview
 
 # python -m modules.relation_generator \
 #   --jsonl scene_graphs.jsonl \
@@ -53,15 +57,11 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #   --max_pairs_per_object 3 \
 #   --similarity_threshold 0.35 \
 
-# python3 scripts/export_groundedsam2_masks.py \
-#   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
-#   --sam2_checkpoint /home/wangxingjian/DORO-STVG/graph_generator/dependence/GroundedSAM2/checkpoints/sam2.1_hiera_large.pt \
-#   --yolo_model /home/wangxingjian/model/yolo26x/yolo26x.pt \
-#   --output_dir output/sam2_masks
+cd /home/wangxingjian/DORO-STVG/graph_generator
+python3 scripts/test_sam2_auto_tracker.py \
+  --video-path /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
+  --sam2-checkpoint /home/wangxingjian/DORO-STVG/graph_generator/dependence/GroundedSAM2/checkpoints/sam2.1_hiera_large.pt \
+  --sam2-model-cfg configs/sam2.1/sam2.1_hiera_l.yaml \
+  --output-path /home/wangxingjian/DORO-STVG/graph_generator/output/sam2_auto.mp4
 
-python /home/wangxingjian/model/traser/inference.py \
-    --model_path /home/wangxingjian/model/traser \
-    --video_path /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
-    --mask_path /home/wangxingjian/DORO-STVG/graph_generator/output/sam2_masks/50_TM5MPJIq1Is_2fps_sam2_masks.json \
-    --out_dir output
 

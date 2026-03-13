@@ -1,12 +1,14 @@
 import shutil
 import sys
 import tempfile
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
 import torch
+from pycocotools import mask as mask_utils
 
 from .scene_detector import SceneClip
 from .yolo_tracker import GlobalTrack, YOLOTrack
@@ -28,6 +30,7 @@ class GroundedSAM2Tracker:
         iou_threshold: float = 0.4,
         overlap_threshold: float = 0.6,
         redetection_interval: int = 15,
+        mask_output_dir: Optional[str] = None,
     ):
         self.sam2_root = GROUNDEDSAM2_ROOT
         if not self.sam2_root.exists():
@@ -45,6 +48,7 @@ class GroundedSAM2Tracker:
         self.iou_threshold = iou_threshold
         self.overlap_threshold = overlap_threshold
         self.redetection_interval = redetection_interval
+        self.mask_output_dir = mask_output_dir
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
         self.video_predictor = build_sam2_video_predictor(
@@ -75,6 +79,7 @@ class GroundedSAM2Tracker:
             )
 
             all_global_tracks: List[GlobalTrack] = []
+            all_frame_masks: Dict[int, Dict[int, np.ndarray]] = {}
             global_track_id = 0
             for clip in clips:
                 clip_dets = detections.get(clip.clip_id, {}) or {}
@@ -82,7 +87,7 @@ class GroundedSAM2Tracker:
                     f"  Processing clip {clip.clip_id} "
                     f"(frames {clip.start_frame}-{clip.end_frame})..."
                 )
-                clip_tracks, global_track_id = self._track_clip(
+                clip_tracks, global_track_id, clip_frame_masks = self._track_clip(
                     clip=clip,
                     clip_dets=clip_dets,
                     start_global_id=global_track_id,
@@ -90,6 +95,14 @@ class GroundedSAM2Tracker:
                     inference_state=inference_state,
                 )
                 all_global_tracks.extend(clip_tracks)
+                for frame_idx, frame_obj_masks in clip_frame_masks.items():
+                    all_frame_masks.setdefault(frame_idx, {}).update(frame_obj_masks)
+            if self.mask_output_dir:
+                self._export_video_masks(
+                    video_path=video_path,
+                    frame_masks=all_frame_masks,
+                    num_frames=len(frame_paths),
+                )
             return all_global_tracks
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -101,14 +114,14 @@ class GroundedSAM2Tracker:
         start_global_id: int,
         frame_paths: List[Path],
         inference_state: Dict[str, Any],
-    ) -> Tuple[List[GlobalTrack], int]:
+    ) -> Tuple[List[GlobalTrack], int, Dict[int, Dict[int, np.ndarray]]]:
         tracked_instances: Dict[int, Dict[int, Dict[str, Any]]] = {}
         instance_classes: Dict[int, str] = {}
         frame_masks: Dict[int, Dict[int, Dict[str, Any]]] = {}
         next_obj_id = 0
 
         if clip.end_frame < clip.start_frame:
-            return [], start_global_id
+            return [], start_global_id, {}
 
         first_frame = clip.start_frame
         first_prompts: Dict[int, Dict[str, Any]] = {}
@@ -191,7 +204,16 @@ class GroundedSAM2Tracker:
             start_global_id=start_global_id,
         )
         print(f"    Found {len(global_tracks)} objects in clip {clip.clip_id}")
-        return global_tracks, start_global_id + len(global_tracks)
+        local_to_global_id = {
+            local_track.track_id: g_track.global_id
+            for g_track in global_tracks
+            for local_track in g_track.local_tracks
+        }
+        frame_masks_by_global_id = self._remap_frame_masks_to_global_ids(
+            frame_masks=frame_masks,
+            local_to_global_id=local_to_global_id,
+        )
+        return global_tracks, start_global_id + len(global_tracks), frame_masks_by_global_id
 
     def _collect_detection_masks(
         self,
@@ -417,3 +439,73 @@ class GroundedSAM2Tracker:
             global_tracks.append(global_track)
             global_track_id += 1
         return global_tracks
+
+    def _remap_frame_masks_to_global_ids(
+        self,
+        frame_masks: Dict[int, Dict[int, Dict[str, Any]]],
+        local_to_global_id: Dict[int, int],
+    ) -> Dict[int, Dict[int, np.ndarray]]:
+        out: Dict[int, Dict[int, np.ndarray]] = {}
+        for frame_idx, frame_obj_masks in frame_masks.items():
+            remapped_obj_masks: Dict[int, np.ndarray] = {}
+            for local_obj_id, info in frame_obj_masks.items():
+                global_id = local_to_global_id.get(local_obj_id)
+                if global_id is None:
+                    continue
+                raw_mask = info.get("mask")
+                if raw_mask is None:
+                    continue
+                mask_np = np.array(raw_mask, dtype=np.uint8)
+                if mask_np.sum() == 0:
+                    continue
+                remapped_obj_masks[global_id] = mask_np
+            if remapped_obj_masks:
+                out[frame_idx] = remapped_obj_masks
+        return out
+
+    @staticmethod
+    def _mask_to_rle(mask: np.ndarray) -> Dict[str, Any]:
+        rle = mask_utils.encode(np.asfortranarray(mask.astype(np.uint8)))
+        counts = rle["counts"]
+        if isinstance(counts, bytes):
+            counts = counts.decode("utf-8")
+        return {
+            "size": [int(rle["size"][0]), int(rle["size"][1])],
+            "counts": counts,
+        }
+
+    def _build_video_rle_masks_with_ids(
+        self,
+        frame_masks: Dict[int, Dict[int, np.ndarray]],
+        num_frames: int,
+    ) -> List[List[Dict[str, Any]]]:
+        frame_rles: List[List[Dict[str, Any]]] = [[] for _ in range(num_frames)]
+        for frame_idx in range(num_frames):
+            obj_masks = frame_masks.get(frame_idx, {})
+            if not obj_masks:
+                continue
+            frame_rles[frame_idx] = [
+                {
+                    "global_track_id": int(global_id),
+                    "segmentation": self._mask_to_rle(obj_masks[global_id]),
+                }
+                for global_id in sorted(obj_masks.keys())
+            ]
+        return frame_rles
+
+    def _export_video_masks(
+        self,
+        video_path: str,
+        frame_masks: Dict[int, Dict[int, np.ndarray]],
+        num_frames: int,
+    ) -> None:
+        output_dir = Path(self.mask_output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{Path(video_path).stem}_sam2_masks_indexed.json"
+        payload = self._build_video_rle_masks_with_ids(
+            frame_masks=frame_masks,
+            num_frames=num_frames,
+        )
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        print(f"  Saved Grounded-SAM2 masks to {output_path}")
