@@ -12,6 +12,22 @@ from .vision_utils import build_multimodal_message
 logger = logging.getLogger(__name__)
 
 
+def _load_env_var_from_project_env(var_name: str) -> str:
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    if not env_path.exists():
+        return ""
+    with open(env_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() != var_name:
+                continue
+            return value.strip().strip('"').strip("'")
+    return ""
+
+
 class QAWrapper:
     """Asynchronous wrapper for LLM API client."""
 
@@ -35,6 +51,9 @@ class QAWrapper:
             os.getenv("MM_API_BASE_URL")
             or os.getenv("VISION_API_BASE_URL")
             or os.getenv("VIDEO_API_BASE_URL")
+            or _load_env_var_from_project_env("MM_API_BASE_URL")
+            or _load_env_var_from_project_env("VISION_API_BASE_URL")
+            or _load_env_var_from_project_env("VIDEO_API_BASE_URL")
             or "https://dashscope.aliyuncs.com/compatible-mode/v1"
         )
         

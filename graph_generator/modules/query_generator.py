@@ -46,9 +46,27 @@ def _normalize_api_keys(api_keys: Union[str, Iterable[str]]) -> List[str]:
     return [str(key).strip() for key in api_keys if str(key).strip()]
 
 
+def _load_api_keys_from_project_env() -> str:
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if not env_path.exists():
+        return ""
+    with open(env_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() != "API_KEYS":
+                continue
+            return value.strip().strip('"').strip("'")
+    return ""
+
+
 def _resolve_api_keys(api_keys: Optional[Union[str, Iterable[str]]]) -> List[str]:
     if api_keys is None:
         api_keys = os.getenv("API_KEYS", "")
+    if not api_keys:
+        api_keys = _load_api_keys_from_project_env()
     keys = _normalize_api_keys(api_keys)
     if not keys:
         raise ValueError("api_keys is required (pass --api_keys or set API_KEYS in env)")

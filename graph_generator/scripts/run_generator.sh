@@ -3,17 +3,9 @@ set -e
 export CUDA_VISIBLE_DEVICES=5
 export HF_ENDPOINT=https://hf-mirror.com
 
-cd /home/wangxingjian/DORO-STVG
-
-
-set -a
-source /home/wangxingjian/DORO-STVG/graph_generator/.env
-set +a
-
 SAM2_MODEL_CFG="configs/sam2.1/sam2.1_hiera_l.yaml"
 SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/GroundedSAM2/checkpoints/sam2.1_hiera_large.pt"
 
-# source /home/wangxingjian/DORO-STVG/graph_generator/.venv/main/bin/activate
 # python -m main \
 #     --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
 #     --output scene_graphs.jsonl \
@@ -30,20 +22,22 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #     --sam3_redetection_interval 15 \
 #     --filter_min_frames 5
 
-# python -m graph_generator.modules.attribute_generator \
+# python -m modules.attribute_generator \
 #   --jsonl /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
 #   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
+#   --model_name gemini-3-flash-preview \
 #   --masks_json /home/wangxingjian/DORO-STVG/graph_generator/output/sam2_masks/50_TM5MPJIq1Is_2fps_sam2_masks_indexed.json \
 #   --model_path /home/wangxingjian/model/DAM-3B-Video
 
-# source /home/wangxingjian/DORO-STVG/graph_generator/.venv/mmaction/bin/activate
-# export PYTHONPATH="/home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2:${PYTHONPATH}"
-# python -m modules.action_detector \
-#   --config /home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2/configs/detection/videomae/vit-large-p16_videomae-k400-pre_8xb8-16x4x1-20e-adamw_ava-kinetics-rgb.py \
-#   --checkpoint /home/wangxingjian/model/vit-large-p16_videomae-k400-pre.pth \
-#   --label-map /home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2/tools/data/ava/label_map.txt \
-#   --jsonl /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
-#   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4
+source /home/wangxingjian/DORO-STVG/graph_generator/.venv/mmaction/bin/activate
+export PYTHONPATH="/home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2:${PYTHONPATH}"
+python -m modules.action_detector \
+  --config /home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2/configs/detection/videomae/vit-large-p16_videomae-k400-pre_8xb8-16x4x1-20e-adamw_ava-kinetics-rgb.py \
+  --checkpoint /home/wangxingjian/model/vit-large-p16_videomae-k400-pre.pth \
+  --label-map /home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2/tools/data/ava/label_map.txt \
+  --frame_interval 1 \
+  --jsonl /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
+  --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
 
 # python -m modules.relation_generator \
 #   --jsonl scene_graphs.jsonl \
@@ -56,12 +50,3 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #   --model_name gemini-3-flash-preview \
 #   --max_pairs_per_object 3 \
 #   --similarity_threshold 0.35 \
-
-cd /home/wangxingjian/DORO-STVG/graph_generator
-python3 scripts/test_sam2_auto_tracker.py \
-  --video-path /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
-  --sam2-checkpoint /home/wangxingjian/DORO-STVG/graph_generator/dependence/GroundedSAM2/checkpoints/sam2.1_hiera_large.pt \
-  --sam2-model-cfg configs/sam2.1/sam2.1_hiera_l.yaml \
-  --output-path /home/wangxingjian/DORO-STVG/graph_generator/output/sam2_auto.mp4
-
-

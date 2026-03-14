@@ -15,7 +15,7 @@ from pycocotools import mask as mask_utils
 
 from api_sync.api import StreamGenerator
 from api_sync.utils.parser import JSONParser
-from ..dependence.dam import DescribeAnythingModel, disable_torch_init
+from dependence.dam import DescribeAnythingModel, disable_torch_init
 
 
 VIDEO_QUERY_TEMPLATE = (
@@ -66,13 +66,6 @@ class ObjectDescription:
     attributes: List[str]
     relationships: List[str]
     actions: List[str]
-    sampled_frames: List[int]
-
-    @property
-    def appearance(self) -> str:
-        parts = [self.category] if self.category else []
-        parts.extend(attr for attr in self.attributes if attr)
-        return ", ".join(parts).strip(", ")
 
 
 def _load_graph(jsonl_path: str, video_path: str) -> Dict[str, Any]:
@@ -199,12 +192,32 @@ def _normalize_api_keys(api_keys: Union[str, Iterable[str]]) -> List[str]:
     return [str(key).strip() for key in api_keys if str(key).strip()]
 
 
-def _resolve_api_keys(api_keys: Optional[Union[str, Iterable[str]]]) -> List[str]:
-    if api_keys is None:
-        api_keys = os.getenv("API_KEYS", "")
+def _load_api_keys_from_project_env() -> str:
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if not env_path.exists():
+        return ""
+    with open(env_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() != "API_KEYS":
+                continue
+            value = value.strip().strip('"').strip("'")
+            return value
+    return ""
+
+
+def _resolve_api_keys() -> List[str]:
+    api_keys = os.getenv("API_KEYS", "")
+    if not api_keys:
+        api_keys = _load_api_keys_from_project_env()
     keys = _normalize_api_keys(api_keys)
     if not keys:
-        raise ValueError("api_keys is required (pass --api_keys or set API_KEYS in env)")
+        raise ValueError("API_KEYS is required in env or graph_generator/.env")
     return keys
 
 
@@ -328,13 +341,12 @@ class DAMAttributeGenerator:
             num_beams=1,
             max_new_tokens=self.max_new_tokens,
         ))
-        print(f"[attribute_generator][dam_raw] {raw_description}")
+        # print(f"[attribute_generator][dam_raw] {raw_description}")
         return raw_description
 
 
 async def _extract_structured_descriptions(
     model_name: str,
-    api_keys: Optional[Union[str, Iterable[str]]],
     prompts: List[Dict[str, Any]],
     max_concurrent_per_key: int,
     max_retries: int,
@@ -344,7 +356,7 @@ async def _extract_structured_descriptions(
 
     generator = StreamGenerator(
         model_name=model_name,
-        api_keys=_resolve_api_keys(api_keys),
+        api_keys=_resolve_api_keys(),
         max_concurrent_per_key=max_concurrent_per_key,
         max_retries=max_retries,
         rational=False,
@@ -365,82 +377,40 @@ async def _extract_structured_descriptions(
     return results
 
 
-def add_attribute_nodes(
+def apply_attributes_to_object_nodes(
     graph: Dict[str, Any],
     descriptions: Dict[str, ObjectDescription],
-    attribute_type: str = "appearance",
-    overwrite: bool = True,
     overwrite_object_class: bool = False,
 ) -> Dict[str, Any]:
-    attribute_nodes = graph.get("attribute_nodes", [])
-    edges = graph.get("edges", [])
-
-    if overwrite:
-        removed_ids = {
-            node.get("node_id")
-            for node in attribute_nodes
-            if node.get("attribute_type") == attribute_type
-        }
-        attribute_nodes = [
-            node for node in attribute_nodes
-            if node.get("attribute_type") != attribute_type
-        ]
-        edges = [
+    graph.pop("attribute_nodes", None)
+    if "edges" in graph:
+        graph["edges"] = [
             edge
-            for edge in edges
-            if not (
-                edge.get("edge_type") == "has_attribute"
-                and edge.get("target_id") in removed_ids
-            )
+            for edge in graph.get("edges", [])
+            if edge.get("edge_type") != "has_attribute"
+            and not str(edge.get("edge_id", "")).startswith("edge_has_attribute_")
         ]
 
     for obj_node in graph.get("object_nodes", []):
+        obj_node.pop("appearance", None)
+        obj_node.pop("attribute_source", None)
+        obj_node.pop("attribute_frame_indices", None)
+
         object_id = obj_node.get("node_id")
         info = descriptions.get(object_id)
         if info is None:
             continue
 
-        obj_node["appearance"] = info.appearance
         obj_node["dam_category"] = info.category
         obj_node["attributes"] = info.attributes
         obj_node["relationships"] = info.relationships
         obj_node["actions"] = info.actions
-        obj_node["attribute_source"] = "dam+api+sam2_mask"
-        obj_node["attribute_frame_indices"] = info.sampled_frames
         resolved_category = _strip_uncertainty_suffix(info.category)
         current_class = _normalize_text(str(obj_node.get("object_class", "")))
         if resolved_category and (
             overwrite_object_class or resolved_category.lower() != current_class.lower()
         ):
             obj_node["object_class"] = resolved_category
-
-        attr_node_id = f"attr_{object_id}"
-        attribute_nodes.append(
-            {
-                "node_id": attr_node_id,
-                "object_node_id": object_id,
-                "attribute_type": attribute_type,
-                "description": info.appearance,
-                "category": info.category,
-                "attributes": info.attributes,
-                "relationships": info.relationships,
-                "actions": info.actions,
-                "frame_indices": info.sampled_frames,
-                "source": "dam+api+sam2_mask",
-            }
-        )
-        edges.append(
-            {
-                "edge_id": f"edge_has_attribute_{object_id}",
-                "source_id": object_id,
-                "target_id": attr_node_id,
-                "edge_type": "has_attribute",
-                "relation": attribute_type,
-            }
-        )
-
-    graph["attribute_nodes"] = attribute_nodes
-    graph["edges"] = edges
     return graph
 
 
@@ -448,7 +418,6 @@ def run(
     jsonl: str,
     video: str,
     model_name: str,
-    api_keys: Optional[Union[str, Iterable[str]]] = None,
     masks_json: Optional[str] = None,
     model_path: str = "nvidia/DAM-3B-Video",
     output: Optional[str] = None,
@@ -460,7 +429,6 @@ def run(
     max_new_tokens: int = 256,
     max_concurrent_per_key: int = 100,
     max_retries: int = 5,
-    overwrite: bool = True,
     overwrite_object_class: bool = True,
 ) -> None:
     graph = _load_graph(jsonl, video)
@@ -513,13 +481,11 @@ def run(
             "global_track_id": global_track_id,
             "raw_description": raw_description,
             "default_category": default_category,
-            "sampled_frames": frame_indices,
         }
 
     structured_results = asyncio.run(
         _extract_structured_descriptions(
             model_name=model_name,
-            api_keys=api_keys,
             prompts=structured_prompts,
             max_concurrent_per_key=max_concurrent_per_key,
             max_retries=max_retries,
@@ -549,7 +515,6 @@ def run(
             attributes=attributes,
             relationships=relationships,
             actions=actions,
-            sampled_frames=list(info["sampled_frames"]),
         )
         print(
             f"[attribute_generator] {object_id} -> "
@@ -557,10 +522,9 @@ def run(
             f"relationships={relationships}; actions={actions}"
         )
 
-    graph = add_attribute_nodes(
+    graph = apply_attributes_to_object_nodes(
         graph=graph,
         descriptions=descriptions,
-        overwrite=overwrite,
         overwrite_object_class=overwrite_object_class,
     )
 
