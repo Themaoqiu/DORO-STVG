@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -216,7 +217,6 @@ def _draw_label(frame: Any, bbox: List[float], label: str) -> bool:
     if draw_x2 <= draw_x1 or draw_y2 <= draw_y1:
         return False
 
-    cv2.rectangle(frame, (draw_x1, draw_y1), (draw_x2, draw_y2), (0, 0, 255), 3)
     cx = int((draw_x1 + draw_x2) / 2)
     cy = int((draw_y1 + draw_y2) / 2)
     cv2.putText(
@@ -389,6 +389,290 @@ def _merge_intervals(intervals: List[List[int]]) -> List[List[int]]:
         else:
             merged.append([s, e])
     return merged
+
+
+def _normalize_text(text: str) -> str:
+    cleaned = str(text).strip().lower().replace("_", " ").replace("-", " ")
+    out_chars: List[str] = []
+    for ch in cleaned:
+        out_chars.append(ch if ch.isalnum() or ch.isspace() else " ")
+    return " ".join("".join(out_chars).split())
+
+
+# Action labels that are clear relation candidates (from AVA label_map),
+# mapped to one or multiple normalized relation keys.
+ACTION_LABEL_TO_REL_KEYS: Dict[str, List[str]] = {
+    "answer phone": ["answer phone", "talk to", "listen to"],
+    "carry hold an object": ["carry hold", "hold", "carry"],
+    "hit an object": ["hit", "touch"],
+    "point to an object": ["point to"],
+    "pull an object": ["pull"],
+    "push an object": ["push"],
+    "ride e g a bike a car a horse": ["ride"],
+    "take a photo": ["take a photo"],
+    "text on look at a cellphone": ["watch", "look at"],
+    "touch an object": ["touch"],
+    "watch e g tv": ["watch", "look at"],
+    "work on a computer": ["work on", "use"],
+    "fight hit a person": ["fight", "hit"],
+    "give serve an object to a person": ["give", "serve", "hand"],
+    "grab a person": ["grab"],
+    "hand shake": ["hand shake", "shake hands", "shake"],
+    "hug a person": ["hug"],
+    "kiss a person": ["kiss"],
+    "lift a person": ["lift"],
+    "listen to a person": ["listen to"],
+    "push another person": ["push"],
+    "sing to e g self a person a group": ["sing to"],
+    "take an object from a person": ["take from", "grab from", "take"],
+    "talk to e g self a person a group": ["talk to"],
+    "watch a person": ["watch", "look at"],
+}
+
+
+PREDICATE_KEY_ALIASES: Dict[str, List[str]] = {
+    "watch": ["watch", "look at", "looking at", "look"],
+    "listen to": ["listen to", "listening to", "hear"],
+    "talk to": ["talk to", "talking to", "speak to", "chat with"],
+    "carry hold": ["carry hold", "carry", "hold", "holding", "carrying"],
+    "touch": ["touch", "touching"],
+    "push": ["push", "pushing"],
+    "pull": ["pull", "pulling"],
+    "point to": ["point to", "point at"],
+    "hit": ["hit", "hitting", "strike"],
+    "fight": ["fight", "fighting"],
+    "give": ["give", "giving", "serve"],
+    "hand": ["hand", "hand over"],
+    "grab": ["grab", "grabbing"],
+    "hand shake": ["hand shake", "shake hands", "shake"],
+    "hug": ["hug", "hugging"],
+    "kiss": ["kiss", "kissing"],
+    "lift": ["lift", "lifting", "pick up"],
+    "sing to": ["sing to", "singing to"],
+    "take from": ["take from", "taking from"],
+    "ride": ["ride", "riding"],
+    "take a photo": ["take a photo", "photograph"],
+    "work on": ["work on", "using"],
+    "use": ["use", "using"],
+    "answer phone": ["answer phone"],
+    "look at": ["look at", "looking at", "watch"],
+}
+
+
+REL_KEY_REGEX_PATTERNS: Dict[str, List[str]] = {
+    "watch": [
+        r"\bwatch(?:ing)?\b",
+        r"\blook(?:ing)?\s*at\b",
+        r"lookat",
+    ],
+    "listen to": [r"\blisten(?:ing)?\s*to\b"],
+    "talk to": [r"\btalk(?:ing)?\s*to\b", r"\bspeak(?:ing)?\s*to\b", r"\bchat(?:ting)?\s*with\b"],
+    "carry hold": [r"\bcarry(?:ing)?\b", r"\bhold(?:ing)?\b"],
+    "touch": [r"\btouch(?:ing)?\b"],
+    "push": [r"\bpush(?:ing)?\b"],
+    "pull": [r"\bpull(?:ing)?\b"],
+    "point to": [r"\bpoint(?:ing)?\s*(?:to|at)\b"],
+    "hit": [r"\bhit(?:ting)?\b", r"\bstrike\b"],
+    "fight": [r"\bfight(?:ing)?\b"],
+    "give": [r"\bgive\b", r"\bgiving\b", r"\bserve\b"],
+    "hand": [r"\bhand\b", r"\bhand\s*over\b"],
+    "grab": [r"\bgrab(?:bing)?\b"],
+    "hand shake": [r"\bhand\s*shake\b", r"\bshake\s*hands?\b"],
+    "hug": [r"\bhug(?:ging)?\b"],
+    "kiss": [r"\bkiss(?:ing)?\b"],
+    "lift": [r"\blift(?:ing)?\b", r"\bpick\s*up\b"],
+    "sing to": [r"\bsing(?:ing)?\s*to\b"],
+    "take from": [r"\btak(?:e|ing)\s+.*\s+from\b"],
+    "ride": [r"\bride\b", r"\briding\b"],
+    "take a photo": [r"\btake\b.*\bphoto\b", r"\bphotograph\b"],
+    "work on": [r"\bwork(?:ing)?\s*on\b"],
+    "use": [r"\buse\b", r"\busing\b"],
+    "answer phone": [r"\banswer(?:ing)?\s*phone\b"],
+    "look at": [r"\blook(?:ing)?\s*at\b", r"lookat"],
+}
+
+
+def _compact_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(text).lower())
+
+
+def _match_rel_keys_by_regex(text: str) -> List[str]:
+    norm = _normalize_text(text)
+    compact = _compact_text(text)
+    matched: List[str] = []
+    for key, patterns in REL_KEY_REGEX_PATTERNS.items():
+        for pat in patterns:
+            if re.search(pat, norm) or re.search(pat, compact):
+                matched.append(key)
+                break
+    return matched
+
+
+def _to_relation_key_from_action_label(action_label: str) -> List[str]:
+    norm = _normalize_text(action_label)
+    keys = list(ACTION_LABEL_TO_REL_KEYS.get(norm, []))
+    for key in _match_rel_keys_by_regex(action_label):
+        if key == "look at":
+            key = "watch"
+        if key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _to_relation_key_from_predicate(predicate: str) -> Optional[str]:
+    norm = _normalize_text(predicate)
+    if not norm:
+        return None
+
+    # Regex-first to cover variants like look_at / look-at / lookat / looking at.
+    regex_keys = _match_rel_keys_by_regex(predicate)
+    if regex_keys:
+        key = regex_keys[0]
+        if key == "look at":
+            return "watch"
+        return key
+
+    for key, aliases in PREDICATE_KEY_ALIASES.items():
+        if norm == key:
+            return key
+        if norm in aliases:
+            return key
+    # Fallback: if predicate already equals one of the action relation keys, keep it.
+    all_action_keys = {k for keys in ACTION_LABEL_TO_REL_KEYS.values() for k in keys}
+    if norm in all_action_keys:
+        return norm
+    return None
+
+
+def _has_time_overlap(edge_spans: Any, start_frame: int, end_frame: int) -> bool:
+    if not isinstance(edge_spans, list):
+        return False
+    for span in edge_spans:
+        if not isinstance(span, list) or len(span) != 2:
+            continue
+        try:
+            s = int(span[0])
+            e = int(span[1])
+        except Exception:
+            continue
+        if e < s:
+            s, e = e, s
+        if max(s, start_frame) <= min(e, end_frame):
+            return True
+    return False
+
+
+def merge_contacting_edges_into_actions(graph: Dict[str, Any], verbose: bool = False) -> Dict[str, Any]:
+    object_nodes = graph.get("object_nodes", [])
+    gid_to_node_id: Dict[int, str] = {}
+    node_id_to_gid: Dict[str, int] = {}
+    for obj in object_nodes:
+        try:
+            gid = int(obj.get("global_track_id"))
+        except Exception:
+            continue
+        node_id = str(obj.get("node_id", ""))
+        if node_id:
+            gid_to_node_id[gid] = node_id
+            node_id_to_gid[node_id] = gid
+
+    action_nodes = graph.get("action_nodes", [])
+    action_index: Dict[int, List[Dict[str, Any]]] = {}
+    for action_group in action_nodes:
+        obj_node_id = str(action_group.get("object_node_id", ""))
+        if not obj_node_id:
+            continue
+        subject_gid = node_id_to_gid.get(obj_node_id)
+        if subject_gid is None:
+            continue
+        for action in action_group.get("actions", []):
+            if not isinstance(action, dict):
+                continue
+            keys = _to_relation_key_from_action_label(str(action.get("action_label", "")))
+            if not keys:
+                continue
+            try:
+                start_frame = int(action.get("start_frame"))
+                end_frame = int(action.get("end_frame"))
+            except Exception:
+                continue
+            action_index.setdefault(subject_gid, []).append(
+                {
+                    "action": action,
+                    "keys": set(keys),
+                    "start_frame": start_frame,
+                    "end_frame": end_frame,
+                }
+            )
+
+    new_edge_groups: List[Dict[str, Any]] = []
+    removed_edges = 0
+    for edge_group in graph.get("edges", []):
+        try:
+            subject_id = int(edge_group.get("subject_id"))
+        except Exception:
+            continue
+        subject_actions = action_index.get(subject_id, [])
+        kept_rels: List[Dict[str, Any]] = []
+        for rel in edge_group.get("relationships", []):
+            if not isinstance(rel, dict):
+                continue
+            if rel.get("edge_type") != "contacting":
+                kept_rels.append(rel)
+                continue
+            pred_key = _to_relation_key_from_predicate(str(rel.get("predicate_verb", "")))
+            if pred_key is None or not subject_actions:
+                kept_rels.append(rel)
+                continue
+
+            try:
+                target_gid = int(rel.get("object_id"))
+            except Exception:
+                kept_rels.append(rel)
+                continue
+
+            matched = False
+            for action_item in subject_actions:
+                if pred_key not in action_item["keys"]:
+                    continue
+                if not _has_time_overlap(rel.get("time_frames"), action_item["start_frame"], action_item["end_frame"]):
+                    continue
+                action_dict = action_item["action"]
+                targets = action_dict.get("target_object_ids")
+                if not isinstance(targets, list):
+                    targets = []
+                if target_gid not in targets:
+                    targets.append(target_gid)
+                    targets.sort()
+                action_dict["target_object_ids"] = targets
+                matched = True
+
+            if matched:
+                removed_edges += 1
+            else:
+                kept_rels.append(rel)
+
+        if kept_rels:
+            def _safe_int(v: Any) -> int:
+                try:
+                    return int(v)
+                except Exception:
+                    return -1
+
+            kept_rels.sort(
+                key=lambda x: (
+                    x.get("edge_type", ""),
+                    x.get("predicate_verb", ""),
+                    _safe_int(x.get("object_id", -1)),
+                )
+            )
+            new_edge_groups.append({"subject_id": subject_id, "relationships": kept_rels})
+
+    graph["edges"] = new_edge_groups
+    graph["action_nodes"] = action_nodes
+    if verbose:
+        print(f"[relation][post] merged contacting edges into actions: removed={removed_edges}")
+    return graph
 
 
 def collect_pair_infos(
@@ -703,6 +987,7 @@ async def generate_relation_edges(
     graph.pop("spatial_edges", None)
     graph.pop("contacting_edges", None)
     graph["edges"] = merge_spatial_and_contacting_edges(spatial_grouped, contacting_grouped)
+    graph = merge_contacting_edges_into_actions(graph, verbose=verbose)
     if verbose:
         merged_rel_cnt = sum(len(x.get("relationships", [])) for x in graph["edges"] if isinstance(x, dict))
         print(f"[relation] merged subjects={len(graph['edges'])} relations={merged_rel_cnt}")
