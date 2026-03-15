@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -113,12 +112,6 @@ def _update_jsonl_inplace(jsonl_path: str, video_path: str, graph: Dict[str, Any
             f_out.write(json.dumps(graph, ensure_ascii=False) + "\n")
 
     os.replace(temp_path, input_path)
-
-
-def _appearance_similarity(text_a: str, text_b: str) -> float:
-    if not text_a or not text_b:
-        return 0.0
-    return SequenceMatcher(None, text_a.lower(), text_b.lower()).ratio()
 
 
 def _select_frames_in_shot(
@@ -261,6 +254,15 @@ def _build_prompt(bundle_a: ObjectBundle, bundle_b: ObjectBundle) -> str:
     )
 
 
+def _node_id_category(node_id: str) -> str:
+    node = str(node_id).strip().lower()
+    if not node:
+        return ""
+    if "_" in node:
+        return node.split("_", 1)[0]
+    return node
+
+
 def _extract_same_entity(response: str) -> Optional[Dict[str, Any]]:
     parsed = JSONParser.parse(response)
     if not isinstance(parsed, dict):
@@ -339,21 +341,19 @@ def _build_prompts(
     pair_map: Dict[str, Tuple[str, ObjectBundle, ObjectBundle]] = {}
 
     for i, bundle_a in enumerate(bundles):
-        candidates: List[Tuple[float, ObjectBundle]] = []
+        candidates: List[ObjectBundle] = []
+        cat_a = _node_id_category(bundle_a.node_id)
         for j, bundle_b in enumerate(bundles):
             if j <= i:
                 continue
-            if bundle_a.object_class != bundle_b.object_class:
+            cat_b = _node_id_category(bundle_b.node_id)
+            if not cat_a or not cat_b or cat_a != cat_b:
                 continue
             if set(bundle_a.shot_ids) & set(bundle_b.shot_ids):
                 continue
-            similarity = _appearance_similarity(bundle_a.appearance, bundle_b.appearance)
-            if similarity < similarity_threshold:
-                continue
-            candidates.append((similarity, bundle_b))
+            candidates.append(bundle_b)
 
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        for similarity, bundle_b in candidates[:max_pairs_per_object]:
+        for bundle_b in candidates[:max_pairs_per_object]:
             pair_key = f"{bundle_a.node_id}|{bundle_b.node_id}"
             prompt_id = pair_key
             content: List[Dict[str, Any]] = []
