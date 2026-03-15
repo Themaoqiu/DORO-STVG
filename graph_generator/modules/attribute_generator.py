@@ -53,6 +53,7 @@ form
 - Relationships = How the object relates to other things spatially, functionally, or
 contextually
 - Actions = What the object is doing or how it‘s moving
+- However, please note that **the attributes of clothing on a person should not be directly stored as attributes of the person**. If the description mentions a brown hat, it should be stored as **a brown hat** rather than just **brown**.
 Now process the following description:
 {description}"""
 

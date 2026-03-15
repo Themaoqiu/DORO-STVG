@@ -54,4 +54,12 @@ python -m modules.reference_edge_generator \
   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
   --model_name gemini-3-flash-preview \
   --max_pairs_per_object 3 \
-  --similarity_threshold 0.35 \
+
+# python3 -m scripts.test_reference_id_matching \
+#   --jsonl /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
+#   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
+#   --model_name gemini-3-flash-preview \
+#   --output_dir /home/wangxingjian/DORO-STVG/graph_generator/output/reference_id_match_test \
+#   --shot_a 0 \
+#   --shot_b 1 \
+#   --frames_per_shot 3

@@ -1,7 +1,8 @@
 import asyncio
 import json
 import os
-from dataclasses import dataclass
+import re
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -11,36 +12,42 @@ from api_sync.api import StreamGenerator
 from api_sync.utils.parser import JSONParser
 
 
-PROMPT_TEMPLATE = (
-    "You will see two objects from different shots of the same video. "
-    "Images are ordered as: all boxed frames of object A first, then all boxed frames of object B. "
-    "In each image, the target object is highlighted by a green bounding box. "
-    "Use both the images and the appearance descriptions to decide if they are the same real-world entity. "
-    "If you are unsure, output unsure. "
-    "Return strict JSON only:\n"
-    "{{\"same_entity\": \"yes|no|unsure\", \"confidence\": 0-1}}.\n"
-    "Object A class: {class_a}. Appearance A: {appearance_a}. "
-    "Object B class: {class_b}. Appearance B: {appearance_b}."
+PROMPT_TEMPLATE =  """## Role
+You are a careful **cross-shot entity matching annotator**.
+Your goal is to match ids in Shot A to ids in Shot B only when visual evidence is strong.
+
+## Task Context
+- You receive 3 paired images from the same video.
+- In each paired image: left = Shot A, right = Shot B.
+- Candidate objects are marked with red integer ids.
+- Id numbers are local within each shot and may differ across shots.
+- The same physical object should keep consistent appearance cues across the 3 pairs.
+- Shot A candidate ids: {shot_a_ids}
+- Shot B candidate ids: {shot_b_ids}
+
+## Visibility Notes
+{visibility_notes}
+
+## Required Analysis Checklist
+- Compare each proposed match across all pairs, not just one image.
+- Check stable cues: body shape, clothing/texture, size, accessories, relative position/motion pattern.
+- Reject pairs with weak or ambiguous evidence.
+- Note that the input image pairs are sorted in time order, so there may not be matching objects in the image pairs. You must carefully observe the images and reason with temporal relationships before determining the matched object pairs. Do not force matches.
+
+## Output Rules
+- Return only confident same-entity matches as id pairs: [shot_a_id, shot_b_id].
+- Do not include explanations.
+- Use strict JSON only:
+{{
+  "matches": [[shot_a_id, shot_b_id], ...]
+}}
+- If no confident match exists, return: {{"matches": []}}
+"""
+
+SYSTEM_PROMPT = (
+    "You are a rigorous visual verifier. Carefully inspect all provided paired images, "
+    "cross-check consistency before deciding, and output strict JSON only."
 )
-TEST_VISION_PROMPT = (
-    "Please describe what you see. "
-)
-
-
-@dataclass
-class ObjectView:
-    frame_idx: int
-    shot_id: int
-    boxed_path: str
-
-
-@dataclass
-class ObjectBundle:
-    node_id: str
-    object_class: str
-    appearance: str
-    shot_ids: List[int]
-    views: List[ObjectView]
 
 
 def _normalize_api_keys(api_keys: Union[str, Iterable[str]]) -> List[str]:
@@ -114,291 +121,310 @@ def _update_jsonl_inplace(jsonl_path: str, video_path: str, graph: Dict[str, Any
     os.replace(temp_path, input_path)
 
 
-def _select_frames_in_shot(
-    shot: Dict[str, Any],
-    bboxes: Dict[str, List[float]],
-    views_per_shot: int,
-) -> List[int]:
-    start = shot["start_frame"]
-    end = shot["end_frame"]
-    frames = sorted(int(k) for k in bboxes.keys() if start <= int(k) <= end)
-    if not frames:
-        return []
-    if views_per_shot <= 1 or len(frames) <= 1:
-        return [frames[len(frames) // 2]]
-    if len(frames) <= views_per_shot:
-        return frames
-
-    last = len(frames) - 1
-    indices = [round(i * last / (views_per_shot - 1)) for i in range(views_per_shot)]
-    return [frames[i] for i in sorted(set(indices))]
+def _node_category(node_id: str) -> str:
+    node = str(node_id).strip().lower()
+    return node.split("_", 1)[0] if "_" in node else node
 
 
-def _draw_box_on_frame(
-    frame: Any,
-    bbox: List[float],
-    object_class: str,
-) -> Optional[Any]:
-    height, width = frame.shape[:2]
-    x1, y1, x2, y2 = bbox
-    draw_x1 = max(0, min(width - 1, int(x1)))
-    draw_y1 = max(0, min(height - 1, int(y1)))
-    draw_x2 = max(0, min(width - 1, int(x2)))
-    draw_y2 = max(0, min(height - 1, int(y2)))
-    if draw_x2 <= draw_x1 or draw_y2 <= draw_y1:
+def _node_numeric_id(node_id: str) -> Optional[int]:
+    m = re.search(r"_(\d+)$", str(node_id).strip())
+    if not m:
         return None
-    annotated = frame.copy()
-    cv2.rectangle(annotated, (draw_x1, draw_y1), (draw_x2, draw_y2), (0, 255, 0), 3)
-    if object_class:
-        text_org = (draw_x1, max(20, draw_y1 - 8))
+    return int(m.group(1))
+
+
+def _collect_shot_objects(
+    graph: Dict[str, Any],
+    shot_a: int,
+    shot_b: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    objs = graph.get("object_nodes", [])
+    objs_a = [o for o in objs if shot_a in o.get("shot_ids", [])]
+    objs_b = [o for o in objs if shot_b in o.get("shot_ids", [])]
+
+    cats_a = {_node_category(str(o.get("node_id", ""))) for o in objs_a}
+    cats_b = {_node_category(str(o.get("node_id", ""))) for o in objs_b}
+    shared_cats = {c for c in cats_a & cats_b if c}
+
+    objs_a = [o for o in objs_a if _node_category(str(o.get("node_id", ""))) in shared_cats]
+    objs_b = [o for o in objs_b if _node_category(str(o.get("node_id", ""))) in shared_cats]
+    return objs_a, objs_b
+
+
+def _pick_frames_for_shot(
+    shot: Dict[str, Any],
+    objects: List[Dict[str, Any]],
+    num_frames: int = 3,
+    boundary_margin_frames: int = 2,
+) -> List[int]:
+    start = int(shot["start_frame"])
+    end = int(shot["end_frame"])
+    boundary_margin = max(0, int(boundary_margin_frames))
+    effective_start = start + boundary_margin
+    effective_end = end - boundary_margin
+
+    frame_to_count: Dict[int, int] = {}
+    frame_to_nodes: Dict[int, set[str]] = {}
+    for obj in objects:
+        node_id = str(obj.get("node_id", ""))
+        for k in obj.get("bboxes", {}).keys():
+            fi = int(k)
+            if start <= fi <= end:
+                frame_to_count[fi] = frame_to_count.get(fi, 0) + 1
+                frame_to_nodes.setdefault(fi, set()).add(node_id)
+
+    if not frame_to_count:
+        return []
+
+    in_margin = [f for f in frame_to_count.keys() if effective_start <= f <= effective_end]
+    candidate_frames = in_margin if in_margin else list(frame_to_count.keys())
+
+    shot_center = (start + end) / 2.0
+    ranked = sorted(
+        candidate_frames,
+        key=lambda f: (
+            frame_to_count.get(f, 0),
+            -abs(f - shot_center),
+            -f,
+        ),
+        reverse=True,
+    )
+
+    selected: List[int] = []
+    all_nodes = {str(o.get("node_id", "")) for o in objects if str(o.get("node_id", ""))}
+    uncovered = set(all_nodes)
+    min_gap = 2
+    while uncovered and len(selected) < num_frames:
+        best_f = None
+        best_gain = -1
+        for f in ranked:
+            if f in selected:
+                continue
+            if selected and not all(abs(f - s) >= min_gap for s in selected):
+                continue
+            gain = len(frame_to_nodes.get(f, set()) & uncovered)
+            if gain > best_gain:
+                best_gain = gain
+                best_f = f
+        if best_f is None or best_gain <= 0:
+            break
+        selected.append(best_f)
+        uncovered -= frame_to_nodes.get(best_f, set())
+
+    for f in ranked:
+        if all(abs(f - s) >= min_gap for s in selected):
+            selected.append(f)
+        if len(selected) >= num_frames:
+            break
+
+    if len(selected) < num_frames:
+        for f in ranked:
+            if f not in selected:
+                selected.append(f)
+            if len(selected) >= num_frames:
+                break
+
+    return sorted(selected[:num_frames])
+
+
+def _visible_ids_in_frame(
+    frame_idx: int,
+    objects: List[Dict[str, Any]],
+    id_map: Dict[str, int],
+) -> List[int]:
+    ids: List[int] = []
+    for obj in objects:
+        node_id = str(obj.get("node_id", ""))
+        if node_id not in id_map:
+            continue
+        if str(frame_idx) in obj.get("bboxes", {}):
+            ids.append(int(id_map[node_id]))
+    return sorted(set(ids))
+
+
+def _draw_objects_with_ids(
+    frame: Any,
+    frame_idx: int,
+    objects: List[Dict[str, Any]],
+    id_map: Dict[str, int],
+) -> Any:
+    out = frame.copy()
+    h, w = out.shape[:2]
+    for obj in objects:
+        node_id = str(obj.get("node_id", ""))
+        if node_id not in id_map:
+            continue
+        bbox = obj.get("bboxes", {}).get(str(frame_idx))
+        if bbox is None:
+            continue
+        x1, y1, x2, y2 = [int(float(x)) for x in bbox]
+        x1 = max(0, min(w - 1, x1))
+        y1 = max(0, min(h - 1, y1))
+        x2 = max(0, min(w - 1, x2))
+        y2 = max(0, min(h - 1, y2))
+        if x2 <= x1 or y2 <= y1:
+            continue
+        cx = int((x1 + x2) / 2)
+        cy = int((y1 + y2) / 2)
         cv2.putText(
-            annotated,
-            object_class,
-            text_org,
+            out,
+            str(id_map[node_id]),
+            (cx, cy),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
+            0.9,
+            (0, 0, 255),
             2,
             cv2.LINE_AA,
         )
-    return annotated
+    return out
 
 
-def _build_object_bundles(
+def _resize_to_height(img: Any, target_h: int) -> Any:
+    h, w = img.shape[:2]
+    if h == target_h:
+        return img
+    new_w = max(1, int(round(w * (target_h / h))))
+    return cv2.resize(img, (new_w, target_h), interpolation=cv2.INTER_AREA)
+
+
+def _concat_pair(left: Any, right: Any) -> Any:
+    target_h = min(left.shape[0], right.shape[0])
+    left_r = _resize_to_height(left, target_h)
+    right_r = _resize_to_height(right, target_h)
+    return cv2.hconcat([left_r, right_r])
+
+
+def _build_pair_images(
     graph: Dict[str, Any],
     video_path: str,
+    shot_a: int,
+    shot_b: int,
     output_dir: str,
-    max_views_per_object: Optional[int],
-    padding_ratio: float,
-    views_per_shot: int,
-) -> List[ObjectBundle]:
+    frames_per_shot: int = 3,
+    boundary_margin_frames: int = 2,
+) -> Tuple[List[str], Dict[str, int], Dict[str, int], List[Dict[str, Any]]]:
+    temporal = {int(x["clip_id"]): x for x in graph.get("temporal_nodes", [])}
+    if shot_a not in temporal or shot_b not in temporal:
+        raise ValueError(f"shot ids not found: shot_a={shot_a}, shot_b={shot_b}")
+
+    objs_a, objs_b = _collect_shot_objects(graph, shot_a, shot_b)
+    if not objs_a or not objs_b:
+        raise ValueError("No same-category objects found across selected shots.")
+
+    id_map_a: Dict[str, int] = {}
+    for o in sorted(objs_a, key=lambda x: str(x["node_id"])):
+        node_id = str(o["node_id"])
+        nid = _node_numeric_id(node_id)
+        if nid is None:
+            raise ValueError(f"node_id has no numeric suffix: {node_id}")
+        id_map_a[node_id] = nid
+
+    id_map_b: Dict[str, int] = {}
+    for o in sorted(objs_b, key=lambda x: str(x["node_id"])):
+        node_id = str(o["node_id"])
+        nid = _node_numeric_id(node_id)
+        if nid is None:
+            raise ValueError(f"node_id has no numeric suffix: {node_id}")
+        id_map_b[node_id] = nid
+
+    frames_a = _pick_frames_for_shot(
+        temporal[shot_a],
+        objs_a,
+        num_frames=frames_per_shot,
+        boundary_margin_frames=boundary_margin_frames,
+    )
+    frames_b = _pick_frames_for_shot(
+        temporal[shot_b],
+        objs_b,
+        num_frames=frames_per_shot,
+        boundary_margin_frames=boundary_margin_frames,
+    )
+    pair_count = min(len(frames_a), len(frames_b), frames_per_shot)
+    if pair_count <= 0:
+        raise ValueError("No valid frame pairs found to render.")
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise ValueError(f"Cannot open video: {video_path}")
 
-    temporal_nodes = {clip["clip_id"]: clip for clip in graph.get("temporal_nodes", [])}
-    video_name = Path(video_path).stem
-    base_output = Path(output_dir) / video_name
-    base_output.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_paths: List[str] = []
+    pair_meta: List[Dict[str, Any]] = []
 
-    bundles: List[ObjectBundle] = []
-    view_limit = None
-    if isinstance(max_views_per_object, int) and max_views_per_object > 0:
-        view_limit = max_views_per_object
+    for i in range(pair_count):
+        fa = int(frames_a[i])
+        fb = int(frames_b[i])
 
-    for obj in graph.get("object_nodes", []):
-        bboxes = obj.get("bboxes", {})
-        if not bboxes:
-            continue
-        views: List[ObjectView] = []
-        for shot_id in obj.get("shot_ids", []):
-            if shot_id not in temporal_nodes:
-                continue
-            shot = temporal_nodes[shot_id]
-            frame_indices = _select_frames_in_shot(shot, bboxes, views_per_shot)
-            for frame_idx in frame_indices:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                ret, frame = cap.read()
-                if not ret:
-                    continue
-                bbox = bboxes.get(str(frame_idx))
-                if bbox is None:
-                    continue
-                boxed = _draw_box_on_frame(
-                    frame=frame,
-                    bbox=bbox,
-                    object_class=obj.get("object_class", "object"),
-                )
-                if boxed is None:
-                    continue
-
-                obj_dir = base_output / obj["node_id"]
-                obj_dir.mkdir(parents=True, exist_ok=True)
-                boxed_path = obj_dir / f"shot_{shot_id}_frame_{frame_idx}_boxed.jpg"
-                cv2.imwrite(str(boxed_path), boxed)
-                views.append(
-                    ObjectView(
-                        frame_idx=frame_idx,
-                        shot_id=shot_id,
-                        boxed_path=str(boxed_path),
-                    )
-                )
-                if view_limit is not None and len(views) >= view_limit:
-                    break
-            if view_limit is not None and len(views) >= view_limit:
-                break
-
-        if not views:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, fa)
+        ok_a, img_a = cap.read()
+        cap.set(cv2.CAP_PROP_POS_FRAMES, fb)
+        ok_b, img_b = cap.read()
+        if not ok_a or not ok_b:
             continue
 
-        bundles.append(
-            ObjectBundle(
-                node_id=obj["node_id"],
-                object_class=obj.get("object_class", "object"),
-                appearance=obj.get("appearance", ""),
-                shot_ids=obj.get("shot_ids", []),
-                views=views,
-            )
+        ann_a = _draw_objects_with_ids(img_a, fa, objs_a, id_map_a)
+        ann_b = _draw_objects_with_ids(img_b, fb, objs_b, id_map_b)
+        pair_img = _concat_pair(ann_a, ann_b)
+        save_path = out_dir / f"pair_{i}_A{fa}_B{fb}.jpg"
+        cv2.imwrite(str(save_path), pair_img)
+        out_paths.append(str(save_path))
+        pair_meta.append(
+            {
+                "pair_index": i,
+                "frame_a": fa,
+                "frame_b": fb,
+                "visible_a_ids": _visible_ids_in_frame(fa, objs_a, id_map_a),
+                "visible_b_ids": _visible_ids_in_frame(fb, objs_b, id_map_b),
+            }
         )
 
     cap.release()
-    return bundles
+    if not out_paths:
+        raise ValueError("Failed to render paired images.")
+    return out_paths, id_map_a, id_map_b, pair_meta
 
 
-def _build_prompt(bundle_a: ObjectBundle, bundle_b: ObjectBundle) -> str:
-    return PROMPT_TEMPLATE.format(
-        class_a=bundle_a.object_class,
-        class_b=bundle_b.object_class,
-        appearance_a=bundle_a.appearance or "unknown",
-        appearance_b=bundle_b.appearance or "unknown",
-    )
+def _build_visibility_notes(pair_meta: List[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for item in pair_meta:
+        lines.append(
+            f"- Pair {item['pair_index']}: "
+            f"ShotA(frame {item['frame_a']}) visible ids={item['visible_a_ids']}; "
+            f"ShotB(frame {item['frame_b']}) visible ids={item['visible_b_ids']}"
+        )
+    return "\n".join(lines) if lines else "- No visibility metadata."
 
 
-def _node_id_category(node_id: str) -> str:
-    node = str(node_id).strip().lower()
-    if not node:
-        return ""
-    if "_" in node:
-        return node.split("_", 1)[0]
-    return node
-
-
-def _extract_same_entity(response: str) -> Optional[Dict[str, Any]]:
+def _extract_matches(response: str) -> Optional[Dict[str, Any]]:
     parsed = JSONParser.parse(response)
     if not isinstance(parsed, dict):
         return None
-    raw_value = str(parsed.get("same_entity", "")).strip().lower()
-    if raw_value in {"yes", "true", "same", "1"}:
-        same = True
-    elif raw_value in {"no", "false", "different", "0"}:
-        same = False
-    elif raw_value in {"unsure", "unknown", "uncertain"}:
-        same = None
-    else:
+    matches = parsed.get("matches")
+    if not isinstance(matches, list):
         return None
-    confidence = parsed.get("confidence")
-    if isinstance(confidence, (int, float)):
-        confidence = max(0.0, min(float(confidence), 1.0))
-    else:
-        confidence = None
-    return {"same": same, "confidence": confidence}
+    norm: List[List[int]] = []
+    for item in matches:
+        if not isinstance(item, list) or len(item) != 2:
+            continue
+        try:
+            a = int(item[0])
+            b = int(item[1])
+        except Exception:
+            continue
+        norm.append([a, b])
+    return {"matches": norm}
 
 
-def _validate_response(response: str) -> Union[Dict[str, Any], bool]:
-    result = _extract_same_entity(response)
-    if result is None:
-        return False
-    return result
-
-
-class ReferenceEdgeGenerator:
-    def __init__(
-        self,
-        model_name: str,
-        api_keys: Optional[Union[str, Iterable[str]]],
-        max_concurrent_per_key: int = 100,
-        max_retries: int = 5,
-    ) -> None:
-        api_keys = _resolve_api_keys(api_keys)
-        self.generator = StreamGenerator(
-            model_name=model_name,
-            api_keys=api_keys,
-            max_concurrent_per_key=max_concurrent_per_key,
-            max_retries=max_retries,
-            rational=False,
-            with_unique_id=True,
-        )
-
-    async def generate(
-        self,
-        prompts: List[Dict[str, Any]],
-        system_prompt: str,
-        verbose: bool = False,
-    ) -> Dict[str, Dict[str, Any]]:
-        results: Dict[str, Dict[str, Any]] = {}
-        async for item in self.generator.generate_stream(
-            prompts=prompts,
-            system_prompt=system_prompt,
-            validate_func=_validate_response,
-        ):
-            if not item:
-                continue
-            result_id = item.get("id")
-            result = item.get("result")
-            if result_id and result:
-                results[result_id] = result
-                if verbose:
-                    print(f"[reference] {result_id} -> {result}")
-        return results
-
-
-def _build_prompts(
-    bundles: List[ObjectBundle],
-    max_pairs_per_object: int,
-    similarity_threshold: float,
-) -> Tuple[List[Dict[str, Any]], Dict[str, Tuple[str, ObjectBundle, ObjectBundle]]]:
-    prompts: List[Dict[str, Any]] = []
-    pair_map: Dict[str, Tuple[str, ObjectBundle, ObjectBundle]] = {}
-
-    for i, bundle_a in enumerate(bundles):
-        candidates: List[ObjectBundle] = []
-        cat_a = _node_id_category(bundle_a.node_id)
-        for j, bundle_b in enumerate(bundles):
-            if j <= i:
-                continue
-            cat_b = _node_id_category(bundle_b.node_id)
-            if not cat_a or not cat_b or cat_a != cat_b:
-                continue
-            if set(bundle_a.shot_ids) & set(bundle_b.shot_ids):
-                continue
-            candidates.append(bundle_b)
-
-        for bundle_b in candidates[:max_pairs_per_object]:
-            pair_key = f"{bundle_a.node_id}|{bundle_b.node_id}"
-            prompt_id = pair_key
-            content: List[Dict[str, Any]] = []
-            for view_a in bundle_a.views:
-                content.append({"type": "image", "image": view_a.boxed_path})
-            for view_b in bundle_b.views:
-                content.append({"type": "image", "image": view_b.boxed_path})
-            content.append(
-                {
-                    "type": "text",
-                    "text": _build_prompt(bundle_a, bundle_b),
-                }
-            )
-            prompts.append({"id": prompt_id, "prompt": content})
-            pair_map[prompt_id] = (pair_key, bundle_a, bundle_b)
-
-    return prompts, pair_map
-
-
-def _build_vision_test_prompts(
-    prompts: List[Dict[str, Any]],
-    max_prompts: int,
-) -> List[Dict[str, Any]]:
-    selected = prompts[:max_prompts]
-    out: List[Dict[str, Any]] = []
-    for item in selected:
-        prompt_id = str(item.get("id", "unknown"))
-        content = item.get("prompt", [])
-        images = [x for x in content if x.get("type") == "image"]
-        test_content: List[Dict[str, Any]] = list(images)
-        test_content.append({"type": "text", "text": TEST_VISION_PROMPT})
-        out.append({"id": prompt_id, "prompt": test_content})
-    return out
-
-
-async def _run_vision_input_test(
+async def _run_model(
     model_name: str,
     api_keys: Optional[Union[str, Iterable[str]]],
-    prompts: List[Dict[str, Any]],
-    max_concurrent_per_key: int,
-    max_retries: int,
-) -> None:
-    if not prompts:
-        print("[test] no prompts to test")
-        return
+    image_paths: List[str],
+    prompt_text: str,
+    max_concurrent_per_key: int = 20,
+    max_retries: int = 5,
+    verbose: bool = False,
+) -> Dict[str, Any]:
     generator = StreamGenerator(
         model_name=model_name,
         api_keys=_resolve_api_keys(api_keys),
@@ -407,105 +433,73 @@ async def _run_vision_input_test(
         rational=False,
         with_unique_id=True,
     )
-    print(f"[test] sending {len(prompts)} vision-test prompts")
-    async for item in generator.generate_stream(prompts=prompts, system_prompt="You are a visual assistant."):
+    prompt = [{"type": "image", "image": p} for p in image_paths]
+    prompt.append({"type": "text", "text": prompt_text})
+    prompts = [{"id": "pair_match_test", "prompt": prompt}]
+
+    result_out: Optional[Dict[str, Any]] = None
+    async for item in generator.generate_stream(
+        prompts=prompts,
+        system_prompt=SYSTEM_PROMPT,
+        validate_func=lambda resp: out if (out := _extract_matches(resp)) is not None else False,
+    ):
         if not item:
             continue
-        print(f"[test] {item.get('id')} -> {item.get('result')}")
+        result_out = item.get("result")
+        if verbose:
+            print(f"[reference] model result: {result_out}")
+    if result_out is None:
+        raise RuntimeError("No valid model output received.")
+    return result_out
 
 
-def _confidence_score(value: Optional[float]) -> float:
-    if isinstance(value, (int, float)):
-        return float(value)
-    return -1.0
-
-
-def add_reference_edges(
+def _apply_matches_to_graph(
     graph: Dict[str, Any],
-    pair_map: Dict[str, Tuple[str, ObjectBundle, ObjectBundle]],
-    results: Dict[str, Dict[str, Any]],
-    overwrite: bool = True,
+    matches: List[List[int]],
+    id_map_a: Dict[str, int],
+    id_map_b: Dict[str, int],
+    overwrite_reference_edges: bool = True,
 ) -> Dict[str, Any]:
     edges = graph.get("edges", [])
-    if overwrite:
+    if overwrite_reference_edges:
         edges = [edge for edge in edges if "reference_relationship" not in edge]
 
-    best_by_pair: Dict[str, Dict[str, Any]] = {}
-    for prompt_id, result in results.items():
-        info = pair_map.get(prompt_id)
-        if not info:
-            continue
-        pair_key, bundle_a, bundle_b = info
-        if result.get("same") is not True:
-            continue
-        confidence = result.get("confidence")
-        current = best_by_pair.get(pair_key)
-        if current is None or _confidence_score(confidence) > _confidence_score(current.get("confidence")):
-            best_by_pair[pair_key] = {
-                "bundle_a": bundle_a,
-                "bundle_b": bundle_b,
-                "confidence": confidence,
-            }
+    inv_a = {int(v): str(k) for k, v in id_map_a.items()}
+    inv_b = {int(v): str(k) for k, v in id_map_b.items()}
+
+    existing_pairs = {
+        (str(e.get("source_id", "")), str(e.get("target_id", "")))
+        for e in edges
+        if isinstance(e, dict)
+    }
 
     edge_index = len(edges)
-    for pair_key in sorted(best_by_pair.keys()):
-        entry = best_by_pair[pair_key]
-        edge = {
-            "edge_id": f"ref_{edge_index}",
-            "source_id": entry["bundle_a"].node_id,
-            "target_id": entry["bundle_b"].node_id,
-            "reference_relationship": "same_entity",
-        }
-        confidence = entry.get("confidence")
-        if confidence is not None:
-            edge["confidence"] = confidence
-        edges.append(edge)
+    for pair in matches:
+        if not isinstance(pair, list) or len(pair) != 2:
+            continue
+        try:
+            ida = int(pair[0])
+            idb = int(pair[1])
+        except Exception:
+            continue
+        src = inv_a.get(ida)
+        tgt = inv_b.get(idb)
+        if not src or not tgt:
+            continue
+        if (src, tgt) in existing_pairs:
+            continue
+        edges.append(
+            {
+                "edge_id": f"ref_{edge_index}",
+                "source_id": src,
+                "target_id": tgt,
+                "reference_relationship": "same_entity",
+            }
+        )
+        existing_pairs.add((src, tgt))
         edge_index += 1
 
     graph["edges"] = edges
-    return graph
-
-
-async def generate_reference_edges(
-    graph: Dict[str, Any],
-    video_path: str,
-    model_name: str,
-    api_keys: Optional[Union[str, Iterable[str]]],
-    crop_output_dir: str,
-    max_views_per_object: Optional[int] = None,
-    views_per_shot: int = 3,
-    max_pairs_per_object: int = 3,
-    similarity_threshold: float = 0.35,
-    padding_ratio: float = 0.1,
-    max_concurrent_per_key: int = 100,
-    max_retries: int = 5,
-    system_prompt: str = "You are a visual re-identification assistant. Follow the instructions exactly.",
-    verbose: bool = False,
-) -> Dict[str, Any]:
-    bundles = _build_object_bundles(
-        graph=graph,
-        video_path=video_path,
-        output_dir=crop_output_dir,
-        max_views_per_object=max_views_per_object,
-        padding_ratio=padding_ratio,
-        views_per_shot=views_per_shot,
-    )
-    prompts, pair_map = _build_prompts(
-        bundles=bundles,
-        max_pairs_per_object=max_pairs_per_object,
-        similarity_threshold=similarity_threshold,
-    )
-    if not prompts:
-        return graph
-
-    generator = ReferenceEdgeGenerator(
-        model_name=model_name,
-        api_keys=api_keys,
-        max_concurrent_per_key=max_concurrent_per_key,
-        max_retries=max_retries,
-    )
-    results = await generator.generate(prompts, system_prompt=system_prompt, verbose=verbose)
-    graph = add_reference_edges(graph, pair_map, results, overwrite=True)
     return graph
 
 
@@ -515,70 +509,113 @@ def run(
     model_name: str,
     api_keys: Optional[Union[str, Iterable[str]]] = None,
     output: Optional[str] = None,
-    crop_output_dir: str = "output/reference_crops",
+    crop_output_dir: str = "output/reference_id_match_test",
+    save_intermediate_frames: bool = False,
+    shot_a: int = 0,
+    shot_b: int = 1,
+    frames_per_shot: int = 3,
+    boundary_margin_frames: int = 2,
+    output_json: Optional[str] = None,
+    max_concurrent_per_key: int = 20,
+    max_retries: int = 5,
+    verbose: bool = False,
+    overwrite_reference_edges: bool = True,
+    # Kept for CLI compatibility with older calls; currently unused.
     max_views_per_object: Optional[int] = None,
     views_per_shot: int = 3,
     max_pairs_per_object: int = 3,
+    repeats_per_pair: int = 3,
     similarity_threshold: float = 0.35,
     padding_ratio: float = 0.1,
-    max_concurrent_per_key: int = 100,
-    max_retries: int = 5,
-    verbose: bool = False,
     test_image_inputs_with_api: bool = False,
     test_max_prompts: int = 3,
 ) -> None:
+    del max_views_per_object, views_per_shot, max_pairs_per_object, repeats_per_pair, similarity_threshold
+    del padding_ratio, test_image_inputs_with_api, test_max_prompts
+
     graph = _load_graph(jsonl, video)
-    if test_image_inputs_with_api:
-        bundles = _build_object_bundles(
+
+    tmp_dir: Optional[tempfile.TemporaryDirectory] = None
+    effective_crop_dir = crop_output_dir
+    if not save_intermediate_frames:
+        tmp_dir = tempfile.TemporaryDirectory(prefix="reference_id_match_")
+        effective_crop_dir = tmp_dir.name
+
+    try:
+        image_paths, id_map_a, id_map_b, pair_meta = _build_pair_images(
             graph=graph,
             video_path=video,
-            output_dir=crop_output_dir,
-            max_views_per_object=max_views_per_object,
-            padding_ratio=padding_ratio,
-            views_per_shot=views_per_shot,
+            shot_a=shot_a,
+            shot_b=shot_b,
+            output_dir=effective_crop_dir,
+            frames_per_shot=frames_per_shot,
+            boundary_margin_frames=boundary_margin_frames,
         )
-        prompts, _ = _build_prompts(
-            bundles=bundles,
-            max_pairs_per_object=max_pairs_per_object,
-            similarity_threshold=similarity_threshold,
+
+        prompt_text = PROMPT_TEMPLATE.format(
+            shot_a_ids=sorted(id_map_a.values()),
+            shot_b_ids=sorted(id_map_b.values()),
+            visibility_notes=_build_visibility_notes(pair_meta),
         )
-        test_prompts = _build_vision_test_prompts(prompts, max_prompts=test_max_prompts)
-        asyncio.run(
-            _run_vision_input_test(
+
+        result = asyncio.run(
+            _run_model(
                 model_name=model_name,
                 api_keys=api_keys,
-                prompts=test_prompts,
+                image_paths=image_paths,
+                prompt_text=prompt_text,
                 max_concurrent_per_key=max_concurrent_per_key,
                 max_retries=max_retries,
+                verbose=verbose,
             )
         )
-        return
+    finally:
+        if tmp_dir is not None:
+            tmp_dir.cleanup()
 
-    graph = asyncio.run(
-        generate_reference_edges(
-            graph=graph,
-            video_path=video,
-            model_name=model_name,
-            api_keys=api_keys,
-            crop_output_dir=crop_output_dir,
-            max_views_per_object=max_views_per_object,
-            views_per_shot=views_per_shot,
-            max_pairs_per_object=max_pairs_per_object,
-            similarity_threshold=similarity_threshold,
-            padding_ratio=padding_ratio,
-            max_concurrent_per_key=max_concurrent_per_key,
-            max_retries=max_retries,
-            verbose=verbose,
-        )
+    matches = result.get("matches", []) if isinstance(result, dict) else []
+    graph = _apply_matches_to_graph(
+        graph,
+        matches=matches,
+        id_map_a=id_map_a,
+        id_map_b=id_map_b,
+        overwrite_reference_edges=overwrite_reference_edges,
     )
 
-    if output and output != jsonl:
-        output_path = Path(output)
+    if output_json:
+        output_path = Path(output_json)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "video": video,
+                    "shot_a": shot_a,
+                    "shot_b": shot_b,
+                    "pair_images": image_paths,
+                    "shot_a_id_map": {str(v): k for k, v in id_map_a.items()},
+                    "shot_b_id_map": {str(v): k for k, v in id_map_b.items()},
+                    "model_output": result,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+    if output and output != jsonl:
+        output_file = Path(output)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_file, "w", encoding="utf-8") as f:
             f.write(json.dumps(graph, ensure_ascii=False) + "\n")
     else:
         _update_jsonl_inplace(jsonl, video, graph)
+
+    if save_intermediate_frames:
+        print(f"[reference] pair images: {len(image_paths)} -> {effective_crop_dir}")
+    else:
+        print(f"[reference] pair images: {len(image_paths)} (temporary, auto-cleaned)")
+    print(f"[reference] model matches: {matches}")
+    if output_json:
+        print(f"[reference] saved result: {output_json}")
 
 
 if __name__ == "__main__":
