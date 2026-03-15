@@ -29,20 +29,25 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #   --masks_json /home/wangxingjian/DORO-STVG/graph_generator/output/sam2_masks/50_TM5MPJIq1Is_2fps_sam2_masks_indexed.json \
 #   --model_path /home/wangxingjian/model/DAM-3B-Video
 
-source /home/wangxingjian/DORO-STVG/graph_generator/.venv/mmaction/bin/activate
-export PYTHONPATH="/home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2:${PYTHONPATH}"
-python -m modules.action_detector \
-  --config /home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2/configs/detection/videomae/vit-large-p16_videomae-k400-pre_8xb8-16x4x1-20e-adamw_ava-kinetics-rgb.py \
-  --checkpoint /home/wangxingjian/model/vit-large-p16_videomae-k400-pre.pth \
-  --label-map /home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2/tools/data/ava/label_map.txt \
-  --frame_interval 1 \
+# source /home/wangxingjian/DORO-STVG/graph_generator/.venv/mmaction/bin/activate
+# export PYTHONPATH="/home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2:${PYTHONPATH}"
+# python -m modules.action_detector \
+#   --config /home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2/configs/detection/videomae/vit-large-p16_videomae-k400-pre_8xb8-16x4x1-20e-adamw_ava-kinetics-rgb.py \
+#   --checkpoint /home/wangxingjian/model/vit-large-p16_videomae-k400-pre.pth \
+#   --label-map /home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2/tools/data/ava/label_map.txt \
+#   --frame_interval 1 \
+#   --jsonl /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
+#   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
+
+python -m modules.relation_generator \
   --jsonl /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
+  --model_name gemini-3-flash-preview \
+  --crop_output_dir /home/wangxingjian/DORO-STVG/graph_generator/output/relation_crops \
+  --min_shared_frames 3 \
+  --save_intermediate_frames=True \
+  --verbose=True
 
-# python -m modules.relation_generator \
-#   --jsonl scene_graphs.jsonl \
-#   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
-#   --model_name gemini-3-flash-preview \
 
 # python -m modules.reference_edge_generator \
 #   --jsonl scene_graphs.jsonl \
