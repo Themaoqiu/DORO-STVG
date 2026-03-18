@@ -1,5 +1,6 @@
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Any, Dict, List
 import sys
 import cv2
 from ultralytics import YOLO
@@ -9,7 +10,44 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from modules.scene_detector import SceneClip
-from modules.yolo_tracker import YOLOTrack, GlobalTrack
+
+
+@dataclass
+class YOLOTrack:
+    track_id: int
+    object_class: str
+    clip_id: int
+    frames: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+
+    @property
+    def start_frame(self) -> int:
+        return min(self.frames.keys()) if self.frames else 0
+
+    @property
+    def end_frame(self) -> int:
+        return max(self.frames.keys()) if self.frames else 0
+
+
+@dataclass
+class GlobalTrack:
+    global_id: int
+    object_class: str
+    local_tracks: List[YOLOTrack] = field(default_factory=list)
+
+    @property
+    def all_frames(self) -> Dict[int, Dict[str, Any]]:
+        merged: Dict[int, Dict[str, Any]] = {}
+        for track in self.local_tracks:
+            merged.update(track.frames)
+        return merged
+
+    @property
+    def start_frame(self) -> int:
+        return min(self.all_frames.keys()) if self.all_frames else 0
+
+    @property
+    def end_frame(self) -> int:
+        return max(self.all_frames.keys()) if self.all_frames else 0
 
 
 class YOLOKeyframeDetector:
@@ -32,8 +70,6 @@ class YOLOKeyframeDetector:
         clips: List[SceneClip],
     ) -> Dict[int, Dict[int, List]]:
         cap = cv2.VideoCapture(video_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
         all_detections = {}
 
         for clip in clips:

@@ -12,7 +12,7 @@ if str(DEPENDENCE_ROOT) not in sys.path:
     sys.path.insert(0, str(DEPENDENCE_ROOT))
 
 from modules.scene_detector import SceneClip
-from modules.yolo_tracker import GlobalTrack, YOLOTrack
+from modules.yolo_detector import GlobalTrack, YOLOTrack
 from sam3.sam3.model.sam3_tracker_utils import mask_to_box
 from sam3.sam3.model_builder import build_sam3_video_predictor
 

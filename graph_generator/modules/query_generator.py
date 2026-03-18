@@ -2,9 +2,11 @@ import asyncio
 import json
 import os
 import random
-from itertools import combinations
+import re
+from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from api_sync.utils.parser import JSONParser
 
@@ -21,29 +23,163 @@ PROMPT_TEMPLATE = (
     "Requirements:\n"
     "1) Use only the provided clues.\n"
     "2) Keep it natural and unambiguous.\n"
-    "3) Include relation clues and action clues when provided.\n"
+    "3) Include temporal and relational clues when provided.\n"
     "4) Do not mention exact frame numbers.\n"
     "5) Output strict JSON only: {\"query\": \"...\"}.\n\n"
     "Target difficulty d_star: {d_star}\n"
     "Spec JSON:\n{spec_json}"
 )
 
-
-TYPE_DIFFICULTY = {
-    # Clue type difficulty levels used by D_type; larger means harder clue type.
-    "unique_class": 1,
-    "attribute": 2,
-    "action": 3,
-    "relation_to_unique": 4,
-    "relation_to_described": 5,
-    "action_combination": 6,
+ASYM_INVERSE = {
+    "in front of": "behind",
+    "behind": "in front of",
+    "above": "below",
+    "below": "above",
+    "left of": "right of",
+    "right of": "left of",
+    "is in front of": "behind",
+    "is behind": "in front of",
 }
+SYMMETRIC = {"near", "next to", "beside", "talk_to", "talking to", "walk with"}
+BUCKET_CENTER = {"easy": 0.18, "medium": 0.45, "hard": 0.70, "very_hard": 0.92}
+
+QUERY_SPEC_KEYS = [
+    "target_class",
+    "attributes",
+    "context_relations",
+    "actions",
+    "action_targets",
+    "action_sequences",
+    "relations",
+    "time_range",
+    "time_segments",
+    "full_track_range",
+    "cross_shot",
+    "same_entity_nodes",
+]
+
+QUERY_NODE_KEYS = [
+    "query_id",
+    "target_node_id",
+    "query",
+    "query_spec",
+    "D_t",
+    "D_s",
+    "D",
+    "d_star",
+    "clue_types",
+    "type_bucket",
+    "difficulty_bucket",
+]
+
+GRAPH_OUTPUT_KEYS = [
+    "video",
+    "video_path",
+    "temporal_nodes",
+    "object_nodes",
+    "attribute_nodes",
+    "action_nodes",
+    "edges",
+    "query_nodes",
+]
+
+
+@dataclass
+class EntityProfile:
+    canonical_id: str
+    node_ids: List[str]
+    canonical_class: str
+    frames: Set[int]
+    shot_ids: Set[int]
+    start_frame: int
+    end_frame: int
+    attributes: List[str] = field(default_factory=list)
+    context_relations: List[str] = field(default_factory=list)
+    dam_actions: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ActionEvent:
+    owner_id: str
+    label: str
+    start_frame: int
+    end_frame: int
+    shot_ids: Set[int]
+    target_ids: Set[str]
+
+
+@dataclass
+class RelationEvent:
+    subj_id: str
+    obj_id: str
+    predicate: str
+    edge_type: str
+    relation_type: str
+    segments: List[Tuple[int, int]]
+    shot_ids: Set[int]
+
+
+
+def _to_int(v: Any, d: int = 0) -> int:
+    try:
+        return int(v)
+    except Exception:
+        return d
+
+
+def _norm(s: Any) -> str:
+    return re.sub(r"\s+", " ", str(s)).strip(" \n\t,.;:")
+
+
+def _uniq_phrases(v: Any) -> List[str]:
+    if isinstance(v, list):
+        raw = [str(x) for x in v]
+    elif isinstance(v, str):
+        raw = [x.strip() for x in v.split(",")]
+    else:
+        raw = []
+    out, seen = [], set()
+    for x in raw:
+        t = _norm(x)
+        if not t:
+            continue
+        k = t.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(t)
+    return out
+
+
+def _segments_to_frames(segs: List[Tuple[int, int]]) -> Set[int]:
+    out: Set[int] = set()
+    for s, e in segs:
+        if e < s:
+            s, e = e, s
+        out.update(range(s, e + 1))
+    return out
+
+
+def _frames_to_segments(frames: Set[int]) -> List[Tuple[int, int]]:
+    if not frames:
+        return []
+    arr = sorted(frames)
+    res: List[Tuple[int, int]] = []
+    a = b = arr[0]
+    for x in arr[1:]:
+        if x == b + 1:
+            b = x
+            continue
+        res.append((a, b))
+        a = b = x
+    res.append((a, b))
+    return res
 
 
 def _normalize_api_keys(api_keys: Union[str, Iterable[str]]) -> List[str]:
     if isinstance(api_keys, str):
-        return [key.strip() for key in api_keys.split(",") if key.strip()]
-    return [str(key).strip() for key in api_keys if str(key).strip()]
+        return [k.strip() for k in api_keys.split(",") if k.strip()]
+    return [str(k).strip() for k in api_keys if str(k).strip()]
 
 
 def _load_api_keys_from_project_env() -> str:
@@ -51,14 +187,13 @@ def _load_api_keys_from_project_env() -> str:
     if not env_path.exists():
         return ""
     with open(env_path, "r", encoding="utf-8") as f:
-        for raw_line in f:
-            line = raw_line.strip()
+        for line in f:
+            line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
-            key, value = line.split("=", 1)
-            if key.strip() != "API_KEYS":
-                continue
-            return value.strip().strip('"').strip("'")
+            k, v = line.split("=", 1)
+            if k.strip() == "API_KEYS":
+                return v.strip().strip('"').strip("'")
     return ""
 
 
@@ -73,667 +208,625 @@ def _resolve_api_keys(api_keys: Optional[Union[str, Iterable[str]]]) -> List[str
     return keys
 
 
-def _split_and_strip(s: str, delimiter: str = ",") -> List[str]:
-    return [phrase.strip() for phrase in str(s).split(delimiter) if phrase.strip()]
-
-
 def _extract_query(response: str) -> Union[str, bool]:
     parsed = JSONParser.parse(response)
     if not isinstance(parsed, dict):
         return False
-    query = parsed.get("query")
-    if not isinstance(query, str):
+    q = parsed.get("query")
+    if not isinstance(q, str):
         return False
-    query = query.strip()
-    if not query:
-        return False
-    return query
+    q = q.strip()
+    return q if q else False
+
+
+def _class_from_node_id(node_id: str, fallback: str = "object") -> str:
+    nid = str(node_id).strip().lower()
+    if not nid:
+        return fallback
+    prefix = nid.split("_", 1)[0].strip()
+    return prefix or fallback
+
+
+def _build_object_index_maps(object_nodes: List[Dict[str, Any]]) -> Dict[int, str]:
+    idx_to_node: Dict[int, str] = {}
+    for idx, obj in enumerate(object_nodes):
+        node_id = str(obj.get("node_id", "")).strip()
+        if node_id:
+            idx_to_node[idx] = node_id
+    return idx_to_node
+
+
+def _build_entity_profiles(object_nodes: List[Dict[str, Any]]) -> Dict[str, EntityProfile]:
+    profiles: Dict[str, EntityProfile] = {}
+
+    for obj in object_nodes:
+        node_id = str(obj.get("node_id", "")).strip()
+        if not node_id:
+            continue
+        members = [obj]
+        cls = _class_from_node_id(node_id, fallback=_norm(obj.get("object_class", "object")).lower() or "object")
+        frames: Set[int] = set()
+        shots: Set[int] = set()
+        attrs: List[str] = []
+        ctx: List[str] = []
+        acts: List[str] = []
+        attr_seen, ctx_seen, act_seen = set(), set(), set()
+        start, end = 10**9, -1
+
+        for m in members:
+            bboxes = m.get("bboxes", {})
+            if isinstance(bboxes, dict):
+                for k in bboxes:
+                    frames.add(_to_int(k, -1))
+            shots |= {_to_int(x, -1) for x in m.get("shot_ids", []) if _to_int(x, -1) >= 0}
+            s, e = _to_int(m.get("start_frame"), 0), _to_int(m.get("end_frame"), 0)
+            if e < s:
+                s, e = e, s
+            start, end = min(start, s), max(end, e)
+
+            for x in _uniq_phrases(m.get("attributes", [])):
+                if x.lower() not in attr_seen:
+                    attr_seen.add(x.lower())
+                    attrs.append(x)
+            for x in _uniq_phrases(m.get("relationships", [])):
+                if x.lower() not in ctx_seen:
+                    ctx_seen.add(x.lower())
+                    ctx.append(x)
+            for x in _uniq_phrases(m.get("actions", [])):
+                if x.lower() not in act_seen:
+                    act_seen.add(x.lower())
+                    acts.append(x)
+
+        profiles[node_id] = EntityProfile(
+            canonical_id=node_id,
+            node_ids=[node_id],
+            canonical_class=cls,
+            frames=frames,
+            shot_ids=shots,
+            start_frame=start,
+            end_frame=end,
+            attributes=attrs,
+            context_relations=ctx,
+            dam_actions=acts,
+        )
+
+    return profiles
+
+
+def _build_ref_description(
+    ref_entity: EntityProfile,
+    active_frames: Set[int],
+    entities: Dict[str, EntityProfile],
+    max_attrs: int = 2,
+    max_context: int = 1,
+) -> Dict[str, Any]:
+    peers = [
+        e
+        for e in entities.values()
+        if e.canonical_id != ref_entity.canonical_id
+        and e.canonical_class == ref_entity.canonical_class
+        and bool(e.frames & active_frames)
+    ]
+
+    def score(phrase: str, src: str) -> Tuple[int, int]:
+        p = phrase.lower()
+        cnt = 0
+        for x in peers:
+            pool = x.attributes if src == "attr" else x.context_relations
+            if any(p == y.lower() for y in pool):
+                cnt += 1
+        return cnt, len(phrase)
+
+    attrs = sorted(ref_entity.attributes, key=lambda x: score(x, "attr"))[:max_attrs]
+    ctx = sorted(ref_entity.context_relations, key=lambda x: score(x, "ctx"))[:max_context]
+    return {"class": ref_entity.canonical_class, "attributes": attrs, "context_relations": ctx}
+
+
+def _flatten_action_events(
+    action_nodes: List[Dict[str, Any]],
+    node_to_shots: Dict[str, Set[int]],
+) -> List[ActionEvent]:
+    raw: List[ActionEvent] = []
+    for group in action_nodes:
+        owner_node = str(group.get("object_id", "")).strip()
+        if not owner_node:
+            continue
+        for item in group.get("actions", []):
+            if not isinstance(item, dict):
+                continue
+            label = _norm(item.get("action_label", ""))
+            if not label:
+                continue
+            s, e = _to_int(item.get("start_frame"), 0), _to_int(item.get("end_frame"), 0)
+            if e < s:
+                s, e = e, s
+            targets: Set[str] = set()
+            for t in item.get("target_object_ids", []) or []:
+                if isinstance(t, str) and t.strip():
+                    targets.add(t.strip())
+            raw.append(
+                ActionEvent(
+                    owner_id=owner_node,
+                    label=label,
+                    start_frame=s,
+                    end_frame=e,
+                    shot_ids=set(node_to_shots.get(owner_node, set())),
+                    target_ids=targets,
+                )
+            )
+
+    grouped: Dict[Tuple[str, str], List[ActionEvent]] = defaultdict(list)
+    for r in raw:
+        grouped[(r.owner_id, r.label)].append(r)
+
+    merged: List[ActionEvent] = []
+    for events in grouped.values():
+        events.sort(key=lambda x: (x.start_frame, x.end_frame))
+        cur = events[0]
+        for nxt in events[1:]:
+            if nxt.start_frame <= cur.end_frame or nxt.start_frame - cur.end_frame <= 2:
+                cur.start_frame = min(cur.start_frame, nxt.start_frame)
+                cur.end_frame = max(cur.end_frame, nxt.end_frame)
+                cur.shot_ids |= nxt.shot_ids
+                cur.target_ids |= nxt.target_ids
+            else:
+                merged.append(cur)
+                cur = nxt
+        merged.append(cur)
+    return merged
+
+
+def _flatten_relation_events(
+    edges: List[Dict[str, Any]],
+    idx_to_node: Dict[int, str],
+    node_to_shots: Dict[str, Set[int]],
+) -> List[RelationEvent]:
+    out: List[RelationEvent] = []
+    seen: Set[str] = set()
+
+    def add(subj: str, obj: str, pred: str, et: str, rt: str, segs: List[Tuple[int, int]], shots: Set[int]) -> None:
+        if not segs:
+            return
+        segs = [(min(a, b), max(a, b)) for a, b in segs]
+        segs.sort()
+        key = json.dumps({"s": subj, "o": obj, "p": pred, "et": et, "rt": rt, "sg": segs}, sort_keys=True)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(RelationEvent(subj, obj, pred, et, rt, segs, set(shots)))
+
+    for bundle in edges:
+        if "subject_id" not in bundle or "relationships" not in bundle:
+            continue
+        s_idx = bundle.get("subject_id")
+        if not isinstance(s_idx, int):
+            continue
+        s_node = idx_to_node.get(s_idx)
+        if not s_node:
+            continue
+
+        for rel in bundle.get("relationships", []):
+            if not isinstance(rel, dict):
+                continue
+            o_idx = rel.get("object_id")
+            if not isinstance(o_idx, int):
+                continue
+            o_node = idx_to_node.get(o_idx)
+            if not o_node:
+                continue
+            pred = _norm(rel.get("predicate_verb", "")).lower()
+            if not pred:
+                continue
+            et = _norm(rel.get("edge_type", ""))
+            rt = _norm(rel.get("relationship_type", ""))
+            segs = []
+            for seg in rel.get("time_frames", []) or []:
+                if isinstance(seg, list) and len(seg) == 2:
+                    a, b = _to_int(seg[0], 0), _to_int(seg[1], 0)
+                    if b < a:
+                        a, b = b, a
+                    segs.append((a, b))
+            if not segs:
+                segs = [(0, 0)]
+            shots = set(node_to_shots.get(s_node or "", set())) | set(node_to_shots.get(o_node or "", set()))
+            add(s_node, o_node, pred, et, rt, segs, shots)
+            if pred in ASYM_INVERSE:
+                add(o_node, s_node, ASYM_INVERSE[pred], et, rt, segs, shots)
+            elif pred in SYMMETRIC:
+                add(o_node, s_node, pred, et, rt, segs, shots)
+
+    return out
+
+
+def _active_distractors(target: EntityProfile, entities: Dict[str, EntityProfile], support: Set[int]) -> List[EntityProfile]:
+    return [
+        e
+        for e in entities.values()
+        if e.canonical_id != target.canonical_id
+        and e.canonical_class == target.canonical_class
+        and bool(e.frames & support)
+    ]
+
+
+def _temporal_level(clue_types: List[str], cross_shot: bool) -> int:
+    if cross_shot:
+        return 4
+    if "action_sequence" in clue_types:
+        return 3
+    if "action_relation_overlap" in clue_types or "action+context" in clue_types:
+        return 2
+    if any(x in clue_types for x in ["action", "action_to_unique", "action_to_described", "relation_to_unique", "relation_to_described"]):
+        return 1
+    return 0
+
+
+def _spatial_base(clue_types: List[str], cross_shot: bool) -> float:
+    if cross_shot:
+        return 0.85
+    if "action_relation_overlap" in clue_types:
+        return 0.85
+    if "action_to_described" in clue_types or "relation_to_described" in clue_types:
+        return 0.75
+    if "action_to_unique" in clue_types or "relation_to_unique" in clue_types:
+        return 0.55
+    if "context_relation" in clue_types:
+        return 0.30
+    if "attribute" in clue_types:
+        return 0.20
+    return 0.25
+
+
+def _rule_bucket(clue_types: List[str], support_len: int, track_len: int, active_dist: int, cross_shot: bool) -> str:
+    long_action = support_len >= 0.4 * max(track_len, 1)
+    has_attr = "attribute" in clue_types
+    has_ctx = "context_relation" in clue_types
+    has_action = any(x in clue_types for x in ["action", "action_to_unique", "action_to_described"])
+    has_relation = any(x in clue_types for x in ["relation_to_unique", "relation_to_described"])
+    has_described = any(x in clue_types for x in ["action_to_described", "relation_to_described"])
+
+    if cross_shot or "action_sequence" in clue_types:
+        return "very_hard"
+    if len(clue_types) >= 3 and has_action and (has_relation or has_ctx):
+        return "very_hard"
+    if "action_to_described" in clue_types and "relation_to_described" in clue_types:
+        return "very_hard"
+
+    if "action_relation_overlap" in clue_types or "action+context" in clue_types:
+        return "hard"
+    if "action_to_described" in clue_types:
+        return "hard"
+    if active_dist >= 3 and len(clue_types) == 1:
+        return "hard"
+
+    if (has_attr and has_action) or (has_attr and has_ctx) or (has_ctx and has_action):
+        return "medium"
+    if "action_to_unique" in clue_types or "relation_to_described" in clue_types:
+        return "medium"
+    if "action" in clue_types and not long_action:
+        return "medium"
+
+    if len(clue_types) == 1 and "attribute" in clue_types:
+        return "easy"
+    if len(clue_types) == 1 and "context_relation" in clue_types:
+        return "easy"
+    if len(clue_types) == 1 and "action" in clue_types and long_action:
+        return "easy"
+    if len(clue_types) == 1 and "relation_to_unique" in clue_types:
+        return "easy"
+    return "medium"
+
+
+def _type_bucket(clue_types: List[str], cross_shot: bool) -> str:
+    if cross_shot:
+        return "cross_shot"
+    if "action_sequence" in clue_types:
+        return "action_sequence"
+    if "action_to_unique" in clue_types or "action_to_described" in clue_types:
+        return "action_target"
+    if "relation_to_unique" in clue_types or "relation_to_described" in clue_types:
+        return "relation"
+    if "action" in clue_types or "action_relation_overlap" in clue_types:
+        return "action"
+    if "context_relation" in clue_types:
+        return "context_relation"
+    return "attribute"
+
+
+def _ordered_query_spec(spec: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for k in QUERY_SPEC_KEYS:
+        out[k] = spec.get(k)
+    for k, v in spec.items():
+        if k not in out:
+            out[k] = v
+    return out
+
+
+def _ordered_query_node(node: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for k in QUERY_NODE_KEYS:
+        out[k] = node.get(k)
+    for k, v in node.items():
+        if k not in out:
+            out[k] = v
+    return out
+
+
+def _ordered_graph_output(graph: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for k in GRAPH_OUTPUT_KEYS:
+        if k not in graph:
+            continue
+        if k == "query_nodes" and isinstance(graph.get(k), list):
+            out[k] = [_ordered_query_node(x) if isinstance(x, dict) else x for x in graph[k]]
+        else:
+            out[k] = graph[k]
+    for k, v in graph.items():
+        if k not in out:
+            out[k] = v
+    return out
 
 
 class DifficultyAwareSTVGQueryGenerator:
-    def __init__(
-        self,
-        n_action_cap: int = 5,
-        n_density_cap: int = 8,
-        w1: float = 0.4,
-        w2: float = 0.2,
-        w3: float = 0.1,
-        w4: float = 0.3,
-        lam: float = 0.5,
-        max_combo_size: int = 3,
-    ) -> None:
-        self.n_action_cap = n_action_cap
-        self.n_density_cap = n_density_cap
-        self.w1 = w1
-        self.w2 = w2
-        self.w3 = w3
-        self.w4 = w4
-        self.lam = lam
-        self.max_combo_size = max_combo_size
+    def __init__(self) -> None:
+        pass
+
+    def _normalize_graph(self, graph: Dict[str, Any]) -> Dict[str, Any]:
+        objects = graph.get("object_nodes", [])
+        actions = graph.get("action_nodes", [])
+        edges = graph.get("edges", [])
+        idx_to_node = _build_object_index_maps(objects)
+        entities = _build_entity_profiles(objects)
+
+        node_to_shots: Dict[str, Set[int]] = {}
+        for obj in objects:
+            nid = str(obj.get("node_id", "")).strip()
+            if nid:
+                node_to_shots[nid] = {_to_int(x, -1) for x in obj.get("shot_ids", []) if _to_int(x, -1) >= 0}
+
+        action_events = _flatten_action_events(actions, node_to_shots)
+        relation_events = _flatten_relation_events(edges, idx_to_node, node_to_shots)
+
+        return {
+            "objects": objects,
+            "entities": entities,
+            "action_events": action_events,
+            "relation_events": relation_events,
+        }
 
     def build_query_plan(
         self,
         graph: Dict[str, Any],
         target_obj: Dict[str, Any],
         d_star: float,
-        total_frames: Optional[int] = None,
         return_all_candidates: bool = False,
         max_candidates: int = 20,
     ) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
-        # Step 0) 初始化：支持 same_entity 合并，并建立帧级索引
-        _ = total_frames
-        object_nodes = graph.get("object_nodes", [])
-        action_nodes = graph.get("action_nodes", [])
-        edges = graph.get("edges", [])
-        objects_by_id = {obj.get("node_id"): obj for obj in object_nodes if obj.get("node_id")}
-        target_id = str(target_obj.get("node_id", ""))
-        target_class = target_obj.get("object_class", "object")
+        n = self._normalize_graph(graph)
+        entities: Dict[str, EntityProfile] = n["entities"]
+        action_events: List[ActionEvent] = n["action_events"]
+        relation_events: List[RelationEvent] = n["relation_events"]
 
-        object_frames: Dict[str, Set[int]] = {
-            obj_id: {int(k) for k in obj.get("bboxes", {}).keys()}
-            for obj_id, obj in objects_by_id.items()
-        }
-        frame_objects: Dict[int, Set[str]] = {}
-        for obj_id, frames in object_frames.items():
-            for frame_idx in frames:
-                frame_objects.setdefault(frame_idx, set()).add(obj_id)
+        target_node = str(target_obj.get("node_id", "")).strip()
+        target = entities.get(target_node)
+        if not target:
+            fallback = self._fallback_plan(target_obj, d_star)
+            return [fallback] if return_all_candidates else fallback
 
-        def relation_label(edge: Dict[str, Any]) -> Optional[str]:
-            return (
-                edge.get("spatial_relationship")
-                or edge.get("contacting_relationship")
-                or edge.get("attention_relationship")
-            )
+        t_actions = [x for x in action_events if x.owner_id == target.canonical_id]
+        t_relations = [x for x in relation_events if x.subj_id == target.canonical_id]
 
-        def interval_frames(start: Any, end: Any) -> Set[int]:
-            if start is None and end is None:
-                return set()
-            if start is None:
-                start = end
-            if end is None:
-                end = start
-            s = int(start)
-            e = int(end)
-            if e < s:
-                s, e = e, s
-            return set(range(s, e + 1))
+        candidates: List[Dict[str, Any]] = []
+        seen_sig: Set[str] = set()
 
-        def frames_to_segments(frames: Set[int]) -> List[tuple[int, int]]:
-            if not frames:
-                return []
-            sorted_frames = sorted(frames)
-            segments: List[tuple[int, int]] = []
-            seg_start = sorted_frames[0]
-            prev = sorted_frames[0]
-            for cur in sorted_frames[1:]:
-                if cur == prev + 1:
-                    prev = cur
-                    continue
-                segments.append((seg_start, prev))
-                seg_start = cur
-                prev = cur
-            segments.append((seg_start, prev))
-            return segments
+        def add(clue_types: List[str], clue_data: Dict[str, Any], support: Set[int], cross_shot: bool = False) -> None:
+            s = set(support) or set(target.frames) or set(range(target.start_frame, target.end_frame + 1))
+            segs = _frames_to_segments(s)
+            t0 = min(s) if s else target.start_frame
+            t1 = max(s) if s else target.end_frame
 
-        # Step 0.1) reference_relationship: same_entity 跨镜头合并
-        same_entity_graph: Dict[str, Set[str]] = {}
-        for edge in edges:
-            if edge.get("reference_relationship") != "same_entity":
-                continue
-            source_id = edge.get("source_id")
-            target_id_in_edge = edge.get("target_id")
-            if source_id not in objects_by_id or target_id_in_edge not in objects_by_id:
-                continue
-            if objects_by_id[source_id].get("object_class") != target_class:
-                continue
-            if objects_by_id[target_id_in_edge].get("object_class") != target_class:
-                continue
-            same_entity_graph.setdefault(source_id, set()).add(target_id_in_edge)
-            same_entity_graph.setdefault(target_id_in_edge, set()).add(source_id)
+            # 找同时间段同类别的干扰物数量
+            active = _active_distractors(target, entities, s)
+            active_n = len(active)
 
-        merged_target_ids: Set[str] = set()
-        if target_id:
-            stack = [target_id]
-            while stack:
-                node = stack.pop()
-                if node in merged_target_ids:
-                    continue
-                merged_target_ids.add(node)
-                for nxt in same_entity_graph.get(node, set()):
-                    if nxt not in merged_target_ids:
-                        stack.append(nxt)
-        if not merged_target_ids and target_id:
-            merged_target_ids = {target_id}
-        merged_target_objs = [objects_by_id[obj_id] for obj_id in merged_target_ids if obj_id in objects_by_id]
-        if not merged_target_objs:
-            merged_target_objs = [target_obj]
-            merged_target_ids = {target_id} if target_id else set()
+            # 
+            d_t = _temporal_level(clue_types, cross_shot) / 4.0
+            d_s = 0.6 * _spatial_base(clue_types, cross_shot) + 0.4 * min(active_n / 3.0, 1.0)
+            d = 0.55 * d_t + 0.45 * d_s
 
-        # F_o: 合并后的目标出现帧（用于时序定位）
-        f_o: Set[int] = set()
-        for obj in merged_target_objs:
-            f_o |= {int(k) for k in obj.get("bboxes", {}).keys()}
-        merged_start_frame = min((obj.get("start_frame", 0) for obj in merged_target_objs), default=0)
-        merged_end_frame = max((obj.get("end_frame", 0) for obj in merged_target_objs), default=0)
-        if not f_o and merged_end_frame >= merged_start_frame:
-            f_o = set(range(int(merged_start_frame), int(merged_end_frame) + 1))
-        merged_shot_ids: Set[int] = set()
-        for obj in merged_target_objs:
-            merged_shot_ids |= set(obj.get("shot_ids", []))
-        merged_appearances: List[str] = []
-        for obj in merged_target_objs:
-            appearance = str(obj.get("appearance", "")).strip()
-            if appearance and appearance not in merged_appearances:
-                merged_appearances.append(appearance)
+            bucket = _rule_bucket(clue_types, len(s), target.end_frame - target.start_frame + 1, active_n, cross_shot)
+            type_b = _type_bucket(clue_types, cross_shot)
 
-        # Step 1) 场景固定项 + 干扰物集合
-        distractors: List[Dict[str, Any]] = []
-        for obj in object_nodes:
-            obj_id = obj.get("node_id")
-            if obj_id in merged_target_ids:
-                continue
-            if obj.get("object_class") != target_class:
-                continue
-            if f_o & object_frames.get(obj_id, set()):
-                distractors.append(obj)
-        distractor_ids = [str(d.get("node_id")) for d in distractors if d.get("node_id")]
-        distractor_id_set = set(distractor_ids)
-
-        others = [obj for obj in object_nodes if obj.get("node_id") not in merged_target_ids]
-        if not others:
-            c_tiou = 0.0
-        else:
-            tious: List[float] = []
-            for obj in others:
-                f_j = object_frames.get(str(obj.get("node_id")), set())
-                union = f_o | f_j
-                tious.append((len(f_o & f_j) / len(union)) if union else 0.0)
-            c_tiou = 1.0 - (sum(tious) / len(tious))
-
-        n_shots = len(merged_shot_ids)
-        total_shots = len(graph.get("temporal_nodes", []))
-        c_bg = (n_shots - 1) / max(total_shots - 1, 1)
-
-        counts: List[int] = []
-        for frame_idx in f_o:
-            n_targets_in_frame = len(frame_objects.get(frame_idx, set()) & merged_target_ids)
-            n_others = len(frame_objects.get(frame_idx, set())) - n_targets_in_frame
-            counts.append(max(n_others, 0))
-        c_density = min((sum(counts) / len(counts)) / self.n_density_cap, 1.0) if counts else 0.0
-
-        # Step 2) 预计算动作帧支持（目标+干扰物）
-        target_action_frames: Dict[str, Set[int]] = {}
-        distractor_action_frames: Dict[str, Dict[str, Set[int]]] = {d: {} for d in distractor_ids}
-        for action in action_nodes:
-            obj_id = action.get("object_node_id")
-            label = action.get("action_label")
-            if not obj_id or not label:
-                continue
-            frames = interval_frames(action.get("start_frame"), action.get("end_frame"))
-            if not frames and action.get("frame_idx") is not None:
-                frames = {int(action["frame_idx"])}
-            if obj_id in merged_target_ids:
-                target_action_frames.setdefault(label, set()).update(frames & f_o)
-            elif obj_id in distractor_id_set:
-                distractor_action_frames[obj_id].setdefault(label, set()).update(
-                    frames & object_frames.get(obj_id, set())
-                )
-
-        # Step 2) 构建要素池。每个要素新增:
-        # support_frames: 该线索在目标上的有效帧
-        # distractor_support: 每个干扰物在该线索上的有效帧
-        element_pool: List[Dict[str, Any]] = []
-        element_key_to_index: Dict[str, int] = {}
-
-        def add_element(
-            elem_type: str,
-            content: Any,
-            support_frames: Set[int],
-            distractor_support: Dict[str, Set[int]],
-            ref_object: Optional[Dict[str, Any]] = None,
-        ) -> None:
-            if not support_frames:
-                return
-            normalized_distractor_support = {
-                d_id: set(distractor_support.get(d_id, set())) for d_id in distractor_ids
+            spec = {
+                "target_class": target.canonical_class,
+                "attributes": clue_data.get("attributes", []),
+                "context_relations": clue_data.get("context_relations", []),
+                "actions": clue_data.get("actions", []),
+                "action_targets": clue_data.get("action_targets", []),
+                "action_sequences": clue_data.get("action_sequences", []),
+                "relations": clue_data.get("relations", []),
+                "time_range": {"start": t0, "end": t1},
+                "time_segments": [[a, b] for a, b in segs] if segs else [[target.start_frame, target.end_frame]],
+                "full_track_range": {"start": target.start_frame, "end": target.end_frame},
+                "cross_shot": bool(cross_shot),
+                "same_entity_nodes": sorted(target.node_ids),
             }
-            excludes = {d_id for d_id in distractor_ids if not normalized_distractor_support[d_id]}
-            key = json.dumps(
-                {"type": elem_type, "content": content},
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-            if key in element_key_to_index:
-                idx = element_key_to_index[key]
-                element_pool[idx]["support_frames"] |= set(support_frames)
-                for d_id in distractor_ids:
-                    element_pool[idx]["distractor_support"][d_id] |= normalized_distractor_support[d_id]
-                element_pool[idx]["excludes"] = {
-                    d_id for d_id in distractor_ids if not element_pool[idx]["distractor_support"][d_id]
-                }
+            spec = _ordered_query_spec(spec)
+
+            sig_payload = {
+                "target": target.canonical_id,
+                "clue_types": sorted(set(clue_types)),
+                "clue_data": clue_data,
+                "segs": spec["time_segments"],
+                "cross_shot": bool(cross_shot),
+            }
+            sig = json.dumps(sig_payload, ensure_ascii=False, sort_keys=True)
+            if sig in seen_sig:
                 return
-            element_key_to_index[key] = len(element_pool)
-            element_pool.append(
+            seen_sig.add(sig)
+
+            candidates.append(
                 {
-                    "type": elem_type,
-                    "type_difficulty": TYPE_DIFFICULTY[elem_type],
-                    "content": content,
-                    "excludes": excludes,
-                    "ref_object": ref_object,
-                    "support_frames": set(support_frames),
-                    "distractor_support": normalized_distractor_support,
+                    "query_spec": spec,
+                    "D_t": d_t,
+                    "D_s": d_s,
+                    "D": d,
+                    "d_star": float(d_star),
+                    "target_node": target_node,
+                    "segment_len": max(len(s), 1),
+                    "clue_types": sorted(set(clue_types)),
+                    "type_bucket": type_b,
+                    "difficulty_bucket": bucket,
+                    "candidate_signature": sig,
                 }
             )
 
-        if not distractor_ids:
-            add_element(
-                elem_type="unique_class",
-                content=target_class,
-                support_frames=set(f_o),
-                distractor_support={},
-            )
+        # attribute / context_relation
+        for a in target.attributes:
+            add(["attribute"], {"attributes": [a]}, set(target.frames))
+        for r in target.context_relations:
+            add(["context_relation"], {"context_relations": [r]}, set(target.frames))
 
-        # 外观要素
-        phrases: List[str] = []
-        for appearance in merged_appearances:
-            for phrase in _split_and_strip(appearance, ","):
-                if phrase not in phrases:
-                    phrases.append(phrase)
-        for phrase in phrases:
-            d_support: Dict[str, Set[int]] = {}
-            for d_id in distractor_ids:
-                d_obj = objects_by_id.get(d_id, {})
-                d_phrases = _split_and_strip(d_obj.get("appearance", ""), ",")
-                d_support[d_id] = object_frames.get(d_id, set()) if phrase in d_phrases else set()
-            add_element(
-                elem_type="attribute",
-                content=phrase,
-                support_frames=set(f_o),
-                distractor_support=d_support,
-            )
-
-        # 动作要素
-        for label, t_frames in target_action_frames.items():
-            d_support = {d_id: distractor_action_frames[d_id].get(label, set()) for d_id in distractor_ids}
-            add_element(
-                elem_type="action",
-                content=label,
-                support_frames=set(t_frames),
-                distractor_support=d_support,
-            )
-
-        # 关系要素（显式）
-        unique_class_objects = set()
-        for obj in object_nodes:
-            obj_id = obj.get("node_id")
-            obj_class = obj.get("object_class")
-            if not obj_id or not obj_class:
-                continue
-            same_class_count = 0
-            for o2 in object_nodes:
-                if o2.get("object_class") != obj_class:
+        # action / action_target
+        for ev in t_actions:
+            supp = set(range(ev.start_frame, ev.end_frame + 1)) & target.frames
+            add(["action"], {"actions": [ev.label]}, supp)
+            for ref_id in sorted(ev.target_ids):
+                ref = entities.get(ref_id)
+                if not ref:
                     continue
-                if object_frames.get(o2.get("node_id"), set()) & f_o:
-                    same_class_count += 1
-            if same_class_count == 1:
-                unique_class_objects.add(obj_id)
-
-        for edge in edges:
-            if edge.get("edge_scope") == "implicit":
-                continue
-            source_id = edge.get("source_id")
-            target_id_in_edge = edge.get("target_id")
-            if source_id not in merged_target_ids and target_id_in_edge not in merged_target_ids:
-                continue
-            rel = relation_label(edge)
-            if not rel:
-                continue
-            ref_id = (target_id_in_edge or edge.get("target_object")) if source_id in merged_target_ids else source_id
-            if not ref_id:
-                continue
-            ref_obj = objects_by_id.get(ref_id)
-            elem_type = "relation_to_unique" if ref_id in unique_class_objects else "relation_to_described"
-            t_support = interval_frames(edge.get("start_frame"), edge.get("end_frame")) & f_o
-            if not t_support:
-                if ref_id in object_frames:
-                    t_support = f_o & object_frames.get(ref_id, set())
+                same_cls = [e for e in entities.values() if e.canonical_class == ref.canonical_class and bool(e.frames & supp)]
+                if len(same_cls) == 1:
+                    add(
+                        ["action_to_unique"],
+                        {"action_targets": [{"action": ev.label, "ref": {"class": ref.canonical_class, "attributes": [], "context_relations": []}}]},
+                        supp,
+                    )
                 else:
-                    t_support = set(f_o)
-            d_support: Dict[str, Set[int]] = {d_id: set() for d_id in distractor_ids}
-            for d_id in distractor_ids:
-                for e in edges:
-                    if e.get("edge_scope") == "implicit":
-                        continue
-                    if not (e.get("source_id") == d_id or e.get("target_id") == d_id):
-                        continue
-                    if not (
-                        e.get("target_id") == ref_id
-                        or e.get("source_id") == ref_id
-                        or e.get("target_object") == ref_id
-                    ):
-                        continue
-                    if relation_label(e) != rel:
-                        continue
-                    d_frames = interval_frames(e.get("start_frame"), e.get("end_frame"))
-                    if not d_frames:
-                        if ref_id in object_frames:
-                            d_frames = object_frames.get(d_id, set()) & object_frames.get(ref_id, set())
-                        else:
-                            d_frames = set(object_frames.get(d_id, set()))
-                    d_support[d_id] |= d_frames
-                d_support[d_id] &= object_frames.get(d_id, set())
-            add_element(
-                elem_type=elem_type,
-                content={"relation": rel, "ref": ref_id},
-                support_frames=t_support,
-                distractor_support=d_support,
-                ref_object=ref_obj,
-            )
+                    add(["action_to_described"], {"action_targets": [{"action": ev.label, "ref": _build_ref_description(ref, supp, entities)}]}, supp)
 
-        # 动作组合要素（两两动作）
-        action_labels = list(target_action_frames.keys())
-        if len(action_labels) >= 2:
-            for a1, a2 in combinations(action_labels, 2):
-                t_support = target_action_frames[a1] & target_action_frames[a2]
-                d_support = {
-                    d_id: distractor_action_frames[d_id].get(a1, set()) & distractor_action_frames[d_id].get(a2, set())
-                    for d_id in distractor_ids
-                }
-                add_element(
-                    elem_type="action_combination",
-                    content=[a1, a2],
-                    support_frames=t_support,
-                    distractor_support=d_support,
-                )
-
-        # 隐式关系要素
-        for edge in edges:
-            if edge.get("edge_scope") != "implicit":
+        # relation
+        for rel in t_relations:
+            supp = _segments_to_frames(rel.segments) & target.frames
+            ref = entities.get(rel.obj_id)
+            if not ref:
                 continue
-            if edge.get("source_id") not in merged_target_ids:
-                continue
-            rel = relation_label(edge)
-            target_object = edge.get("target_object")
-            if not rel or not target_object:
-                continue
-            t_support = interval_frames(edge.get("start_frame"), edge.get("end_frame")) & f_o
-            if not t_support:
-                t_support = set(f_o)
-            d_support: Dict[str, Set[int]] = {d_id: set() for d_id in distractor_ids}
-            for d_id in distractor_ids:
-                for e in edges:
-                    if e.get("edge_scope") != "implicit":
-                        continue
-                    if e.get("source_id") != d_id:
-                        continue
-                    if e.get("target_object") != target_object:
-                        continue
-                    if relation_label(e) != rel:
-                        continue
-                    d_frames = interval_frames(e.get("start_frame"), e.get("end_frame"))
-                    if not d_frames:
-                        d_frames = set(object_frames.get(d_id, set()))
-                    d_support[d_id] |= d_frames
-                d_support[d_id] &= object_frames.get(d_id, set())
-            add_element(
-                elem_type="relation_to_unique",
-                content={"relation": rel, "ref": target_object},
-                support_frames=t_support,
-                distractor_support=d_support,
+            same_cls = [e for e in entities.values() if e.canonical_class == ref.canonical_class and bool(e.frames & supp)]
+            if len(same_cls) == 1:
+                add(
+                    ["relation_to_unique"],
+                    {"relations": [{"relation": rel.predicate, "ref": {"class": ref.canonical_class, "attributes": [], "context_relations": []}}]},
+                    supp,
+                )
+            else:
+                add(["relation_to_described"], {"relations": [{"relation": rel.predicate, "ref": _build_ref_description(ref, supp, entities)}]}, supp)
+
+        # action_sequence / cross_shot_sequence
+        ta = sorted(t_actions, key=lambda x: (x.start_frame, x.end_frame, x.label))
+        track_len = max(target.end_frame - target.start_frame + 1, 1)
+        for i in range(len(ta)):
+            for j in range(i + 1, len(ta)):
+                a, b = ta[i], ta[j]
+                if a.label == b.label or a.end_frame >= b.start_frame:
+                    continue
+                if (a.end_frame - a.start_frame + 1) < 2 or (b.end_frame - b.start_frame + 1) < 2:
+                    continue
+                if b.end_frame - a.start_frame + 1 > 0.8 * track_len:
+                    continue
+                cross = len(a.shot_ids | b.shot_ids) >= 2
+                add(
+                    ["action_sequence"],
+                    {"action_sequences": [{"first": a.label, "second": b.label, "order": "before", "cross_shot": cross}]},
+                    set(range(a.start_frame, b.end_frame + 1)) & target.frames,
+                    cross_shot=cross,
+                )
+
+        # compact combos
+        one_attr = next((c for c in candidates if c["clue_types"] == ["attribute"]), None)
+        one_ctx = next((c for c in candidates if c["clue_types"] == ["context_relation"]), None)
+        one_act = next((c for c in candidates if c["clue_types"] == ["action"]), None)
+        one_rel = next((c for c in candidates if c["clue_types"] in (["relation_to_unique"], ["relation_to_described"])), None)
+
+        def overlap(c1: Dict[str, Any], c2: Dict[str, Any]) -> Set[int]:
+            a, b = c1["query_spec"]["time_range"], c2["query_spec"]["time_range"]
+            s, e = max(a["start"], b["start"]), min(a["end"], b["end"])
+            return set(range(s, e + 1)) if s <= e else set(target.frames)
+
+        if one_attr and one_act:
+            add(["attribute", "action"], {"attributes": one_attr["query_spec"]["attributes"], "actions": one_act["query_spec"]["actions"]}, overlap(one_attr, one_act))
+        if one_ctx and one_act:
+            add(["action+context", "action", "context_relation"], {"context_relations": one_ctx["query_spec"]["context_relations"], "actions": one_act["query_spec"]["actions"]}, overlap(one_ctx, one_act))
+        if one_act and one_rel:
+            add(["action_relation_overlap", "action"] + one_rel["clue_types"], {"actions": one_act["query_spec"]["actions"], "relations": one_rel["query_spec"]["relations"]}, overlap(one_act, one_rel))
+
+        if not candidates:
+            fallback = self._fallback_plan(target_obj, d_star)
+            return [fallback] if return_all_candidates else fallback
+
+        # prefer hard-unique; fallback to best exclusions+support naturally by sorting
+        hard_unique = [
+            c
+            for c in candidates
+            if len(
+                _active_distractors(
+                    target,
+                    entities,
+                    set(range(c["query_spec"]["time_range"]["start"], c["query_spec"]["time_range"]["end"] + 1)),
+                )
             )
-
-        # Step 3) 组合枚举 + 时间段唯一性校验
-        valid_combinations: List[Dict[str, Any]] = []
-        max_k = min(self.max_combo_size, len(element_pool))
-
-        def combo_support_frames(combo: List[Dict[str, Any]]) -> Set[int]:
-            frames: Optional[Set[int]] = None
-            for elem in combo:
-                frames = set(elem["support_frames"]) if frames is None else (frames & elem["support_frames"])
-                if not frames:
-                    return set()
-            return frames or set()
-
-        def distractor_combo_frames(combo: List[Dict[str, Any]], d_id: str) -> Set[int]:
-            frames: Optional[Set[int]] = None
-            for elem in combo:
-                d_frames = elem["distractor_support"].get(d_id, set())
-                frames = set(d_frames) if frames is None else (frames & d_frames)
-                if not frames:
-                    return set()
-            return frames or set()
-
-        for k in range(1, max_k + 1):
-            for combo_tpl in combinations(element_pool, k):
-                combo = list(combo_tpl)
-                union_excluded: Set[str] = set()
-                for elem in combo:
-                    union_excluded |= elem["excludes"]
-                if distractor_ids and not set(distractor_ids).issubset(union_excluded):
-                    continue
-
-                support = combo_support_frames(combo)
-                if not support:
-                    continue
-                segments = frames_to_segments(support)
-                if not segments:
-                    continue
-
-                unique_segments: List[tuple[int, int]] = []
-                for seg_start, seg_end in segments:
-                    seg_frames = set(range(seg_start, seg_end + 1))
-                    is_unique = True
-                    for d_id in distractor_ids:
-                        if distractor_combo_frames(combo, d_id) & seg_frames:
-                            is_unique = False
-                            break
-                    if is_unique:
-                        unique_segments.append((seg_start, seg_end))
-                if unique_segments:
-                    valid_combinations.append({"combo": combo, "segments": unique_segments})
-            if len(valid_combinations) >= 50:
-                break
-
-        if not valid_combinations:
-            # 兜底：找排除最多且支持帧最长的组合
-            best_fallback: Optional[Dict[str, Any]] = None
-            for k in range(1, max_k + 1):
-                for combo_tpl in combinations(element_pool, k):
-                    combo = list(combo_tpl)
-                    support = combo_support_frames(combo)
-                    if not support:
-                        continue
-                    union_excluded: Set[str] = set()
-                    for elem in combo:
-                        union_excluded |= elem["excludes"]
-                    candidate = {
-                        "combo": combo,
-                        "segments": frames_to_segments(support),
-                        "covered": len(union_excluded),
-                        "support_len": len(support),
-                    }
-                    if not best_fallback:
-                        best_fallback = candidate
-                        continue
-                    if (candidate["covered"], candidate["support_len"]) > (
-                        best_fallback["covered"],
-                        best_fallback["support_len"],
-                    ):
-                        best_fallback = candidate
-            if best_fallback and best_fallback["segments"]:
-                valid_combinations.append(
-                    {"combo": best_fallback["combo"], "segments": best_fallback["segments"]}
-                )
-            elif element_pool:
-                valid_combinations.append(
-                    {
-                        "combo": [element_pool[0]],
-                        "segments": [(merged_start_frame, merged_end_frame)],
-                    }
-                )
-
-        # Step 4) 组合打分（每个组合的每个唯一时间段都是候选）
-        scored_candidates: List[Dict[str, Any]] = []
-        max_type_score = max(TYPE_DIFFICULTY.values())
-        for item in valid_combinations:
-            combo = item["combo"]
-            n_actions = 0
-            for elem in combo:
-                if elem["type"] == "action":
-                    n_actions += 1
-                elif elem["type"] == "action_combination":
-                    n_actions += 2
-            d_t = min(n_actions / self.n_action_cap, 1.0)
-            type_diffs = [int(elem["type_difficulty"]) for elem in combo]
-            avg_type_diff = (sum(type_diffs) / len(type_diffs)) if type_diffs else 0.0
-            d_type = avg_type_diff / max_type_score if max_type_score > 0 else 0.0
-            d_s = self.w1 * d_type + self.w2 * c_tiou + self.w3 * c_bg + self.w4 * c_density
-            d = self.lam * d_t + (1 - self.lam) * d_s
-            for seg_start, seg_end in item["segments"]:
-                scored_candidates.append(
-                    {
-                        "combo": combo,
-                        "D_t": d_t,
-                        "D_s": d_s,
-                        "D": d,
-                        "segment": (seg_start, seg_end),
-                        "segment_len": seg_end - seg_start + 1,
-                    }
-                )
-
-        if not scored_candidates:
-            scored_candidates = [
-                {
-                    "combo": [element_pool[0]],
-                    "D_t": 0.0,
-                    "D_s": self.w2 * c_tiou + self.w3 * c_bg + self.w4 * c_density,
-                    "D": self.w2 * c_tiou + self.w3 * c_bg + self.w4 * c_density,
-                    "segment": (merged_start_frame, merged_end_frame),
-                    "segment_len": max(merged_end_frame - merged_start_frame + 1, 1),
-                }
-            ]
-
-        # Step 5) 按贴近 d_star 的顺序排列候选（支持返回多候选用于均衡采样）
-        scored_candidates.sort(key=lambda item: (abs(item["D"] - d_star), -item["segment_len"], len(item["combo"])))
-        plans: List[Dict[str, Any]] = []
-        seen_signatures: Set[str] = set()
-
-        for candidate in scored_candidates:
-            selected_elements = candidate["combo"]
-            seg_start, seg_end = candidate["segment"]
-            query_spec: Dict[str, Any] = {
-                "target_class": target_class,
-                "attributes": [e["content"] for e in selected_elements if e["type"] == "attribute"],
-                "actions": [e["content"] for e in selected_elements if e["type"] == "action"],
-                "action_combos": [e["content"] for e in selected_elements if e["type"] == "action_combination"],
-                "relations": [
-                    e["content"]
-                    for e in selected_elements
-                    if e["type"] in {"relation_to_unique", "relation_to_described"}
-                ],
-                "time_range": {"start": seg_start, "end": seg_end},
-                "full_track_range": {"start": merged_start_frame, "end": merged_end_frame},
-            }
-            if len(merged_target_ids) > 1:
-                query_spec["same_entity_nodes"] = sorted(merged_target_ids)
-                query_spec["cross_shot"] = True
-
-            ref_objects = []
-            for elem in selected_elements:
-                if elem["type"] != "relation_to_described":
-                    continue
-                ref_obj = elem.get("ref_object")
-                if not isinstance(ref_obj, dict):
-                    continue
-                ref_objects.append(
-                    {
-                        "class": ref_obj.get("object_class", "object"),
-                        "appearance": ref_obj.get("appearance", ""),
-                        "relation": elem.get("content", {}).get("relation"),
-                    }
-                )
-            if ref_objects:
-                query_spec["ref_objects"] = ref_objects
-
-            clue_types = sorted({str(e.get("type")) for e in selected_elements if e.get("type")})
-            if query_spec.get("cross_shot"):
-                clue_types.append("cross_shot")
-            type_bucket = "unique_class"
-            if "cross_shot" in clue_types:
-                type_bucket = "cross_shot"
-            elif any(t in {"relation_to_unique", "relation_to_described"} for t in clue_types):
-                type_bucket = "relation"
-            elif "action_combination" in clue_types:
-                type_bucket = "action_combination"
-            elif "action" in clue_types:
-                type_bucket = "action"
-            elif "attribute" in clue_types:
-                type_bucket = "attribute"
-
-            signature = json.dumps(
-                {
-                    "target_node": target_obj.get("node_id"),
-                    "query_spec": query_spec,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
+            == 0
+        ]
+        pool = hard_unique or candidates
+        pool.sort(
+            key=lambda x: (
+                abs(BUCKET_CENTER.get(str(x.get("difficulty_bucket", "medium")), 0.5) - float(d_star)),
+                abs(float(x.get("D", 0.0)) - float(d_star)),
+                -int(x.get("segment_len", 1)),
+                len(x.get("clue_types", [])),
             )
-            if signature in seen_signatures:
-                continue
-            seen_signatures.add(signature)
+        )
+        plans = pool[: max(1, max_candidates)]
+        return plans if return_all_candidates else plans[0]
 
-            plans.append(
-                {
-                    "query_spec": query_spec,
-                    "D_t": candidate["D_t"],
-                    "D_s": candidate["D_s"],
-                    "D": candidate["D"],
-                    "d_star": d_star,
-                    "target_node": target_obj.get("node_id"),
-                    "segment_len": candidate["segment_len"],
-                    "clue_types": clue_types,
-                    "type_bucket": type_bucket,
-                    "candidate_signature": signature,
-                }
-            )
-            if not return_all_candidates:
-                break
-            if max_candidates is not None and max_candidates > 0 and len(plans) >= max_candidates:
-                break
-
-        if not plans:
-            plans = [
-                {
-                    "query_spec": {
-                        "target_class": target_class,
-                        "attributes": [],
-                        "actions": [],
-                        "action_combos": [],
-                        "relations": [],
-                        "time_range": {"start": merged_start_frame, "end": merged_end_frame},
-                        "full_track_range": {"start": merged_start_frame, "end": merged_end_frame},
-                    },
-                    "D_t": 0.0,
-                    "D_s": 0.0,
-                    "D": 0.0,
-                    "d_star": d_star,
-                    "target_node": target_obj.get("node_id"),
-                    "segment_len": max(merged_end_frame - merged_start_frame + 1, 1),
-                    "clue_types": ["fallback"],
-                    "type_bucket": "fallback",
-                    "candidate_signature": f"fallback_{target_obj.get('node_id')}_{merged_start_frame}_{merged_end_frame}",
-                }
-            ]
-
-        if return_all_candidates:
-            return plans
-        return plans[0]
+    def _fallback_plan(self, target_obj: Dict[str, Any], d_star: float) -> Dict[str, Any]:
+        nid = str(target_obj.get("node_id", ""))
+        cls = _norm(target_obj.get("object_class", "object")).lower() or "object"
+        s, e = _to_int(target_obj.get("start_frame"), 0), _to_int(target_obj.get("end_frame"), 0)
+        if e < s:
+            s, e = e, s
+        spec = {
+            "target_class": cls,
+            "attributes": [],
+            "context_relations": [],
+            "actions": [],
+            "action_targets": [],
+            "action_sequences": [],
+            "relations": [],
+            "time_range": {"start": s, "end": e},
+            "time_segments": [[s, e]],
+            "full_track_range": {"start": s, "end": e},
+            "cross_shot": False,
+            "same_entity_nodes": [nid] if nid else [],
+        }
+        spec = _ordered_query_spec(spec)
+        return {
+            "query_spec": spec,
+            "D_t": 0.0,
+            "D_s": 0.0,
+            "D": 0.0,
+            "d_star": float(d_star),
+            "target_node": nid,
+            "segment_len": max(e - s + 1, 1),
+            "clue_types": ["fallback"],
+            "type_bucket": "attribute",
+            "difficulty_bucket": "easy",
+            "candidate_signature": f"fallback::{nid}::{s}::{e}",
+        }
 
     def build_graph_plans(
         self,
         graph: Dict[str, Any],
         d_star: float,
-        total_frames: Optional[int] = None,
         sample_size: Optional[int] = None,
         seed: int = 42,
         target_node_ids: Optional[Union[str, Iterable[str]]] = None,
@@ -744,159 +837,137 @@ class DifficultyAwareSTVGQueryGenerator:
         queries_per_graph: Optional[int] = None,
         balance_difficulty: bool = True,
         balance_types: bool = True,
-        difficulty_bins: int = 4,
         max_queries_per_target: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        candidates = [obj for obj in graph.get("object_nodes", []) if obj.get("node_id") and obj.get("bboxes")]
-        if not candidates:
+        objs = [o for o in graph.get("object_nodes", []) if o.get("node_id") and o.get("bboxes")]
+        if not objs:
             return []
 
         if target_node_ids:
-            if isinstance(target_node_ids, str):
-                target_set = {x.strip() for x in target_node_ids.split(",") if x.strip()}
-            else:
-                target_set = {str(x).strip() for x in target_node_ids if str(x).strip()}
-            candidates = [obj for obj in candidates if obj.get("node_id") in target_set]
+            target_set = (
+                {x.strip() for x in target_node_ids.split(",") if x.strip()}
+                if isinstance(target_node_ids, str)
+                else {str(x).strip() for x in target_node_ids if str(x).strip()}
+            )
+            objs = [o for o in objs if o.get("node_id") in target_set]
 
-        if sample_size is not None and sample_size > 0 and len(candidates) > sample_size:
-            rng = random.Random(seed)
-            candidates = rng.sample(candidates, sample_size)
+        if sample_size and sample_size > 0 and len(objs) > sample_size:
+            objs = random.Random(seed).sample(objs, sample_size)
 
-        d_star_values: List[float] = []
+        d_vals: List[float] = []
         if d_star_list:
-            if isinstance(d_star_list, str):
-                raw_values = [x.strip() for x in d_star_list.split(",") if x.strip()]
-            else:
-                raw_values = [str(x).strip() for x in d_star_list if str(x).strip()]
-            for value in raw_values:
+            raw = [x.strip() for x in d_star_list.split(",")] if isinstance(d_star_list, str) else [str(x).strip() for x in d_star_list]
+            for v in raw:
                 try:
-                    d_value = float(value)
-                except ValueError:
-                    continue
-                d_star_values.append(min(max(d_value, 0.0), 1.0))
-        if not d_star_values:
-            d_star_values = [min(max(float(d_star), 0.0), 1.0)]
+                    d_vals.append(min(max(float(v), 0.0), 1.0))
+                except Exception:
+                    pass
+        if not d_vals:
+            d_vals = [min(max(float(d_star), 0.0), 1.0)]
 
         all_plans: List[Dict[str, Any]] = []
-        global_seen_signatures: Set[str] = set()
+        global_sigs: Set[str] = set()
 
-        for obj in candidates:
-            target_candidates = self.build_query_plan(
+        for obj in objs:
+            t_candidates = self.build_query_plan(
                 graph=graph,
                 target_obj=obj,
-                d_star=d_star_values[0],
-                total_frames=total_frames,
+                d_star=d_vals[0],
                 return_all_candidates=True,
                 max_candidates=max_candidates_per_target,
             )
-            if not isinstance(target_candidates, list) or not target_candidates:
+            if not isinstance(t_candidates, list) or not t_candidates:
                 continue
 
-            selected_for_target: List[Dict[str, Any]] = []
+            chosen: List[Dict[str, Any]]
             if generate_all_candidates:
-                selected_for_target = target_candidates
-            elif len(d_star_values) > 1:
-                local_seen: Set[str] = set()
-                for d_value in d_star_values:
+                chosen = t_candidates
+            elif len(d_vals) > 1:
+                chosen, local_seen = [], set()
+                for dv in d_vals:
                     best = min(
-                        target_candidates,
-                        key=lambda item: (
-                            abs(float(item.get("D", 0.0)) - d_value),
-                            -int(item.get("segment_len", 1)),
-                            len(item.get("clue_types", [])),
+                        t_candidates,
+                        key=lambda x: (
+                            abs(BUCKET_CENTER.get(str(x.get("difficulty_bucket", "medium")), 0.5) - dv),
+                            abs(float(x.get("D", 0.0)) - dv),
+                            -int(x.get("segment_len", 1)),
+                            len(x.get("clue_types", [])),
                         ),
                     )
-                    signature = str(best.get("candidate_signature", ""))
-                    if signature and signature in local_seen:
+                    sig = str(best.get("candidate_signature", ""))
+                    if sig and sig in local_seen:
                         continue
-                    local_seen.add(signature)
-                    selected_for_target.append({**best, "d_star": d_value})
+                    local_seen.add(sig)
+                    chosen.append({**best, "d_star": dv})
                 if per_target_limit > 0:
-                    selected_for_target = selected_for_target[:per_target_limit]
+                    chosen = chosen[:per_target_limit]
             else:
-                if per_target_limit <= 0:
-                    per_target_limit = 1
-                selected_for_target = target_candidates[:per_target_limit]
+                chosen = t_candidates[: max(1, per_target_limit)]
 
-            for plan in selected_for_target:
-                signature = str(plan.get("candidate_signature", ""))
-                if signature and signature in global_seen_signatures:
+            for p in chosen:
+                sig = str(p.get("candidate_signature", ""))
+                if sig and sig in global_sigs:
                     continue
-                if signature:
-                    global_seen_signatures.add(signature)
-                plan_item = dict(plan)
-                plan_item["plan_id"] = (
-                    f"plan_{plan_item.get('target_node')}_{len(all_plans)}_{int(float(plan_item.get('D', 0.0)) * 1000)}"
-                )
-                all_plans.append(plan_item)
+                if sig:
+                    global_sigs.add(sig)
+                item = dict(p)
+                item["plan_id"] = f"plan_{item.get('target_node')}_{len(all_plans)}_{int(float(item.get('D', 0.0)) * 1000)}"
+                all_plans.append(item)
 
-        if queries_per_graph is None or queries_per_graph <= 0 or len(all_plans) <= queries_per_graph:
+        if not queries_per_graph or queries_per_graph <= 0 or len(all_plans) <= queries_per_graph:
             return all_plans
 
-        # 对候选池做均衡采样：难度分桶 + 类型分桶 + 轮询抽样
         rng = random.Random(seed)
-        n_bins = max(int(difficulty_bins), 1)
-        groups: Dict[tuple[int, str], List[Dict[str, Any]]] = {}
-        for plan in all_plans:
-            d_value = min(max(float(plan.get("D", 0.0)), 0.0), 1.0)
-            bin_idx = min(int(d_value * n_bins), n_bins - 1) if balance_difficulty else 0
-            type_key = str(plan.get("type_bucket", "other")) if balance_types else "all"
-            groups.setdefault((bin_idx, type_key), []).append(plan)
+        groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+        for p in all_plans:
+            diff_key = str(p.get("difficulty_bucket", "medium")) if balance_difficulty else "all"
+            type_key = str(p.get("type_bucket", "attribute")) if balance_types else "all"
+            groups[(diff_key, type_key)].append(p)
 
-        for group_key, items in groups.items():
-            items.sort(
-                key=lambda item: (
-                    abs(float(item.get("D", 0.0)) - d_star),
-                    -int(item.get("segment_len", 1)),
-                    len(item.get("clue_types", [])),
+        for k in list(groups.keys()):
+            groups[k].sort(
+                key=lambda x: (
+                    abs(BUCKET_CENTER.get(str(x.get("difficulty_bucket", "medium")), 0.5) - float(d_star)),
+                    abs(float(x.get("D", 0.0)) - float(d_star)),
+                    -int(x.get("segment_len", 1)),
                 )
             )
-            rng.shuffle(items)
-            items.sort(
-                key=lambda item: (
-                    abs(float(item.get("D", 0.0)) - d_star),
-                    -int(item.get("segment_len", 1)),
-                    len(item.get("clue_types", [])),
-                )
-            )
-            groups[group_key] = items
 
         selected: List[Dict[str, Any]] = []
-        target_counter: Dict[str, int] = {}
-        group_keys = list(groups.keys())
+        target_cnt: Dict[str, int] = defaultdict(int)
+        keys = list(groups.keys())
+
         while len(selected) < queries_per_graph:
-            rng.shuffle(group_keys)
-            progressed = False
-            for group_key in group_keys:
-                bucket = groups.get(group_key, [])
+            rng.shuffle(keys)
+            moved = False
+            for k in keys:
+                bucket = groups[k]
                 while bucket:
-                    candidate = bucket.pop(0)
-                    target_node = str(candidate.get("target_node", ""))
-                    if max_queries_per_target is not None and max_queries_per_target > 0:
-                        if target_counter.get(target_node, 0) >= max_queries_per_target:
-                            continue
-                    selected.append(candidate)
-                    target_counter[target_node] = target_counter.get(target_node, 0) + 1
-                    progressed = True
+                    c = bucket.pop(0)
+                    t = str(c.get("target_node", ""))
+                    if max_queries_per_target and max_queries_per_target > 0 and target_cnt[t] >= max_queries_per_target:
+                        continue
+                    selected.append(c)
+                    target_cnt[t] += 1
+                    moved = True
                     break
-                groups[group_key] = bucket
                 if len(selected) >= queries_per_graph:
                     break
-            if not progressed:
+            if not moved:
                 break
 
         if len(selected) < queries_per_graph:
-            selected_signatures = {str(item.get("candidate_signature", "")) for item in selected}
-            leftovers = [plan for plan in all_plans if str(plan.get("candidate_signature", "")) not in selected_signatures]
-            leftovers.sort(
-                key=lambda item: (
-                    abs(float(item.get("D", 0.0)) - d_star),
-                    -int(item.get("segment_len", 1)),
-                    len(item.get("clue_types", [])),
+            picked = {str(x.get("candidate_signature", "")) for x in selected}
+            left = [x for x in all_plans if str(x.get("candidate_signature", "")) not in picked]
+            left.sort(
+                key=lambda x: (
+                    abs(BUCKET_CENTER.get(str(x.get("difficulty_bucket", "medium")), 0.5) - float(d_star)),
+                    abs(float(x.get("D", 0.0)) - float(d_star)),
+                    -int(x.get("segment_len", 1)),
                 )
             )
-            for item in leftovers:
-                selected.append(item)
+            for x in left:
+                selected.append(x)
                 if len(selected) >= queries_per_graph:
                     break
 
@@ -925,54 +996,45 @@ class DifficultyAwareSTVGQueryGenerator:
             with_unique_id=True,
         )
 
-        prompts: List[Dict[str, Any]] = []
-        for plan in plans:
-            plan_id = str(plan.get("plan_id") or plan.get("target_node"))
-            prompt = PROMPT_TEMPLATE.format(
-                d_star=plan.get("d_star"),
-                spec_json=json.dumps(plan.get("query_spec", {}), ensure_ascii=False),
-            )
-            prompts.append({"id": plan_id, "prompt": prompt})
+        prompts = [
+            {
+                "id": str(p.get("plan_id") or p.get("target_node")),
+                "prompt": PROMPT_TEMPLATE.format(d_star=p.get("d_star"), spec_json=json.dumps(p.get("query_spec", {}), ensure_ascii=False)),
+            }
+            for p in plans
+        ]
 
         query_map: Dict[str, str] = {}
-        async for item in generator.generate_stream(
-            prompts=prompts,
-            system_prompt=system_prompt,
-            validate_func=_extract_query,
-        ):
-            if not item:
-                continue
-            plan_id = str(item.get("id"))
-            query = item.get("result")
-            if isinstance(query, str) and query.strip():
-                query_map[plan_id] = query.strip()
+        async for item in generator.generate_stream(prompts=prompts, system_prompt=system_prompt, validate_func=_extract_query):
+            if item and isinstance(item.get("result"), str) and item["result"].strip():
+                query_map[str(item.get("id"))] = item["result"].strip()
         return query_map
 
     def _fallback_query(self, query_spec: Dict[str, Any]) -> str:
-        target_class = query_spec.get("target_class", "object")
-        attributes = query_spec.get("attributes", [])
-        actions = query_spec.get("actions", [])
-        action_combos = query_spec.get("action_combos", [])
-        relations = query_spec.get("relations", [])
-
-        chunks = [f"the {target_class}"]
-        if attributes:
-            chunks.append("with " + ", ".join(attributes))
-        if actions:
-            chunks.append("that is " + " and ".join(actions))
-        for combo in action_combos:
-            if isinstance(combo, list) and len(combo) == 2:
-                chunks.append(f"that {combo[0]} and {combo[1]}")
-        if relations:
-            rel_chunks = []
-            for rel in relations:
-                if isinstance(rel, dict):
-                    relation = rel.get("relation")
-                    ref = rel.get("ref")
-                    if relation and ref:
-                        rel_chunks.append(f"{relation} {ref}")
-            if rel_chunks:
-                chunks.append("that is " + " and ".join(rel_chunks))
+        chunks = [f"the {query_spec.get('target_class', 'object')}" ]
+        if query_spec.get("attributes"):
+            chunks.append("with " + ", ".join(query_spec["attributes"]))
+        if query_spec.get("context_relations"):
+            chunks.append("that is " + " and ".join(query_spec["context_relations"]))
+        if query_spec.get("actions"):
+            chunks.append("that is " + " and ".join(query_spec["actions"]))
+        for x in query_spec.get("action_targets", []):
+            if isinstance(x, dict):
+                a = x.get("action")
+                ref = x.get("ref", {})
+                cls = ref.get("class") if isinstance(ref, dict) else None
+                if a and cls:
+                    chunks.append(f"that {a} the {cls}")
+        for x in query_spec.get("action_sequences", []):
+            if isinstance(x, dict) and x.get("first") and x.get("second"):
+                chunks.append(f"that {x['first']} before {x['second']}")
+        for x in query_spec.get("relations", []):
+            if isinstance(x, dict):
+                r = x.get("relation")
+                ref = x.get("ref", {})
+                cls = ref.get("class") if isinstance(ref, dict) else None
+                if r and cls:
+                    chunks.append(f"that is {r} the {cls}")
         return " ".join(chunks)
 
     def process_graph(
@@ -981,7 +1043,6 @@ class DifficultyAwareSTVGQueryGenerator:
         d_star: float,
         model_name: Optional[str] = None,
         api_keys: Optional[Union[str, Iterable[str]]] = None,
-        total_frames: Optional[int] = None,
         sample_size: Optional[int] = None,
         seed: int = 42,
         target_node_ids: Optional[Union[str, Iterable[str]]] = None,
@@ -992,7 +1053,6 @@ class DifficultyAwareSTVGQueryGenerator:
         queries_per_graph: Optional[int] = None,
         balance_difficulty: bool = True,
         balance_types: bool = True,
-        difficulty_bins: int = 4,
         max_queries_per_target: Optional[int] = None,
         use_llm: bool = True,
         max_concurrent_per_key: int = 100,
@@ -1002,7 +1062,6 @@ class DifficultyAwareSTVGQueryGenerator:
         plans = self.build_graph_plans(
             graph=graph,
             d_star=d_star,
-            total_frames=total_frames,
             sample_size=sample_size,
             seed=seed,
             target_node_ids=target_node_ids,
@@ -1013,7 +1072,6 @@ class DifficultyAwareSTVGQueryGenerator:
             queries_per_graph=queries_per_graph,
             balance_difficulty=balance_difficulty,
             balance_types=balance_types,
-            difficulty_bins=difficulty_bins,
             max_queries_per_target=max_queries_per_target,
         )
 
@@ -1032,14 +1090,15 @@ class DifficultyAwareSTVGQueryGenerator:
             )
 
         query_nodes = []
-        object_map = {obj.get("node_id"): obj for obj in graph.get("object_nodes", [])}
-        for idx, plan in enumerate(plans):
-            plan_id = str(plan.get("plan_id") or f"plan_{idx}")
-            target_node = str(plan.get("target_node"))
-            query = query_map.get(plan_id) or self._fallback_query(plan.get("query_spec", {}))
-            query_item = {
-                "query_id": f"query_{target_node}_{idx}_{plan_id}",
-                "target_node_id": target_node,
+        obj_map = {obj.get("node_id"): obj for obj in graph.get("object_nodes", [])}
+
+        for i, plan in enumerate(plans):
+            pid = str(plan.get("plan_id") or f"plan_{i}")
+            target = str(plan.get("target_node"))
+            query = query_map.get(pid) or self._fallback_query(plan.get("query_spec", {}))
+            item = {
+                "query_id": f"query_{target}_{i}_{pid}",
+                "target_node_id": target,
                 "query": query,
                 "query_spec": plan.get("query_spec"),
                 "D_t": plan.get("D_t"),
@@ -1048,34 +1107,35 @@ class DifficultyAwareSTVGQueryGenerator:
                 "d_star": plan.get("d_star"),
                 "clue_types": plan.get("clue_types", []),
                 "type_bucket": plan.get("type_bucket"),
+                "difficulty_bucket": plan.get("difficulty_bucket"),
             }
-            query_nodes.append(query_item)
-            if target_node in object_map:
-                obj_item = object_map[target_node]
-                obj_item.setdefault("queries", [])
-                obj_item["queries"].append(query)
-                obj_item.setdefault("query_difficulties", [])
-                obj_item["query_difficulties"].append(
+            item["query_spec"] = _ordered_query_spec(item.get("query_spec") or {})
+            query_nodes.append(_ordered_query_node(item))
+
+            if target in obj_map:
+                obj = obj_map[target]
+                obj.setdefault("queries", []).append(query)
+                obj.setdefault("query_difficulties", []).append(
                     {
                         "D_t": plan.get("D_t"),
                         "D_s": plan.get("D_s"),
                         "D": plan.get("D"),
+                        "difficulty_bucket": plan.get("difficulty_bucket"),
                     }
                 )
-                if "query" not in obj_item:
-                    obj_item["query"] = query
-                    obj_item["query_difficulty"] = {
+                if "query" not in obj:
+                    obj["query"] = query
+                    obj["query_difficulty"] = {
                         "D_t": plan.get("D_t"),
                         "D_s": plan.get("D_s"),
                         "D": plan.get("D"),
+                        "difficulty_bucket": plan.get("difficulty_bucket"),
                     }
 
         if overwrite:
             graph["query_nodes"] = query_nodes
         else:
-            graph.setdefault("query_nodes", [])
-            graph["query_nodes"].extend(query_nodes)
-
+            graph.setdefault("query_nodes", []).extend(query_nodes)
         return graph
 
     def process_jsonl(
@@ -1085,7 +1145,6 @@ class DifficultyAwareSTVGQueryGenerator:
         d_star: float,
         model_name: Optional[str] = None,
         api_keys: Optional[Union[str, Iterable[str]]] = None,
-        total_frames: Optional[int] = None,
         sample_size: Optional[int] = None,
         seed: int = 42,
         target_node_ids: Optional[Union[str, Iterable[str]]] = None,
@@ -1096,28 +1155,26 @@ class DifficultyAwareSTVGQueryGenerator:
         queries_per_graph: Optional[int] = None,
         balance_difficulty: bool = True,
         balance_types: bool = True,
-        difficulty_bins: int = 4,
         max_queries_per_target: Optional[int] = None,
         use_llm: bool = True,
         max_concurrent_per_key: int = 100,
         max_retries: int = 5,
         overwrite: bool = True,
     ) -> None:
-        input_file = Path(input_path)
-        output_file = Path(output_path)
-        output_file.parent.mkdir(parents=True, exist_ok=True)
+        in_path = Path(input_path)
+        out_path = Path(output_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(input_file, "r", encoding="utf-8") as f_in, open(output_file, "w", encoding="utf-8") as f_out:
-            for line in f_in:
+        with open(in_path, "r", encoding="utf-8") as fin, open(out_path, "w", encoding="utf-8") as fout:
+            for line in fin:
                 if not line.strip():
                     continue
-                graph = json.loads(line.strip())
+                graph = json.loads(line)
                 graph = self.process_graph(
                     graph=graph,
                     d_star=d_star,
                     model_name=model_name,
                     api_keys=api_keys,
-                    total_frames=total_frames,
                     sample_size=sample_size,
                     seed=seed,
                     target_node_ids=target_node_ids,
@@ -1128,14 +1185,14 @@ class DifficultyAwareSTVGQueryGenerator:
                     queries_per_graph=queries_per_graph,
                     balance_difficulty=balance_difficulty,
                     balance_types=balance_types,
-                    difficulty_bins=difficulty_bins,
                     max_queries_per_target=max_queries_per_target,
                     use_llm=use_llm,
                     max_concurrent_per_key=max_concurrent_per_key,
                     max_retries=max_retries,
                     overwrite=overwrite,
                 )
-                f_out.write(json.dumps(graph, ensure_ascii=False) + "\n")
+                graph = _ordered_graph_output(graph)
+                fout.write(json.dumps(graph, ensure_ascii=False) + "\n")
 
 
 def run(
@@ -1144,7 +1201,6 @@ def run(
     d_star: float = 0.5,
     model_name: Optional[str] = None,
     api_keys: Optional[Union[str, Iterable[str]]] = None,
-    total_frames: Optional[int] = None,
     sample_size: Optional[int] = None,
     seed: int = 42,
     target_node_ids: Optional[Union[str, Iterable[str]]] = None,
@@ -1155,38 +1211,19 @@ def run(
     queries_per_graph: Optional[int] = None,
     balance_difficulty: bool = True,
     balance_types: bool = True,
-    difficulty_bins: int = 4,
     max_queries_per_target: Optional[int] = None,
     use_llm: bool = True,
-    n_action_cap: int = 5,
-    n_density_cap: int = 8,
-    w1: float = 0.4,
-    w2: float = 0.2,
-    w3: float = 0.4,
-    w4: float = 0.3,
-    lam: float = 0.5,
-    max_combo_size: int = 3,
     max_concurrent_per_key: int = 100,
     max_retries: int = 5,
     overwrite: bool = True,
 ) -> None:
-    generator = DifficultyAwareSTVGQueryGenerator(
-        n_action_cap=n_action_cap,
-        n_density_cap=n_density_cap,
-        w1=w1,
-        w2=w2,
-        w3=w3,
-        w4=w4,
-        lam=lam,
-        max_combo_size=max_combo_size,
-    )
-    generator.process_jsonl(
+    g = DifficultyAwareSTVGQueryGenerator()
+    g.process_jsonl(
         input_path=input_path,
         output_path=output_path,
         d_star=d_star,
         model_name=model_name,
         api_keys=api_keys,
-        total_frames=total_frames,
         sample_size=sample_size,
         seed=seed,
         target_node_ids=target_node_ids,
@@ -1197,7 +1234,6 @@ def run(
         queries_per_graph=queries_per_graph,
         balance_difficulty=balance_difficulty,
         balance_types=balance_types,
-        difficulty_bins=difficulty_bins,
         max_queries_per_target=max_queries_per_target,
         use_llm=use_llm,
         max_concurrent_per_key=max_concurrent_per_key,

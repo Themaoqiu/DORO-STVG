@@ -27,33 +27,28 @@ PROMPT_MODES = {
     "focal_prompt": "full+focal_crop",
 }
 
-STRUCTURED_EXTRACTION_PROMPT = """## You are an expert in scene understanding. I will give you a short paragraph
-that describes a video clip.
-### Your task is to extract structured information about a single object described
-in the paragraph.
+STRUCTURED_EXTRACTION_PROMPT = """## You are an expert in scene understanding. I will give you a short paragraph that describes a video clip.
+### Your task is to extract structured information about a single object described in the paragraph. Be careful not to omit any representative object information.
 ### Please return a JSON with the following fields:
 -"object": The main object being described (e.g.,"person","dog", "car"). If the
 inference about the object is uncertain based on the description, add "(uncertain)"
 after the object name.
 - "attributes": A list of ONLY the visual/physical attributes that can be directly
 observed about the object itself. Include only:
-* Visual appearance: color, shape, size, texture, pattern, material appearance, style
+* Visual appearance: color, shape, size, texture, pattern, material appearance, style, the clothing and appearance of the person.
 * Physical properties: state, transparency, reflectiveness, orientation, material
 * Design elements: stripes, dots, logos, decorative features. DO NOT include: implied
 states, inferred conditions, functional descriptions, or anything that describes the
 object’s interaction with its environment.
-- "relationships": A list of relationships between this object and other entities or the
-environment (e.g., "on top of table", "next to person", "inside container", "facing
-camera", "part of group").
+- "relationships": A list of relationships between this object and other entities (but not clothes and actions) or the environment (e.g., "on top of table", "next to person", "inside container", "facing camera", "part of group", "Leaning against the wall", "carrying a briefcase").
 - "actions": A list of actions that the object is performing or movements it is making
-(e.g., "rotating", "moving", "falling", "bouncing", "sliding").
+(e.g., "rotating", "moving", "falling", "bouncing", "sliding", "right arm extended outward"). Including the subtle movements of the person.
 ### Important distinctions:
 - Attributes = What the object looks like (visual only). Please use ADJECTIVE
-form
-- Relationships = How the object relates to other things spatially, functionally, or
-contextually
+form. If you are extracting a person's clothing, put it in attributes.
+- Relationships = How the object relates to other things spatially, functionally, or contextually. If you are extracting interactions between objects and other objects or the environment, put them in relationships.
 - Actions = What the object is doing or how it‘s moving
-- However, please note that **the attributes of clothing on a person should not be directly stored as attributes of the person**. If the description mentions a brown hat, it should be stored as **a brown hat** rather than just **brown**.
+- However, please note that the attributes of clothing on a person should not be directly stored as attributes of the person. If the description mentions a brown hat, it should be stored as wear a brown hat rather than just brown.
 Now process the following description:
 {description}"""
 

@@ -11,7 +11,7 @@ import torch
 from pycocotools import mask as mask_utils
 
 from .scene_detector import SceneClip
-from .yolo_tracker import GlobalTrack, YOLOTrack
+from .yolo_detector import GlobalTrack, YOLOTrack
 
 GRAPH_GENERATOR_ROOT = Path(__file__).resolve().parents[1]
 GROUNDEDSAM2_ROOT = GRAPH_GENERATOR_ROOT / "dependence" / "GroundedSAM2"

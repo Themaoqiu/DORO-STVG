@@ -22,12 +22,12 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #     --sam3_redetection_interval 15 \
 #     --filter_min_frames 5
 
-# python -m modules.attribute_generator \
-#   --jsonl /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
-#   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
-#   --model_name gemini-3-flash-preview \
-#   --masks_json /home/wangxingjian/DORO-STVG/graph_generator/output/sam2_masks/50_TM5MPJIq1Is_2fps_sam2_masks_indexed.json \
-#   --model_path /home/wangxingjian/model/DAM-3B-Video
+python -m modules.attribute_generator \
+  --jsonl /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
+  --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
+  --model_name gemini-3-flash-preview \
+  --masks_json /home/wangxingjian/DORO-STVG/graph_generator/output/sam2_masks/50_TM5MPJIq1Is_2fps_sam2_masks_indexed.json \
+  --model_path /home/wangxingjian/model/DAM-3B-Video
 
 # source /home/wangxingjian/DORO-STVG/graph_generator/.venv/mmaction/bin/activate
 # export PYTHONPATH="/home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2:${PYTHONPATH}"
@@ -49,11 +49,11 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #   --verbose=False
 
 
-python -m modules.reference_edge_generator \
-  --jsonl scene_graphs.jsonl \
-  --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
-  --model_name gemini-3-flash-preview \
-  --max_pairs_per_object 3 \
+# python -m modules.reference_edge_generator \
+#   --jsonl scene_graphs.jsonl \
+#   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
+#   --model_name gemini-3-flash-preview \
+#   --max_pairs_per_object 3 \
 
 # python3 -m scripts.test_reference_id_matching \
 #   --jsonl /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \

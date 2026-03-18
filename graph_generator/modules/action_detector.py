@@ -295,7 +295,7 @@ def _aggregate_action_segments(
 
             segments.append(
                 {
-                    "object_node_id": obj_id,
+                    "object_id": obj_id,
                     "action_label": label,
                     "start_frame": int(seg_start),
                     "end_frame": int(seg_end),
@@ -314,7 +314,7 @@ def _aggregate_action_segments(
 
         segments.append(
             {
-                "object_node_id": obj_id,
+                "object_id": obj_id,
                 "action_label": label,
                 "start_frame": int(seg_start),
                 "end_frame": int(seg_end),
@@ -325,7 +325,7 @@ def _aggregate_action_segments(
             }
         )
 
-    segments.sort(key=lambda x: (x["object_node_id"], x["start_frame"], x["action_label"]))
+    segments.sort(key=lambda x: (x["object_id"], x["start_frame"], x["action_label"]))
     return segments
 
 
@@ -375,7 +375,7 @@ def add_actions_to_graph(
     # Save actions grouped by person/object instead of one JSON record per action.
     grouped: Dict[str, List[Dict]] = {}
     for seg in segments:
-        obj_id = seg["object_node_id"]
+        obj_id = seg["object_id"]
         grouped.setdefault(obj_id, []).append(
             {
                 "action_label": seg["action_label"],
@@ -391,7 +391,7 @@ def add_actions_to_graph(
         action_nodes.append(
             {
                 "node_id": f"action_group_{idx}",
-                "object_node_id": obj_id,
+                "object_id": obj_id,
                 "actions": actions,
             }
         )

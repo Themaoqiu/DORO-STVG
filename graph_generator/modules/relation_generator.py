@@ -579,7 +579,7 @@ def merge_contacting_edges_into_actions(graph: Dict[str, Any], verbose: bool = F
     action_nodes = graph.get("action_nodes", [])
     action_index: Dict[int, List[Dict[str, Any]]] = {}
     for action_group in action_nodes:
-        obj_node_id = str(action_group.get("object_node_id", ""))
+        obj_node_id = str(action_group.get("object_id", ""))
         if not obj_node_id:
             continue
         subject_gid = node_id_to_gid.get(obj_node_id)
@@ -638,13 +638,29 @@ def merge_contacting_edges_into_actions(graph: Dict[str, Any], verbose: bool = F
                 if not _has_time_overlap(rel.get("time_frames"), action_item["start_frame"], action_item["end_frame"]):
                     continue
                 action_dict = action_item["action"]
-                targets = action_dict.get("target_object_ids")
-                if not isinstance(targets, list):
-                    targets = []
-                if target_gid not in targets:
-                    targets.append(target_gid)
-                    targets.sort()
-                action_dict["target_object_ids"] = targets
+                target_node_id = gid_to_node_id.get(target_gid)
+                if not target_node_id:
+                    continue
+
+                raw_targets = action_dict.get("target_object_ids")
+                if not isinstance(raw_targets, list):
+                    raw_targets = []
+
+                normalized_targets: List[str] = []
+                for item in raw_targets:
+                    if isinstance(item, str) and item:
+                        normalized_targets.append(item)
+                        continue
+                    try:
+                        mapped = gid_to_node_id.get(int(item))
+                    except Exception:
+                        mapped = None
+                    if mapped:
+                        normalized_targets.append(mapped)
+
+                if target_node_id not in normalized_targets:
+                    normalized_targets.append(target_node_id)
+                action_dict["target_object_ids"] = sorted(set(normalized_targets))
                 matched = True
 
             if matched:
