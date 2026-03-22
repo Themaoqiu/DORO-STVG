@@ -22,12 +22,12 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #     --sam3_redetection_interval 15 \
 #     --filter_min_frames 5
 
-python -m modules.attribute_generator \
-  --jsonl /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
-  --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
-  --model_name gemini-3-flash-preview \
-  --masks_json /home/wangxingjian/DORO-STVG/graph_generator/output/sam2_masks/50_TM5MPJIq1Is_2fps_sam2_masks_indexed.json \
-  --model_path /home/wangxingjian/model/DAM-3B-Video
+# python -m modules.attribute_generator \
+#   --jsonl /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
+#   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
+#   --model_name gemini-3-flash-preview \
+#   --masks_json /home/wangxingjian/DORO-STVG/graph_generator/output/sam2_masks/50_TM5MPJIq1Is_2fps_sam2_masks_indexed.json \
+#   --model_path /home/wangxingjian/model/DAM-3B-Video
 
 # source /home/wangxingjian/DORO-STVG/graph_generator/.venv/mmaction/bin/activate
 # export PYTHONPATH="/home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2:${PYTHONPATH}"
@@ -63,3 +63,9 @@ python -m modules.attribute_generator \
 #   --shot_a 0 \
 #   --shot_b 1 \
 #   --frames_per_shot 3
+
+python -m modules.query_generator_minimal \
+  --input_path=scene_graphs.jsonl \
+  --output_path=output/query_minimal.jsonl \
+  --d_star=0.9 \
+  --model_name=gpt-5.4-nano-2026-03-17

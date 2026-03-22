@@ -7,7 +7,6 @@ import json
 import base64
 import mimetypes
 from pathlib import Path
-from .vision_utils import build_multimodal_message
 
 logger = logging.getLogger(__name__)
 
