@@ -14,15 +14,14 @@ from api_sync.utils.parser import JSONParser
 
 
 SPATIAL_PROMPT_TEMPLATE = """## Role
-You are a detail-oriented **Video Relationship Annotator** responsible for reviewing
-sequences of sampled video frames and extracting a comprehensive set of **spatial
-relationships**. All relationships must be visually grounded, type-consistent, and
+You are a detail-oriented Video Relationship Annotator responsible for reviewing
+sequences of sampled video frames and extracting a comprehensive set of spatial
+relationships. All relationships must be visually grounded, type-consistent, and
 strictly follow the defined schema.
-Begin with a concise checklist (3-7 bullets) of what you will do; keep items conceptual,
-not implementation-level.
 ## Task Context
 - Videos are sampled at 2 fps.
-- Each frame already has the two target objects marked by red boxes and red integer IDs.
+- Each frame already has the two target objects marked by red integer IDs.
+- The red number at the lower-right corner of each frame is the frame index. You must use these frame indices to determine the time spans of relationships.
 - You must use the marked IDs directly and must not detect new objects.
 - Your analysis should consider all provided frames jointly.
 ## Input Format
@@ -37,12 +36,12 @@ not implementation-level.
 or purpose.
 - Exclude all temporal, social, functional, or attentional relationships, as well as
 any stateful or action-based verbs.
-- Each relationship must be visually supported by the frames.
+- Each relationship must be visually supported by the visual frames.
 - Ensure logical consistency with common sense and real-world physics; do NOT
 output implausible or unsupported relationships.
 - Think in terms of 3D spatial layout by using depth information derived from
 world knowledge and visual cues, not just 2D image positions. Do NOT rely
-solely on 2D bounding box coordinates. Do NOT output ’left of’ or ’right of’.
+solely on 2D bounding box coordinates. Do NOT output 'left of' or 'right of'.
 - Use precise, explicit, and non-redundant verbs.
 - Do NOT miss any clear and valid spatial relationships between objects.
 ### Temporal Grounding
@@ -67,8 +66,10 @@ sequences of sampled video frames and extracting a comprehensive set of
 visually grounded, type-consistent, and strictly follow the defined schema.
 You are analyzing videos sampled at 2 fps. Each frame contains detected objects
 with bounding boxes. Analyze all frames jointly and output temporal relationships.
-## Pair Context
-- Input is an ordered sequence of frames from one video.
+## Task Context
+- Videos are sampled at 2 fps.
+- Each frame already has the two target objects marked by red integer IDs.
+- The red number at the lower-right corner of each frame is the frame index. You must use these frame indices to determine the time spans of relationships.
 - Two target objects are already marked in red:
   - Object A: id={id_a}, class={class_a}
   - Object B: id={id_b}, class={class_b}
@@ -107,7 +108,7 @@ cars, tools, furniture, etc. - Camera: unseen observer/recorder, always object_i
 Subject must be movable - Attentional: Subject must be animate - Social: Both subject and object must be animate
 3. **Extraction Basis:**
 - All relationships must be visually supported and logically consistent with common sense. Do **NOT** infer relationships not visually evidenced or that contradict common sense.
-- Relationships must have temporal grounding: define one or more time spans [[start_frame, end_frame], ...] as continuous frame intervals supported by visual evidence. If an object in a labeled relationship disappears from subsequent frames, end the relationship at the object’s last visible frame. Do not continue relationships if objects become occluded or are missing.
+- Relationships must have temporal grounding: define one or more time spans [[start_frame, end_frame], ...] as continuous frame intervals supported by visual evidence. If an object in a labeled relationship disappears from subsequent frames, end the relationship at the object's last visible frame. Do not continue relationships if objects become occluded or are missing.
 - Do NOT create self-relations (subject_id == object_id), e.g. (i, verb, i, ...).
 ## Output Format
 Return one valid JSON object:

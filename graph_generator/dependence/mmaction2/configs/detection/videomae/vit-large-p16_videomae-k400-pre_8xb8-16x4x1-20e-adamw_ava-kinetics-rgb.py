@@ -76,7 +76,7 @@ proposal_file_train = (f'{anno_root}/ava_dense_proposals_train.FAIR.'
 proposal_file_val = f'{anno_root}/ava_dense_proposals_val.FAIR.recall_93.9.pkl'
 
 train_pipeline = [
-    dict(type='SampleAVAFrames', clip_len=16, frame_interval=4),
+    dict(type='SampleAVAFrames', clip_len=20, frame_interval=1),
     dict(type='RawFrameDecode'),
     dict(type='RandomRescale', scale_range=(256, 320)),
     dict(type='RandomCrop', size=256),
@@ -87,7 +87,7 @@ train_pipeline = [
 # The testing is w/o. any cropping / flipping
 val_pipeline = [
     dict(
-        type='SampleAVAFrames', clip_len=16, frame_interval=4, test_mode=True),
+        type='SampleAVAFrames', clip_len=20, frame_interval=1, test_mode=True),
     dict(type='RawFrameDecode'),
     dict(type='Resize', scale=(-1, 256)),
     dict(type='FormatShape', input_format='NCTHW', collapse=True),

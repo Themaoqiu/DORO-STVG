@@ -1,7 +1,10 @@
 import json
+import os
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import fire
 from modules.scene_detector import SceneDetector
@@ -139,7 +142,7 @@ class SceneGraphGenerator:
         sam2_model_cfg: str = "configs/sam2.1/sam2.1_hiera_l.yaml",
         sam2_checkpoint: Optional[str] = None,
         sam3_redetection_interval: int = 15,
-        sam3_iou_threshold: float = 0.3,
+        sam3_iou_threshold: float = 0.4,
         sam3_overlap_threshold: float = 0.6,
         groundedsam2_mask_output_dir: Optional[str] = None,
         sam3_mask_output_dir: Optional[str] = None,
@@ -151,7 +154,7 @@ class SceneGraphGenerator:
         action_label_map: Optional[str] = None,
         action_score_thr: float = 0.2,
         action_topk: int = 3,
-        action_frame_interval: int = 15,
+        action_frame_interval: int = 1,
         skip_filter: bool = False,
         filter_min_frames: int = 5,
     ):
@@ -327,9 +330,163 @@ class SceneGraphGenerator:
         
         return graphs
 
+
+
+def _format_fire_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(v) for v in value)
+    return str(value)
+
+
+def _run_fire_module(
+    module: str,
+    args: Dict[str, Any],
+    *,
+    python_exec: Optional[str] = None,
+    cwd: Optional[Path] = None,
+    env_updates: Optional[Dict[str, str]] = None,
+) -> None:
+    command = [python_exec or sys.executable, "-m", module]
+    for key, value in args.items():
+        if value is None:
+            continue
+        command.append(f"--{key}={_format_fire_value(value)}")
+
+    env = os.environ.copy()
+    if env_updates:
+        env.update({k: str(v) for k, v in env_updates.items() if v is not None})
+
+    print(f"[pipeline] Running: {' '.join(command)}")
+    subprocess.run(command, cwd=str(cwd) if cwd else None, env=env, check=True)
+
+
+def _run_full_pipeline_for_video(
+    *,
+    video_path: str,
+    output_jsonl: str,
+    project_root: Path,
+    pipeline_python: Optional[str],
+    cuda_visible_devices: Optional[str],
+    hf_endpoint: Optional[str],
+    with_attribute: bool,
+    attribute_model_name: str,
+    attribute_masks_json: Optional[str],
+    attribute_model_path: str,
+    attribute_max_frames: int,
+    with_action: bool,
+    action_config: Optional[str],
+    action_checkpoint: Optional[str],
+    action_label_map: Optional[str],
+    action_frame_interval: int,
+    action_python: Optional[str],
+    action_device: str,
+    with_relation: bool,
+    relation_model_name: str,
+    relation_crop_output_dir: str,
+    relation_min_shared_frames: int,
+    relation_save_intermediate_frames: bool,
+    relation_verbose: bool,
+    with_reference: bool,
+    reference_model_name: str,
+    reference_crop_output_dir: str,
+    reference_shot_a: int,
+    reference_shot_b: int,
+    reference_frames_per_shot: int,
+    reference_save_intermediate_frames: bool,
+) -> None:
+    common_env: Dict[str, str] = {}
+    if cuda_visible_devices is not None:
+        common_env["CUDA_VISIBLE_DEVICES"] = str(cuda_visible_devices)
+    if hf_endpoint is not None:
+        common_env["HF_ENDPOINT"] = str(hf_endpoint)
+
+    if with_attribute:
+        masks_json = attribute_masks_json
+        if not masks_json:
+            default_mask_dir = project_root / "output" / "sam2_masks"
+            masks_json = str(default_mask_dir / f"{Path(video_path).stem}_sam2_masks_indexed.json")
+        _run_fire_module(
+            "modules.attribute_generator",
+            {
+                "jsonl": output_jsonl,
+                "video": video_path,
+                "model_name": attribute_model_name,
+                "masks_json": masks_json,
+                "model_path": attribute_model_path,
+                "max_frames": attribute_max_frames,
+            },
+            python_exec=pipeline_python,
+            cwd=project_root,
+            env_updates=common_env,
+        )
+
+    if with_action:
+        if not action_config or not action_checkpoint or not action_label_map:
+            raise ValueError(
+                "with_action=True requires action_config, action_checkpoint, and action_label_map."
+            )
+        action_env = dict(common_env)
+        mmaction2_path = str(project_root / "dependence" / "mmaction2")
+        action_env["PYTHONPATH"] = (
+            f"{mmaction2_path}:{action_env.get('PYTHONPATH') or os.environ.get('PYTHONPATH', '')}"
+        ).rstrip(":")
+        _run_fire_module(
+            "modules.action_detector",
+            {
+                "config": action_config,
+                "checkpoint": action_checkpoint,
+                "label_map": action_label_map,
+                "frame_interval": action_frame_interval,
+                "jsonl": output_jsonl,
+                "video": video_path,
+                "device": action_device,
+            },
+            python_exec=action_python or pipeline_python,
+            cwd=project_root,
+            env_updates=action_env,
+        )
+
+    if with_relation:
+        _run_fire_module(
+            "modules.relation_generator",
+            {
+                "jsonl": output_jsonl,
+                "video": video_path,
+                "model_name": relation_model_name,
+                "crop_output_dir": relation_crop_output_dir,
+                "min_shared_frames": relation_min_shared_frames,
+                "save_intermediate_frames": relation_save_intermediate_frames,
+                "verbose": relation_verbose,
+            },
+            python_exec=pipeline_python,
+            cwd=project_root,
+            env_updates=common_env,
+        )
+
+    if with_reference:
+        _run_fire_module(
+            "modules.reference_edge_generator",
+            {
+                "jsonl": output_jsonl,
+                "video": video_path,
+                "model_name": reference_model_name,
+                "crop_output_dir": reference_crop_output_dir,
+                "save_intermediate_frames": reference_save_intermediate_frames,
+                "shot_a": reference_shot_a,
+                "shot_b": reference_shot_b,
+                "frames_per_shot": reference_frames_per_shot,
+            },
+            python_exec=pipeline_python,
+            cwd=project_root,
+            env_updates=common_env,
+        )
+
 def run(
     video: str = None,
     video_dir: str = None,
+    max_videos: int = 0,
     output: str = "output/scene_graphs.jsonl",
     yolo_model: str = "yolo26x.pt",
     tracker_backend: str = "sam3",
@@ -356,7 +513,39 @@ def run(
     action_frame_interval: int = 15,
     skip_filter: bool = False,
     filter_min_frames: int = 5,
+    full_pipeline: bool = False,
+    pipeline_python: str = None,
+    cuda_visible_devices: str = None,
+    hf_endpoint: str = None,
+    with_attribute: bool = True,
+    attribute_model_name: str = "gemini-3-flash-preview",
+    attribute_masks_json: str = None,
+    attribute_model_path: str = "nvidia/DAM-3B-Video",
+    attribute_max_frames: int = 8,
+    with_action: bool = True,
+    action_python: str = None,
+    action_device: str = "cuda:0",
+    with_relation: bool = True,
+    relation_model_name: str = "gemini-3-flash-preview",
+    relation_crop_output_dir: str = "output/relation_crops",
+    relation_min_shared_frames: int = 3,
+    relation_save_intermediate_frames: bool = True,
+    relation_verbose: bool = False,
+    with_reference: bool = False,
+    reference_model_name: str = "gemini-3-flash-preview",
+    reference_crop_output_dir: str = "output/reference_id_match_test",
+    reference_shot_a: int = 0,
+    reference_shot_b: int = 1,
+    reference_frames_per_shot: int = 3,
+    reference_save_intermediate_frames: bool = False,
+    with_query: bool = True,
+    query_output_path: str = "output/query_minimal.jsonl",
+    query_model_name: str = "gpt-5.4-nano-2026-03-17",
+    query_d_star: float = 0.9,
 ):
+    project_root = Path(__file__).resolve().parent
+    output_path = str((project_root / output).resolve()) if not Path(output).is_absolute() else output
+
     generator = SceneGraphGenerator(
         yolo_model=yolo_model,
         tracker_backend=tracker_backend,
@@ -384,13 +573,94 @@ def run(
         skip_filter=skip_filter,
         filter_min_frames=filter_min_frames,
     )
-    
+
+    if not full_pipeline:
+        if video:
+            generator.process_video(video, output_path)
+        elif video_dir:
+            generator.process_videos(video_dir, output_path)
+        else:
+            print("Please provide video or video_dir")
+        return
+
+    if not video and not video_dir:
+        raise ValueError("full_pipeline=True requires video or video_dir.")
+
     if video:
-        generator.process_video(video, output)
-    elif video_dir:
-        generator.process_videos(video_dir, output)
+        video_paths: List[Path] = [Path(video)]
     else:
-        print("Please provide video or video_dir")
+        src_dir = Path(video_dir)
+        video_paths = sorted(list(src_dir.glob("*.mp4")) + list(src_dir.glob("*.avi")))
+
+    if max_videos and max_videos > 0:
+        video_paths = video_paths[:max_videos]
+
+    if not video_paths:
+        raise ValueError("No videos found to process.")
+
+    print(f"[pipeline] Full pipeline started for {len(video_paths)} video(s)")
+    for idx, video_path_obj in enumerate(video_paths, start=1):
+        video_path = str(video_path_obj)
+        print(f"[pipeline] [{idx}/{len(video_paths)}] Scene graph: {video_path_obj.name}")
+        generator.process_video(video_path, output_path)
+        _run_full_pipeline_for_video(
+            video_path=video_path,
+            output_jsonl=output_path,
+            project_root=project_root,
+            pipeline_python=pipeline_python,
+            cuda_visible_devices=cuda_visible_devices,
+            hf_endpoint=hf_endpoint,
+            with_attribute=with_attribute,
+            attribute_model_name=attribute_model_name,
+            attribute_masks_json=attribute_masks_json,
+            attribute_model_path=attribute_model_path,
+            attribute_max_frames=attribute_max_frames,
+            with_action=with_action,
+            action_config=action_config,
+            action_checkpoint=action_checkpoint,
+            action_label_map=action_label_map,
+            action_frame_interval=action_frame_interval,
+            action_python=action_python,
+            action_device=action_device,
+            with_relation=with_relation,
+            relation_model_name=relation_model_name,
+            relation_crop_output_dir=relation_crop_output_dir,
+            relation_min_shared_frames=relation_min_shared_frames,
+            relation_save_intermediate_frames=relation_save_intermediate_frames,
+            relation_verbose=relation_verbose,
+            with_reference=with_reference,
+            reference_model_name=reference_model_name,
+            reference_crop_output_dir=reference_crop_output_dir,
+            reference_shot_a=reference_shot_a,
+            reference_shot_b=reference_shot_b,
+            reference_frames_per_shot=reference_frames_per_shot,
+            reference_save_intermediate_frames=reference_save_intermediate_frames,
+        )
+
+    if with_query:
+        query_output = (
+            str((project_root / query_output_path).resolve())
+            if not Path(query_output_path).is_absolute()
+            else query_output_path
+        )
+        _run_fire_module(
+            "modules.query_generator",
+            {
+                "input_path": output_path,
+                "output_path": query_output,
+                "d_star": query_d_star,
+                "model_name": query_model_name,
+            },
+            python_exec=pipeline_python,
+            cwd=project_root,
+            env_updates={
+                "CUDA_VISIBLE_DEVICES": cuda_visible_devices,
+                "HF_ENDPOINT": hf_endpoint,
+            },
+        )
+        print(f"[pipeline] Query file saved to {query_output}")
+
+    print("[pipeline] Full pipeline finished.")
 
 
 if __name__ == '__main__':
