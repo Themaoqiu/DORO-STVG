@@ -17,6 +17,7 @@ dependencies = [
     "lap>=0.5.12",
     "openai>=2.17.0",
     "opencv-python>=4.12.0.88",
+    "ortools>=9.15.6755",
     "pycocotools>=2.0.11",
     "qwen-vl-utils>=0.0.14",
     "scenedetect>=0.6.7.1",
