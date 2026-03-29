@@ -10,6 +10,7 @@ import cv2
 
 from api_sync.api import StreamGenerator
 from api_sync.utils.parser import JSONParser
+from modules.graph_filter import GraphFilter
 
 
 PROMPT_TEMPLATE =  """## Role
@@ -581,6 +582,7 @@ def run(
         id_map_b=id_map_b,
         overwrite_reference_edges=overwrite_reference_edges,
     )
+    graph = GraphFilter().normalize_graph(graph, filter_objects=False)
 
     if output_json:
         output_path = Path(output_json)

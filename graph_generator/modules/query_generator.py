@@ -143,6 +143,16 @@ def _segments_to_frames(segments: List[Tuple[int, int]]) -> Set[int]:
     return frames
 
 
+def _extract_relation_segments(rel: Dict[str, Any]) -> List[Tuple[int, int]]:
+    segments: List[Tuple[int, int]] = []
+    for seg in rel.get("time_spans", []) or []:
+        if isinstance(seg, dict):
+            a = _to_int(seg.get("start_frame"), 0)
+            b = _to_int(seg.get("end_frame"), a)
+            segments.append((min(a, b), max(a, b)))
+    return sorted(set(segments))
+
+
 def _temporal_iou(a: Set[int], b: Set[int]) -> float:
     if not a and not b:
         return 1.0
@@ -395,7 +405,7 @@ def _ref_desc(obj: Dict[str, Any]) -> Dict[str, Any]:
         "class": _surface_class(obj),
         "sample_class": _sample_class(obj),
         "attributes": _uniq(obj.get("attributes", []))[:2],
-        "context_relations": _uniq(obj.get("relationships", []))[:1],
+        "context_relations": _uniq(obj.get("environment", []))[:1],
     }
 
 
@@ -409,7 +419,7 @@ def _minimal_ref_desc(
     ref_class = _surface_class(ref_obj)
     ref_sample_class = _sample_class(ref_obj, ref_id)
     ref_attrs = _uniq(ref_obj.get("attributes", []))
-    ref_ctx = _uniq(ref_obj.get("relationships", []))
+    ref_ctx = _uniq(ref_obj.get("environment", []))
     distractors = [
         obj_id
         for obj_id, obj in objects.items()
@@ -430,7 +440,7 @@ def _minimal_ref_desc(
             return {"class": ref_class, "sample_class": ref_sample_class, "attributes": [phrase], "context_relations": []}
 
     for phrase in ref_ctx:
-        if all(phrase.lower() not in {x.lower() for x in _uniq(objects[d].get("relationships", []))} for d in distractors):
+        if all(phrase.lower() not in {x.lower() for x in _uniq(objects[d].get("environment", []))} for d in distractors):
             return {"class": ref_class, "sample_class": ref_sample_class, "attributes": [], "context_relations": [phrase]}
 
     desc = _ref_desc(ref_obj)
@@ -482,7 +492,7 @@ def _scene_object_clues(objects: Dict[str, Dict[str, Any]]) -> List[Dict[str, An
             {
                 "class": _surface_class(obj),
                 "attributes": _uniq(obj.get("attributes", [])),
-                "context_relations": _uniq(obj.get("relationships", [])),
+                "context_relations": _uniq(obj.get("environment", [])),
             }
         )
     return out
@@ -503,7 +513,7 @@ def _best_disambiguation_for_target(
             continue
         for x in _uniq(objects[node_id].get("attributes", [])):
             original_attr.setdefault(x.lower(), x)
-        for x in _uniq(objects[node_id].get("relationships", [])):
+        for x in _uniq(objects[node_id].get("environment", [])):
             original_ctx.setdefault(x.lower(), x)
 
     active_distractors = [d for d in distractor_ids if object_frames.get(d, set()) & seg_frames]
@@ -523,7 +533,7 @@ def _best_disambiguation_for_target(
     distractor_ctx_sets = []
     for d in active_distractors:
         distractor_attr_sets.append({x.lower() for x in _uniq(objects[d].get("attributes", []))})
-        distractor_ctx_sets.append({x.lower() for x in _uniq(objects[d].get("relationships", []))})
+        distractor_ctx_sets.append({x.lower() for x in _uniq(objects[d].get("environment", []))})
 
     scored_ctx: List[Tuple[int, str]] = []
     for low, orig in original_ctx.items():
@@ -607,8 +617,12 @@ class MinimalSTVGQueryGenerator:
         object_nodes = graph.get("object_nodes", []) or []
         action_nodes = graph.get("action_nodes", []) or []
         edges = graph.get("edges", []) or []
-        idx_to_node = {i: str(obj.get("node_id")) for i, obj in enumerate(object_nodes) if obj.get("node_id")}
         objects = {str(obj.get("node_id")): obj for obj in object_nodes if obj.get("node_id")}
+
+        def _resolve_node_id(raw_id: Any) -> str:
+            text = str(raw_id).strip()
+            return text if text in objects else ""
+
         same_entity = _same_entity_map(edges)
         object_frames = {obj_id: _frames_from_obj(obj) for obj_id, obj in objects.items()}
 
@@ -647,7 +661,7 @@ class MinimalSTVGQueryGenerator:
         relation_events: List[Dict[str, Any]] = []
 
         for group in action_nodes:
-            owner_id = str(group.get("object_id", "")).strip()
+            owner_id = _resolve_node_id(group.get("object_id"))
             if owner_id not in objects:
                 continue
             for item in group.get("actions", []) or []:
@@ -661,26 +675,22 @@ class MinimalSTVGQueryGenerator:
                     continue
                 action_frames[owner_id].setdefault(label, set()).update(frames)
                 for ref_id in item.get("target_object_ids", []) or []:
-                    ref_id = str(ref_id).strip()
-                    if ref_id in objects:
-                        action_targets[owner_id].setdefault((label, ref_id), set()).update(frames)
+                    target_node_id = _resolve_node_id(ref_id)
+                    if target_node_id in objects:
+                        action_targets[owner_id].setdefault((label, target_node_id), set()).update(frames)
 
         for bundle in edges:
             if "subject_id" not in bundle or "relationships" not in bundle:
                 continue
-            subject_id = idx_to_node.get(bundle.get("subject_id"))
+            subject_id = _resolve_node_id(bundle.get("subject_id"))
             if subject_id not in objects:
                 continue
             for rel in bundle.get("relationships", []) or []:
-                object_id = idx_to_node.get(rel.get("object_id"))
+                object_id = _resolve_node_id(rel.get("object_id"))
                 predicate = _norm(rel.get("predicate_verb", ""))
                 if object_id not in objects or not predicate:
                     continue
-                segments = []
-                for seg in rel.get("time_frames", []) or []:
-                    if isinstance(seg, list) and len(seg) == 2:
-                        a, b = _to_int(seg[0], 0), _to_int(seg[1], 0)
-                        segments.append((min(a, b), max(a, b)))
+                segments = _extract_relation_segments(rel)
                 if not segments:
                     segments = _frames_to_segments(object_frames[subject_id] & object_frames[object_id])
                 frames = _segments_to_frames(segments) & object_frames[subject_id]
@@ -734,13 +744,13 @@ class MinimalSTVGQueryGenerator:
                         for d in distractor_ids
                     },
                 )
-            for phrase in _uniq(node.get("relationships", [])):
+            for phrase in _uniq(node.get("environment", [])):
                 add(
                     "context_relation",
                     {"context_relations": [phrase]},
                     set(node_frames),
                     {
-                        d: set(object_frames[d]) if phrase.lower() in {x.lower() for x in _uniq(objects[d].get("relationships", []))} else set()
+                        d: set(object_frames[d]) if phrase.lower() in {x.lower() for x in _uniq(objects[d].get("environment", []))} else set()
                         for d in distractor_ids
                     },
                 )

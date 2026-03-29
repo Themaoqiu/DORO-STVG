@@ -14,6 +14,8 @@ from mmengine.runner import load_checkpoint
 from mmengine.registry import init_default_scope
 from mmengine.structures import InstanceData
 
+from modules.graph_filter import GraphFilter
+
 GRAPH_GENERATOR_ROOT = Path(__file__).resolve().parents[1]
 MMACTION2_ROOT = GRAPH_GENERATOR_ROOT / "dependence" / "mmaction2"
 if str(MMACTION2_ROOT) not in sys.path:
@@ -369,9 +371,6 @@ def add_actions_to_graph(
         max_gap=max(1, int(frame_interval)),
     )
 
-    # Drop short-lived action segments that are likely noise.
-    segments = [seg for seg in segments if int(seg.get("num_observations", 0)) >= 3]
-
     # Save actions grouped by person/object instead of one JSON record per action.
     grouped: Dict[str, List[Dict]] = {}
     for seg in segments:
@@ -470,6 +469,7 @@ def main(
         topk=topk,
         debug_raw=debug_raw,
     )
+    graph = GraphFilter().normalize_graph(graph, filter_objects=False)
     if output and output != jsonl:
         output_path = Path(output)
         output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -265,13 +265,16 @@ class SceneGraphGenerator:
             graph.object_nodes.append(obj_node.to_dict())
 
         print(f"  Created {len(graph.object_nodes)} object nodes")
+        graph_filter = GraphFilter(min_frames=self.filter_min_frames)
 
         if self.skip_filter:
             print(f"[5/5] Skipping graph filtering")
+            normalized_graph = graph_filter.normalize_graph(graph.to_dict(), filter_objects=False)
+            graph.object_nodes = normalized_graph['object_nodes']
+            graph.edges = normalized_graph['edges']
             print(f"  Final graph: {len(graph.object_nodes)} object nodes, {len(graph.edges)} edges")
         else:
             print(f"[5/5] Filtering graph...")
-            graph_filter = GraphFilter(min_frames=self.filter_min_frames)
 
             graph_dict = graph.to_dict()
             filtered_graph_dict = graph_filter.filter_graph(graph_dict)
@@ -305,6 +308,7 @@ class SceneGraphGenerator:
                 score_thr=self.action_score_thr,
                 topk=self.action_topk,
             )
+            graph_dict = graph_filter.normalize_graph(graph_dict, filter_objects=False)
             graph.action_nodes = graph_dict['action_nodes']
             graph.edges = graph_dict['edges']
 
@@ -538,10 +542,6 @@ def run(
     reference_shot_b: int = 1,
     reference_frames_per_shot: int = 3,
     reference_save_intermediate_frames: bool = False,
-    with_query: bool = True,
-    query_output_path: str = "output/query_minimal.jsonl",
-    query_model_name: str = "gpt-5.4-nano-2026-03-17",
-    query_d_star: float = 0.9,
 ):
     project_root = Path(__file__).resolve().parent
     output_path = str((project_root / output).resolve()) if not Path(output).is_absolute() else output
@@ -636,29 +636,6 @@ def run(
             reference_frames_per_shot=reference_frames_per_shot,
             reference_save_intermediate_frames=reference_save_intermediate_frames,
         )
-
-    if with_query:
-        query_output = (
-            str((project_root / query_output_path).resolve())
-            if not Path(query_output_path).is_absolute()
-            else query_output_path
-        )
-        _run_fire_module(
-            "modules.query_generator",
-            {
-                "input_path": output_path,
-                "output_path": query_output,
-                "d_star": query_d_star,
-                "model_name": query_model_name,
-            },
-            python_exec=pipeline_python,
-            cwd=project_root,
-            env_updates={
-                "CUDA_VISIBLE_DEVICES": cuda_visible_devices,
-                "HF_ENDPOINT": hf_endpoint,
-            },
-        )
-        print(f"[pipeline] Query file saved to {query_output}")
 
     print("[pipeline] Full pipeline finished.")
 

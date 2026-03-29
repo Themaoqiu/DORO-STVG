@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import json
 import math
-import random
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import fire
 
@@ -15,9 +14,257 @@ from ortools.sat.python import cp_model
 
 CLUE_TYPES = ("cls", "app", "act", "seq", "spa", "env", "int")
 
+RELATION_SYNONYMS: Dict[str, str] = {}
+ATTRIBUTE_SYNONYMS: Dict[str, str] = {}
+
+DECORATION_POOL: Dict[str, Tuple[str, ...]] = {
+    "temporal": (
+        "within this time window",
+        "across this segment",
+    ),
+    "action": (
+        "following its visible behavior flow",
+        "under consistent motion context",
+    ),
+    "spatial": (
+        "with stable relative positioning cues",
+        "against nearby object context",
+    ),
+    "appearance": (
+        "with visually consistent appearance",
+        "using lightweight attribute hints",
+    ),
+    "neutral": (
+        "as the referred instance",
+    ),
+}
+
 
 def _norm(text: Any) -> str:
     return " ".join(str(text).strip().split())
+
+
+def _canon_token(token: str) -> str:
+    t = token.strip().lower()
+    irregular = {
+        "is": "be",
+        "are": "be",
+        "was": "be",
+        "were": "be",
+        "has": "have",
+        "had": "have",
+        "looks": "look",
+        "looking": "look",
+        "looked": "look",
+        "moves": "move",
+        "moving": "move",
+        "moved": "move",
+        "walks": "walk",
+        "walking": "walk",
+        "walked": "walk",
+        "talks": "talk",
+        "talking": "talk",
+        "talked": "talk",
+        "touching": "touch",
+        "touched": "touch",
+    }
+    if t in irregular:
+        return irregular[t]
+    if len(t) > 4 and t.endswith("ing"):
+        return t[:-3]
+    if len(t) > 3 and t.endswith("ed"):
+        return t[:-2]
+    if len(t) > 3 and t.endswith("s"):
+        return t[:-1]
+    return t
+
+
+def _normalize_raw_phrase(text: Any) -> str:
+    return _norm(str(text).lower().replace("_", " ").replace("-", " "))
+
+
+def _canon_relation_phrase(text: str) -> str:
+    s = _normalize_raw_phrase(text)
+    if not s:
+        return ""
+    tokens = s.split()
+    if not tokens:
+        return ""
+    tokens[0] = _canon_token(tokens[0])
+    if len(tokens) > 1 and tokens[0] == "be":
+        tokens = tokens[1:]
+    return _norm(" ".join(tokens))
+
+
+def _canon_attribute_phrase(text: str) -> str:
+    s = _normalize_raw_phrase(text)
+    if not s:
+        return ""
+    tokens = s.split()
+    if not tokens:
+        return ""
+    tokens[0] = _canon_token(tokens[0])
+    if tokens and tokens[0] == "be":
+        tokens = tokens[1:]
+    return _norm(" ".join(tokens))
+
+
+def _choose_group_representative(values: List[str], counts: Dict[str, int]) -> str:
+    if not values:
+        return ""
+    return sorted(values, key=lambda x: (-counts.get(x, 0), len(x), x))[0]
+
+
+def _build_synonym_map_from_values(
+    values: List[str],
+    canon_fn: Callable[[str], str],
+) -> Dict[str, str]:
+    norm_counts: Dict[str, int] = defaultdict(int)
+    groups: Dict[str, Set[str]] = defaultdict(set)
+    for raw in values:
+        s = _normalize_raw_phrase(raw)
+        if not s:
+            continue
+        norm_counts[s] += 1
+        c = canon_fn(s)
+        if not c:
+            continue
+        groups[c].add(s)
+
+    mapping: Dict[str, str] = {}
+    for _, variants in groups.items():
+        if len(variants) <= 1:
+            continue
+        rep = _choose_group_representative(sorted(variants), norm_counts)
+        if not rep:
+            continue
+        for v in variants:
+            if v != rep:
+                mapping[v] = rep
+    return mapping
+
+
+def _summarize_synonyms_from_graph_file(input_path: Path) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, int]]:
+    relation_values: List[str] = []
+    attribute_values: List[str] = []
+    scanned_graphs = 0
+    with input_path.open("r", encoding="utf-8") as fin:
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            scanned_graphs += 1
+            graph = json.loads(line)
+            for obj in graph.get("object_nodes") or []:
+                attribute_values.extend(obj.get("attributes") or [])
+            for edge in graph.get("edges") or []:
+                for rel in edge.get("relationships") or []:
+                    relation_values.append(rel.get("predicate_verb", ""))
+
+    rel_map = _build_synonym_map_from_values(relation_values, _canon_relation_phrase)
+    attr_map = _build_synonym_map_from_values(attribute_values, _canon_attribute_phrase)
+    stats = {
+        "graphs": scanned_graphs,
+        "relation_values": len(relation_values),
+        "attribute_values": len(attribute_values),
+        "relation_synonyms": len(rel_map),
+        "attribute_synonyms": len(attr_map),
+    }
+    return rel_map, attr_map, stats
+
+
+def _normalize_phrase(text: Any, kind: str) -> str:
+    s = _norm(text).lower().replace("_", " ").replace("-", " ")
+    s = _norm(s)
+    if not s:
+        return ""
+    if kind == "act":
+        return s
+    elif kind == "rel":
+        s = RELATION_SYNONYMS.get(s, s)
+    elif kind == "attr":
+        s = ATTRIBUTE_SYNONYMS.get(s, s)
+    return s
+
+
+def _normalized_values(values: Iterable[Any], kind: str) -> List[str]:
+    out: List[str] = []
+    for v in _uniq(values):
+        n = _normalize_phrase(v, kind)
+        if n:
+            out.append(n)
+    return out
+
+
+def _display_phrase(text: str) -> str:
+    return _norm(str(text).replace("_", " "))
+
+
+def _make_act_token(action: str) -> str:
+    return f"act:{action}"
+
+
+def _make_rel_token(predicate: str, ref_cls: str) -> str:
+    return f"rel:{predicate}:{ref_cls}"
+
+
+def _parse_seq_token(token: str) -> Tuple[str, str, str]:
+    if token.startswith("act:"):
+        return "act", token[4:], ""
+    if token.startswith("rel:"):
+        body = token[4:]
+        if ":" in body:
+            pred, ref = body.split(":", 1)
+        else:
+            pred, ref = body, "object"
+        return "rel", pred, ref
+    return "raw", token, ""
+
+
+def _format_seq_part(token: str) -> str:
+    kind, a, b = _parse_seq_token(token)
+    if kind == "act":
+        return _display_phrase(a)
+    if kind == "rel":
+        return f"is {_display_phrase(a)} the {_display_phrase(b)}"
+    return _display_phrase(a)
+
+
+def _enumerate_ordered_chains(
+    events: List[Tuple[int, int, str]],
+    max_chain_len: int,
+    max_chains: int = 128,
+) -> Set[Tuple[str, ...]]:
+    if max_chain_len < 2 or len(events) < 2:
+        return set()
+    sorted_events = sorted(events, key=lambda x: (x[0], x[1], x[2]))
+    out: Set[Tuple[str, ...]] = set()
+
+    def dfs(last_idx: int, chain: List[str]) -> None:
+        if len(out) >= max_chains:
+            return
+        if 2 <= len(chain) <= max_chain_len:
+            out.add(tuple(chain))
+        if len(chain) >= max_chain_len:
+            return
+        last_end = sorted_events[last_idx][1]
+        for j in range(last_idx + 1, len(sorted_events)):
+            s, e, token = sorted_events[j]
+            if s <= last_end:
+                continue
+            if token == chain[-1]:
+                continue
+            chain.append(token)
+            dfs(j, chain)
+            chain.pop()
+            if len(out) >= max_chains:
+                return
+
+    for i in range(len(sorted_events)):
+        dfs(i, [sorted_events[i][2]])
+        if len(out) >= max_chains:
+            break
+    return out
 
 
 def _to_int(x: Any, default: int = 0) -> int:
@@ -70,6 +317,17 @@ def _overlap(a: Tuple[int, int], b: Tuple[int, int]) -> Optional[Tuple[int, int]
     return s, e
 
 
+def _interval_tiou(a: Tuple[int, int], b: Tuple[int, int]) -> float:
+    ov = _overlap(a, b)
+    if not ov:
+        return 0.0
+    inter = ov[1] - ov[0] + 1
+    union = (a[1] - a[0] + 1) + (b[1] - b[0] + 1) - inter
+    if union <= 0:
+        return 0.0
+    return float(inter) / float(union)
+
+
 def _segments_from_frames(frames: Set[int]) -> List[Tuple[int, int]]:
     if not frames:
         return []
@@ -86,9 +344,22 @@ def _segments_from_frames(frames: Set[int]) -> List[Tuple[int, int]]:
     return out
 
 
-def _bbox_center(box: Sequence[float]) -> Tuple[float, float]:
-    x1, y1, x2, y2 = [float(v) for v in box]
-    return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+def _extract_relation_segments(rel: Dict[str, Any]) -> List[Tuple[int, int]]:
+    segments: List[Tuple[int, int]] = []
+    for seg in rel.get("time_spans") or []:
+        if isinstance(seg, dict):
+            a = _to_int(seg.get("start_frame"), 0)
+            b = _to_int(seg.get("end_frame"), a)
+            if b < a:
+                a, b = b, a
+            segments.append((a, b))
+    if (not segments) and ("start_frame" in rel or "end_frame" in rel):
+        a = _to_int(rel.get("start_frame"), 0)
+        b = _to_int(rel.get("end_frame"), a)
+        if b < a:
+            a, b = b, a
+        segments.append((a, b))
+    return sorted(set(segments))
 
 
 @dataclass(frozen=True)
@@ -145,6 +416,8 @@ class TemplateSpec:
     k_max: int
     q_min: int
     require_seq: int = 0
+    min_long_seq_len: int = 0
+    min_seq_chain_sum: int = 0
     weight: float = 1.0
 
 
@@ -159,13 +432,10 @@ class DifficultyWeights:
 @dataclass
 class GraphIndex:
     objects: Dict[str, Dict[str, Any]]
-    idx_to_node: Dict[int, str]
     frames: Dict[str, Set[int]]
-    centers: Dict[str, Dict[int, Tuple[float, float]]]
     actions_by_obj: Dict[str, List[Dict[str, Any]]]
     relations_by_subj: Dict[str, List[Dict[str, Any]]]
     temporal_spans: List[Dict[str, int]]
-    frame_diag: float
 
 
 @dataclass
@@ -177,41 +447,60 @@ class CandidateProfile:
     env: List[Set[str]]
     temporal_tags: List[Set[str]]
     actions: List[Set[str]]
-    sequences: List[Set[Tuple[str, str]]]
+    sequences: List[Set[Tuple[str, ...]]]
     spa: List[Set[Tuple[str, str]]]
     inter: List[Set[Tuple[str, str]]]
+
+
+def _object_desc_for_action_target(index: GraphIndex, object_id: str) -> str:
+    obj = index.objects.get(object_id)
+    if obj is None:
+        return "the object"
+    cls = _display_phrase(_sample_class(obj, object_id))
+    attrs = _normalized_values(obj.get("attributes") or [], "attr")
+    envs = _normalized_values(obj.get("environment") or [], "rel")
+    if attrs:
+        return _norm(f"the {cls} with {attrs[0]}")
+    if envs:
+        return _norm(f"the {cls} that is {envs[0]}")
+    return _norm(f"the {cls}")
+
+
+def _action_target_desc_map(index: GraphIndex, member: CandidateMember) -> Dict[str, Set[str]]:
+    out: Dict[str, Set[str]] = defaultdict(set)
+    interval = (member.start, member.end)
+    for item in index.actions_by_obj.get(member.object_id, []):
+        if not _overlap(interval, (item["start"], item["end"])):
+            continue
+        action = _normalize_phrase(item["label"], "act")
+        if not action:
+            continue
+        for tid in item.get("targets", []):
+            if tid not in index.objects:
+                continue
+            out[action].add(_object_desc_for_action_target(index, tid))
+    return out
 
 
 def build_graph_index(graph: Dict[str, Any]) -> GraphIndex:
     object_nodes = graph.get("object_nodes") or []
     objects: Dict[str, Dict[str, Any]] = {}
-    idx_to_node: Dict[int, str] = {}
     frames: Dict[str, Set[int]] = {}
-    centers: Dict[str, Dict[int, Tuple[float, float]]] = {}
-    max_x, max_y = 1.0, 1.0
 
-    for i, obj in enumerate(object_nodes):
+    for obj in object_nodes:
         node_id = str(obj.get("node_id", "")).strip()
         if not node_id:
             continue
         objects[node_id] = obj
-        idx_to_node[i] = node_id
         frames[node_id] = _frames_from_obj(obj)
-        centers[node_id] = {}
-        for fk, box in (obj.get("bboxes") or {}).items():
-            fidx = _to_int(fk, -1)
-            if fidx < 0 or not isinstance(box, (list, tuple)) or len(box) != 4:
-                continue
-            centers[node_id][fidx] = _bbox_center(box)
-            try:
-                max_x = max(max_x, float(box[2]))
-                max_y = max(max_y, float(box[3]))
-            except Exception:
-                pass
+
+    def _resolve_node_id(raw_id: Any) -> str:
+        text = str(raw_id).strip()
+        return text if text in objects else ""
 
     actions_by_obj: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for node in graph.get("action_nodes") or []:
-        owner = str(node.get("object_id", "")).strip()
+        owner = _resolve_node_id(node.get("object_id"))
         if owner not in objects:
             continue
         for item in node.get("actions") or []:
@@ -230,7 +519,11 @@ def build_graph_index(graph: Dict[str, Any]) -> GraphIndex:
                     "label": label,
                     "start": ov[0],
                     "end": ov[1],
-                    "targets": [str(t).strip() for t in (item.get("target_object_ids") or []) if str(t).strip() in objects],
+                    "targets": [
+                        tid
+                        for tid in (_resolve_node_id(t) for t in (item.get("target_object_ids") or []))
+                        if tid in objects and tid != owner
+                    ],
                 }
             )
 
@@ -238,25 +531,17 @@ def build_graph_index(graph: Dict[str, Any]) -> GraphIndex:
     for edge in graph.get("edges") or []:
         if "subject_id" not in edge or "relationships" not in edge:
             continue
-        sid = idx_to_node.get(_to_int(edge.get("subject_id"), -1), "")
+        sid = _resolve_node_id(edge.get("subject_id"))
         if sid not in objects:
             continue
         for rel in edge.get("relationships") or []:
-            oid = idx_to_node.get(_to_int(rel.get("object_id"), -1), "")
+            oid = _resolve_node_id(rel.get("object_id"))
             if oid not in objects:
                 continue
             pred = _norm(rel.get("predicate_verb", "")).lower()
             if not pred:
                 continue
-            tf = rel.get("time_frames") or []
-            segments: List[Tuple[int, int]] = []
-            for seg in tf:
-                if isinstance(seg, (list, tuple)) and len(seg) == 2:
-                    a = _to_int(seg[0], 0)
-                    b = _to_int(seg[1], a)
-                    if b < a:
-                        a, b = b, a
-                    segments.append((a, b))
+            segments = _extract_relation_segments(rel)
             if not segments:
                 shared = frames[sid] & frames[oid]
                 segments = _segments_from_frames(shared)
@@ -289,19 +574,12 @@ def build_graph_index(graph: Dict[str, Any]) -> GraphIndex:
             }
         )
 
-    frame_diag = math.hypot(max_x, max_y)
-    if frame_diag <= 0:
-        frame_diag = 1.0
-
     return GraphIndex(
         objects=objects,
-        idx_to_node=idx_to_node,
         frames=frames,
-        centers=centers,
         actions_by_obj=actions_by_obj,
         relations_by_subj=relations_by_subj,
         temporal_spans=temporal_spans,
-        frame_diag=frame_diag,
     )
 
 
@@ -376,21 +654,21 @@ def build_candidate_intervals(
     return candidates
 
 
-def _profile_for_candidate(index: GraphIndex, candidate: CandidateTarget) -> CandidateProfile:
+def _profile_for_candidate(index: GraphIndex, candidate: CandidateTarget, max_chain_len: int = 4) -> CandidateProfile:
     classes: List[str] = []
     attrs: List[Set[str]] = []
     env: List[Set[str]] = []
     temporal_tags: List[Set[str]] = []
     actions: List[Set[str]] = []
-    sequences: List[Set[Tuple[str, str]]] = []
+    sequences: List[Set[Tuple[str, ...]]] = []
     spa: List[Set[Tuple[str, str]]] = []
     inter: List[Set[Tuple[str, str]]] = []
 
     for member in candidate.members:
         obj = index.objects[member.object_id]
         classes.append(_sample_class(obj, member.object_id))
-        attrs.append({x.lower() for x in _uniq(obj.get("attributes") or [])})
-        env.append({x.lower() for x in _uniq(obj.get("relationships") or [])})
+        attrs.append(set(_normalized_values(obj.get("attributes") or [], "attr")))
+        env.append(set(_normalized_values(obj.get("environment") or [], "rel")))
 
         tags: Set[str] = set()
         for tn in index.temporal_spans:
@@ -398,28 +676,48 @@ def _profile_for_candidate(index: GraphIndex, candidate: CandidateTarget) -> Can
                 tags.add(f"clip_{tn['clip_id']}")
         temporal_tags.append(tags)
 
-        act_events = [
-            a
-            for a in index.actions_by_obj.get(member.object_id, [])
-            if _overlap((member.start, member.end), (a["start"], a["end"]))
-        ]
+        act_events = []
+        for item in index.actions_by_obj.get(member.object_id, []):
+            if not _overlap((member.start, member.end), (item["start"], item["end"])):
+                continue
+            label = _normalize_phrase(item["label"], "act")
+            if not label:
+                continue
+            act_events.append(
+                {
+                    "label": label,
+                    "start": item["start"],
+                    "end": item["end"],
+                    "targets": list(item.get("targets", [])),
+                }
+            )
         act_events.sort(key=lambda x: (x["start"], x["end"], x["label"]))
 
         act_labels = {a["label"] for a in act_events}
         actions.append(act_labels)
 
-        seq_set: Set[Tuple[str, str]] = set()
-        for i in range(len(act_events)):
-            for j in range(i + 1, len(act_events)):
-                if act_events[i]["end"] < act_events[j]["start"] and act_events[i]["label"] != act_events[j]["label"]:
-                    seq_set.add((act_events[i]["label"], act_events[j]["label"]))
-        sequences.append(seq_set)
-
-        spa_set: Set[Tuple[str, str]] = set()
-        int_set: Set[Tuple[str, str]] = set()
+        rel_events = []
         for rel in index.relations_by_subj.get(member.object_id, []):
             if not _overlap((member.start, member.end), (rel["start"], rel["end"])):
                 continue
+            pred = _normalize_phrase(rel["predicate"], "rel")
+            ref_cls = _normalize_phrase(rel["ref_class"], "attr") or _normalize_phrase(rel["ref_class"], "rel")
+            if not pred or not ref_cls:
+                continue
+            rel_events.append(
+                {
+                    "predicate": pred,
+                    "ref_class": ref_cls,
+                    "edge_type": rel["edge_type"],
+                    "start": rel["start"],
+                    "end": rel["end"],
+                }
+            )
+        rel_events.sort(key=lambda x: (x["start"], x["end"], x["predicate"], x["ref_class"]))
+
+        spa_set: Set[Tuple[str, str]] = set()
+        int_set: Set[Tuple[str, str]] = set()
+        for rel in rel_events:
             pair = (rel["predicate"], rel["ref_class"])
             if rel["edge_type"] == "spatial":
                 spa_set.add(pair)
@@ -427,10 +725,25 @@ def _profile_for_candidate(index: GraphIndex, candidate: CandidateTarget) -> Can
                 int_set.add(pair)
         for a in act_events:
             for tid in a["targets"]:
-                tcls = _sample_class(index.objects[tid], tid)
-                int_set.add((a["label"], tcls))
+                tcls = _normalize_phrase(_sample_class(index.objects[tid], tid), "attr")
+                if tcls:
+                    int_set.add((a["label"], tcls))
         spa.append(spa_set)
         inter.append(int_set)
+
+        action_events_for_chain = [(a["start"], a["end"], _make_act_token(a["label"])) for a in act_events]
+        relation_events_for_chain = [
+            (r["start"], r["end"], _make_rel_token(r["predicate"], r["ref_class"]))
+            for r in rel_events
+        ]
+        act_chains = _enumerate_ordered_chains(action_events_for_chain, max_chain_len=max_chain_len)
+        rel_chains = _enumerate_ordered_chains(relation_events_for_chain, max_chain_len=max_chain_len)
+        mixed_chains = {
+            chain
+            for chain in _enumerate_ordered_chains(action_events_for_chain + relation_events_for_chain, max_chain_len=max_chain_len)
+            if any(tok.startswith("act:") for tok in chain) and any(tok.startswith("rel:") for tok in chain)
+        }
+        sequences.append(act_chains | rel_chains | mixed_chains)
 
     return CandidateProfile(
         candidate_id=candidate.candidate_id,
@@ -446,8 +759,8 @@ def _profile_for_candidate(index: GraphIndex, candidate: CandidateTarget) -> Can
     )
 
 
-def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget) -> List[AtomicClue]:
-    profile = _profile_for_candidate(index, candidate)
+def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_len: int = 4) -> List[AtomicClue]:
+    profile = _profile_for_candidate(index, candidate, max_chain_len=max_chain_len)
     clues: List[AtomicClue] = []
     seen: Set[Tuple[Any, ...]] = set()
 
@@ -477,6 +790,8 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget) -> List[At
 
     for k in range(profile.arity):
         cls = profile.classes[k]
+        member = candidate.members[k]
+        action_target_descs = _action_target_desc_map(index, member)
         add(
             "cls",
             f"the {cls}",
@@ -518,23 +833,35 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget) -> List[At
             )
 
         for action in sorted(profile.actions[k]):
+            target_descs = sorted(action_target_descs.get(action, set()))
+            if target_descs:
+                action_text = f"that is {action} toward {target_descs[0]}"
+            else:
+                action_targets = sorted({ref_cls for pred, ref_cls in profile.inter[k] if pred == action})
+                if action_targets:
+                    action_text = f"that is {action} the {action_targets[0]}"
+                else:
+                    action_text = f"that is {action}"
             add(
                 "act",
-                f"that is {action}",
+                action_text,
                 ("act", k, action),
                 (k,),
                 (k,),
                 1,
             )
 
-        for a1, a2 in sorted(profile.sequences[k]):
+        for chain in sorted(profile.sequences[k]):
+            if len(chain) < 2:
+                continue
+            chain_text = " then ".join(_format_seq_part(tok) for tok in chain)
             add(
                 "seq",
-                f"that {a1} before {a2}",
-                ("seq", k, a1, a2),
+                f"that {chain_text}",
+                ("seq", k, *chain),
                 (k,),
                 (k,),
-                2,
+                len(chain),
             )
 
         for pred, ref_cls in sorted(profile.spa[k]):
@@ -573,8 +900,8 @@ def _clue_satisfied(profile: CandidateProfile, clue: AtomicClue) -> bool:
         _, k, action = sig
         return 0 <= k < profile.arity and action in profile.actions[k]
     if ctype == "seq":
-        _, k, a1, a2 = sig
-        return 0 <= k < profile.arity and (a1, a2) in profile.sequences[k]
+        _, k, *chain = sig
+        return 0 <= k < profile.arity and tuple(chain) in profile.sequences[k]
     if ctype == "spa":
         _, k, pred, ref_cls = sig
         return 0 <= k < profile.arity and (pred, ref_cls) in profile.spa[k]
@@ -652,6 +979,30 @@ def solve_query_cpsat(
             return None
         model.Add(sum(x[j] for j in seq_idx) >= int(template.require_seq))
 
+    seq_idx = [j for j, clue in enumerate(clues) if clue.clue_type == "seq"]
+    if template.min_long_seq_len > 0 or template.min_seq_chain_sum > 0:
+        if not seq_idx:
+            return None
+        long_seq_idx = [
+            j
+            for j in seq_idx
+            if clues[j].chain_len >= int(template.min_long_seq_len)
+        ]
+        seq_chain_sum = sum(clues[j].chain_len * x[j] for j in seq_idx)
+        if template.min_long_seq_len > 0 and template.min_seq_chain_sum > 0:
+            enough_seq_sum = model.NewBoolVar("enough_seq_chain_sum")
+            model.Add(seq_chain_sum >= int(template.min_seq_chain_sum)).OnlyEnforceIf(enough_seq_sum)
+            model.Add(seq_chain_sum < int(template.min_seq_chain_sum)).OnlyEnforceIf(enough_seq_sum.Not())
+            disjuncts = [enough_seq_sum]
+            disjuncts.extend(x[j] for j in long_seq_idx)
+            model.AddBoolOr(disjuncts)
+        elif template.min_seq_chain_sum > 0:
+            model.Add(seq_chain_sum >= int(template.min_seq_chain_sum))
+        elif template.min_long_seq_len > 0:
+            if not long_seq_idx:
+                return None
+            model.Add(sum(x[j] for j in long_seq_idx) >= 1)
+
     model.Minimize(sum(clue.cost * x[j] for j, clue in enumerate(clues)))
 
     solver = cp_model.CpSolver()
@@ -671,24 +1022,24 @@ def solve_query_cpsat(
 
 
 def _build_default_templates() -> List[TemplateSpec]:
-    inf = 6
+    inf = 8
     return [
         TemplateSpec(
-            name="easy_app_spa",
+            name="easy_static_attr",
             bucket="easy",
-            type_min={"app": 1, "spa": 1},
-            type_max={"cls": 1, "app": 2, "act": 1, "seq": 0, "spa": 2, "env": 1, "int": 0},
-            k_min=2,
-            k_max=4,
+            type_min={"app": 1},
+            type_max={"cls": 1, "app": 2, "act": 1, "seq": 0, "spa": 1, "env": 2, "int": 0},
+            k_min=1,
+            k_max=3,
             q_min=0,
             require_seq=0,
             weight=1.0,
         ),
         TemplateSpec(
-            name="easy_act",
+            name="easy_single_act",
             bucket="easy",
             type_min={"act": 1},
-            type_max={"cls": 1, "app": 1, "act": 2, "seq": 0, "spa": 1, "env": inf, "int": 0},
+            type_max={"cls": 1, "app": 1, "act": 1, "seq": 0, "spa": 1, "env": 1, "int": 0},
             k_min=1,
             k_max=3,
             q_min=1,
@@ -696,47 +1047,51 @@ def _build_default_templates() -> List[TemplateSpec]:
             weight=1.0,
         ),
         TemplateSpec(
-            name="medium_act_spa",
+            name="medium_act_spa_combo",
             bucket="medium",
             type_min={"act": 1, "spa": 1},
             type_max={"cls": 1, "app": 2, "act": 2, "seq": 1, "spa": 2, "env": inf, "int": 1},
-            k_min=2,
-            k_max=4,
-            q_min=1,
+            k_min=3,
+            k_max=5,
+            q_min=2,
             require_seq=0,
             weight=1.0,
         ),
         TemplateSpec(
-            name="medium_app_int",
+            name="medium_act_int_combo",
             bucket="medium",
-            type_min={"app": 1, "int": 1},
+            type_min={"act": 1, "int": 1},
             type_max={"cls": 1, "app": 2, "act": 2, "seq": 1, "spa": 1, "env": inf, "int": 2},
-            k_min=2,
-            k_max=4,
-            q_min=1,
+            k_min=3,
+            k_max=5,
+            q_min=2,
             require_seq=0,
             weight=1.0,
         ),
         TemplateSpec(
-            name="hard_seq_int",
+            name="hard_long_seq_int",
             bucket="hard",
             type_min={"seq": 1, "int": 1},
-            type_max={"cls": 1, "app": 2, "act": 2, "seq": 2, "spa": 2, "env": inf, "int": 2},
-            k_min=3,
-            k_max=6,
-            q_min=2,
+            type_max={"cls": 1, "app": 2, "act": 3, "seq": 3, "spa": 2, "env": inf, "int": 2},
+            k_min=4,
+            k_max=7,
+            q_min=5,
             require_seq=1,
+            min_long_seq_len=3,
+            min_seq_chain_sum=5,
             weight=1.0,
         ),
         TemplateSpec(
-            name="hard_act_seq_spa",
+            name="hard_long_seq_spa",
             bucket="hard",
             type_min={"act": 1, "seq": 1, "spa": 1},
-            type_max={"cls": 1, "app": 2, "act": 2, "seq": 2, "spa": 2, "env": inf, "int": 1},
-            k_min=3,
-            k_max=6,
-            q_min=2,
+            type_max={"cls": 1, "app": 2, "act": 3, "seq": 3, "spa": 2, "env": inf, "int": 1},
+            k_min=5,
+            k_max=8,
+            q_min=6,
             require_seq=1,
+            min_long_seq_len=3,
+            min_seq_chain_sum=6,
             weight=1.0,
         ),
     ]
@@ -765,7 +1120,7 @@ def _compute_candidate_difficulty(
     n_change = 0.0
     n_time = 0.0
     n_same = 0.0
-    sep_vals: List[float] = []
+    tiou_vals: List[float] = []
 
     for member in candidate.members:
         obj_id = member.object_id
@@ -798,36 +1153,22 @@ def _compute_candidate_difficulty(
             ov = _overlap(cur, other_range)
             if not ov:
                 continue
-            same_ids.append((other_id, ov))
+            same_ids.append((other_id, other_range))
         n_same += len(same_ids)
+        for _, other_range in same_ids:
+            tiou_vals.append(_interval_tiou(cur, other_range))
 
-        c_map = index.centers.get(obj_id, {})
-        for other_id, ov in same_ids:
-            o_map = index.centers.get(other_id, {})
-            dists: List[float] = []
-            for f in range(ov[0], ov[1] + 1):
-                if f not in c_map or f not in o_map:
-                    continue
-                dx = c_map[f][0] - o_map[f][0]
-                dy = c_map[f][1] - o_map[f][1]
-                d = math.hypot(dx, dy) / index.frame_diag
-                dists.append(min(max(d, 0.0), 1.0))
-            if dists:
-                sep_vals.append(sum(dists) / len(dists))
-
-    avg_sep = (sum(sep_vals) / len(sep_vals)) if sep_vals else 1.0
-    sep_term = 1.0 - avg_sep
+    avg_tiou = (sum(tiou_vals) / len(tiou_vals)) if tiou_vals else 0.0
 
     D_t = weights.alpha_change * n_change + weights.alpha_time * n_time
-    D_s = weights.beta_same * n_same + weights.beta_sep * sep_term
+    D_s = weights.beta_same * n_same + weights.beta_sep * avg_tiou
     D = D_t + D_s
 
     return D_t, D_s, D, {
         "n_change": n_change,
         "n_time": n_time,
         "n_same": n_same,
-        "avg_sep": avg_sep,
-        "sep_term": sep_term,
+        "avg_tiou": avg_tiou,
     }
 
 
@@ -869,11 +1210,39 @@ def _render_query(profile: CandidateProfile, clues: List[AtomicClue]) -> str:
     return _norm(" ".join(parts))
 
 
+def decorate_query(core_clues: List[AtomicClue], profile: CandidateProfile) -> Tuple[str, List[str]]:
+    del profile
+    clue_types = {c.clue_type for c in core_clues}
+    bucket_keys: List[str] = []
+    if "seq" in clue_types:
+        bucket_keys.extend(["temporal", "action"])
+    if "spa" in clue_types or "int" in clue_types:
+        bucket_keys.append("spatial")
+    if "app" in clue_types:
+        bucket_keys.append("appearance")
+    if not bucket_keys:
+        bucket_keys.append("neutral")
+
+    decorations: List[str] = []
+    for key in bucket_keys:
+        for phrase in DECORATION_POOL.get(key, ()):
+            if phrase not in decorations:
+                decorations.append(phrase)
+                break
+        if len(decorations) >= 2:
+            break
+
+    if not decorations:
+        return "", []
+    return _norm(", " + "; ".join(decorations)), decorations
+
+
 class CPSATQuerySampler:
     def __init__(
         self,
         min_interval_len: int = 3,
         max_intervals_per_object: int = 12,
+        max_chain_len: int = 4,
         queries_per_graph: int = 12,
         max_queries_per_candidate: int = 1,
         time_limit_sec: float = 2.0,
@@ -882,10 +1251,11 @@ class CPSATQuerySampler:
     ) -> None:
         self.min_interval_len = max(1, int(min_interval_len))
         self.max_intervals_per_object = max(1, int(max_intervals_per_object))
+        self.max_chain_len = max(2, int(max_chain_len))
         self.queries_per_graph = max(1, int(queries_per_graph))
         self.max_queries_per_candidate = max(1, int(max_queries_per_candidate))
         self.time_limit_sec = max(0.1, float(time_limit_sec))
-        self.rng = random.Random(seed)
+        self.seed = int(seed)
         self.weights = weights
         self.templates = _build_default_templates()
 
@@ -935,7 +1305,7 @@ class CPSATQuerySampler:
         profile_map: Dict[str, CandidateProfile],
         template: TemplateSpec,
     ) -> Optional[Dict[str, Any]]:
-        clues = build_atomic_clues(self._index, candidate)
+        clues = build_atomic_clues(self._index, candidate, max_chain_len=self.max_chain_len)
         if not clues:
             return None
 
@@ -952,7 +1322,9 @@ class CPSATQuerySampler:
 
         selected = [clues[i] for i in solved["selected_indices"]]
         profile = profile_map[candidate.candidate_id]
-        query = _render_query(profile, selected)
+        core_query = _render_query(profile, selected)
+        suffix, decorations = decorate_query(selected, profile)
+        query = _norm(core_query + suffix)
 
         return {
             "candidate": candidate,
@@ -960,6 +1332,8 @@ class CPSATQuerySampler:
             "selected_clues": selected,
             "solver": solved,
             "template": template,
+            "core_query": core_query,
+            "decorations": decorations,
             "query": query,
         }
 
@@ -983,7 +1357,10 @@ class CPSATQuerySampler:
             c.meta.update(meta)
 
         _assign_buckets(candidates)
-        profile_map = {c.candidate_id: _profile_for_candidate(self._index, c) for c in candidates}
+        profile_map = {
+            c.candidate_id: _profile_for_candidate(self._index, c, max_chain_len=self.max_chain_len)
+            for c in candidates
+        }
 
         quotas = self._template_quotas(self.queries_per_graph)
         cur_counts: Dict[str, int] = defaultdict(int)
@@ -1040,6 +1417,8 @@ class CPSATQuerySampler:
                 {
                     "query_id": f"cpsat_{len(results)}_{cand.candidate_id}",
                     "query": picked["query"],
+                    "query_core": picked["core_query"],
+                    "query_decorations": picked["decorations"],
                     "template": template.name,
                     "difficulty_bucket": cand.difficulty_bucket,
                     "D_t": cand.D_t,
@@ -1071,12 +1450,81 @@ class CPSATQuerySampler:
 
         return results
 
+    def _build_minimal_records(self, graph: Dict[str, Any], query_nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        objects = {
+            str(obj.get("node_id")): obj
+            for obj in (graph.get("object_nodes") or [])
+            if str(obj.get("node_id", "")).strip()
+        }
+        records: List[Dict[str, Any]] = []
+        for q in query_nodes:
+            target = q.get("target") or {}
+            members = target.get("members") or []
+            if not members:
+                continue
+            primary = members[0]
+            target_node_id = str(primary.get("object_id", "")).strip()
+            if not target_node_id or target_node_id not in objects:
+                continue
+            start = _to_int(primary.get("start_frame"), 0)
+            end = _to_int(primary.get("end_frame"), start)
+            if end < start:
+                start, end = end, start
+
+            raw_boxes = objects[target_node_id].get("bboxes") or {}
+            boxes: Dict[str, Any] = {}
+            for frame, box in raw_boxes.items():
+                frame_int = _to_int(frame, -1)
+                if frame_int < 0:
+                    continue
+                if start <= frame_int <= end:
+                    boxes[str(frame_int)] = box
+            boxes = {str(f): boxes[str(f)] for f in sorted(int(k) for k in boxes.keys())}
+            if not boxes:
+                continue
+
+            records.append(
+                {
+                    "video_path": graph.get("video_path"),
+                    "query_id": q.get("query_id"),
+                    "query": q.get("query"),
+                    "query_core": q.get("query_core"),
+                    "query_decorations": q.get("query_decorations", []),
+                    "template": q.get("template"),
+                    "difficulty_bucket": q.get("difficulty_bucket"),
+                    "D_t": q.get("D_t"),
+                    "D_s": q.get("D_s"),
+                    "D": q.get("D"),
+                    "target_node_id": target_node_id,
+                    "same_entity_nodes": [str(m.get("object_id", "")).strip() for m in members if str(m.get("object_id", "")).strip()],
+                    "start_frame": start,
+                    "end_frame": end,
+                    "boxes": boxes,
+                    "clues": q.get("clues", []),
+                    "solver": q.get("solver"),
+                }
+            )
+        return records
+
     def process_jsonl(self, input_path: str, output_path: str) -> None:
+        global RELATION_SYNONYMS, ATTRIBUTE_SYNONYMS
         in_path = Path(input_path)
         out_path = Path(output_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        wrote = 0
+        rel_map, attr_map, stats = _summarize_synonyms_from_graph_file(in_path)
+        RELATION_SYNONYMS = rel_map
+        ATTRIBUTE_SYNONYMS = attr_map
+        print(
+            "[query_cpsat] synonym_summary: "
+            f"graphs={stats['graphs']} "
+            f"rel_values={stats['relation_values']} attr_values={stats['attribute_values']} "
+            f"rel_synonyms={stats['relation_synonyms']} attr_synonyms={stats['attribute_synonyms']}",
+            flush=True,
+        )
+
+        graph_count = 0
+        record_count = 0
         with in_path.open("r", encoding="utf-8") as fin, out_path.open("w", encoding="utf-8") as fout:
             for line in fin:
                 line = line.strip()
@@ -1084,12 +1532,13 @@ class CPSATQuerySampler:
                     continue
                 graph = json.loads(line)
                 query_nodes = self.generate_for_graph(graph)
-                out_graph = dict(graph)
-                out_graph["query_nodes_cpsat"] = query_nodes
-                fout.write(json.dumps(out_graph, ensure_ascii=False) + "\n")
-                wrote += 1
+                records = self._build_minimal_records(graph, query_nodes)
+                for record in records:
+                    fout.write(json.dumps(record, ensure_ascii=False) + "\n")
+                graph_count += 1
+                record_count += len(records)
 
-        print(f"[query_cpsat] done. graphs={wrote}, output={out_path}", flush=True)
+        print(f"[query_cpsat] done. graphs={graph_count}, records={record_count}, output={out_path}", flush=True)
 
 
 def main(
@@ -1098,6 +1547,7 @@ def main(
     queries_per_graph: int = 12,
     min_interval_len: int = 3,
     max_intervals_per_object: int = 12,
+    max_chain_len: int = 6,
     max_queries_per_candidate: int = 1,
     time_limit_sec: float = 2.0,
     seed: int = 7,
@@ -1109,6 +1559,7 @@ def main(
     sampler = CPSATQuerySampler(
         min_interval_len=min_interval_len,
         max_intervals_per_object=max_intervals_per_object,
+        max_chain_len=max_chain_len,
         queries_per_graph=queries_per_graph,
         max_queries_per_candidate=max_queries_per_candidate,
         time_limit_sec=time_limit_sec,

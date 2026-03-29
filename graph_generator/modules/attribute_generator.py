@@ -16,6 +16,7 @@ from pycocotools import mask as mask_utils
 from api_sync.api import StreamGenerator
 from api_sync.utils.parser import JSONParser
 from dependence.dam import DescribeAnythingModel, disable_torch_init
+from modules.graph_filter import GraphFilter
 
 
 VIDEO_QUERY_TEMPLATE = (
@@ -40,13 +41,13 @@ observed about the object itself. Include only:
 * Design elements: stripes, dots, logos, decorative features. DO NOT include: implied
 states, inferred conditions, functional descriptions, or anything that describes the
 object’s interaction with its environment.
-- "relationships": A list of relationships between this object and other entities (but not clothes and actions) or the environment (e.g., "on top of table", "next to person", "inside container", "facing camera", "part of group", "Leaning against the wall", "carrying a briefcase").
+- "environment": A list of environment/context relations between this object and other entities (but not clothes and actions), e.g., "on top of table", "next to person", "inside container", "facing camera", "part of group", "leaning against the wall", "carrying a briefcase".
 - "actions": A list of actions that the object is performing or movements it is making
 (e.g., "rotating", "moving", "falling", "bouncing", "sliding", "right arm extended outward"). Including the subtle movements of the person.
 ### Important distinctions:
 - Attributes = What the object looks like (visual only). Please use ADJECTIVE
 form. If you are extracting a person's clothing, put it in attributes.
-- Relationships = How the object relates to other things spatially, functionally, or contextually. If you are extracting interactions between objects and other objects or the environment, put them in relationships.
+- Environment = How the object relates to other things spatially, functionally, or contextually. If you are extracting interactions between objects and other objects or the environment, put them in environment.
 - Actions = What the object is doing or how it‘s moving
 - However, please note that the attributes of clothing on a person should not be directly stored as attributes of the person. If the description mentions a brown hat, it should be stored as wear a brown hat rather than just brown.
 Now process the following description:
@@ -60,7 +61,7 @@ class ObjectDescription:
     raw_description: str
     category: str
     attributes: List[str]
-    relationships: List[str]
+    environment: List[str]
     actions: List[str]
 
 
@@ -174,12 +175,12 @@ def _parse_extraction(
         )
     )
     attributes = _normalize_string_list(parsed.get("attributes", []))
-    relationships = _normalize_string_list(parsed.get("relationships", []))
+    environment = _normalize_string_list(parsed.get("environment", parsed.get("relationships", [])))
     actions = _normalize_string_list(parsed.get("actions", []))
 
     category_key = category.lower()
     attributes = [attr for attr in attributes if attr.lower() != category_key]
-    return category or default_category, attributes, relationships, actions
+    return category or default_category, attributes, environment, actions
 
 
 def _normalize_api_keys(api_keys: Union[str, Iterable[str]]) -> List[str]:
@@ -232,7 +233,7 @@ def _parse_structured_response(response: str) -> Optional[Dict[str, Any]]:
     return {
         "object": _normalize_text(str(parsed.get("object") or parsed.get("category") or "")),
         "attributes": _normalize_string_list(parsed.get("attributes", [])),
-        "relationships": _normalize_string_list(parsed.get("relationships", [])),
+        "environment": _normalize_string_list(parsed.get("environment", parsed.get("relationships", []))),
         "actions": _normalize_string_list(parsed.get("actions", [])),
     }
 
@@ -399,7 +400,8 @@ def apply_attributes_to_object_nodes(
 
         obj_node["dam_category"] = info.category
         obj_node["attributes"] = info.attributes
-        obj_node["relationships"] = info.relationships
+        obj_node["environment"] = info.environment
+        obj_node.pop("relationships", None)
         obj_node["actions"] = info.actions
         resolved_category = _strip_uncertainty_suffix(info.category)
         current_class = _normalize_text(str(obj_node.get("object_class", "")))
@@ -493,14 +495,14 @@ def run(
         raw_description = info["raw_description"]
         default_category = info["default_category"]
         if structured is None:
-            category, attributes, relationships, actions = _parse_extraction(
+            category, attributes, environment, actions = _parse_extraction(
                 raw_description,
                 default_category=default_category,
             )
         else:
             category = _normalize_text(str(structured.get("object") or default_category)) or default_category
             attributes = _normalize_string_list(structured.get("attributes", []))
-            relationships = _normalize_string_list(structured.get("relationships", []))
+            environment = _normalize_string_list(structured.get("environment", structured.get("relationships", [])))
             actions = _normalize_string_list(structured.get("actions", []))
 
         descriptions[object_id] = ObjectDescription(
@@ -509,13 +511,13 @@ def run(
             raw_description=raw_description,
             category=category,
             attributes=attributes,
-            relationships=relationships,
+            environment=environment,
             actions=actions,
         )
         print(
             f"[attribute_generator] {object_id} -> "
             f"category={category}; attributes={attributes}; "
-            f"relationships={relationships}; actions={actions}"
+            f"environment={environment}; actions={actions}"
         )
 
     graph = apply_attributes_to_object_nodes(
@@ -523,6 +525,7 @@ def run(
         descriptions=descriptions,
         overwrite_object_class=overwrite_object_class,
     )
+    graph = GraphFilter().normalize_graph(graph, filter_objects=False)
 
     if output and output != jsonl:
         output_path = Path(output)

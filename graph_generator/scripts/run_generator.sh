@@ -64,11 +64,20 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #   --shot_b 1 \
 #   --frames_per_shot 3
 
-python -m modules.query_generator \
-  --input_path=scene_graphs.jsonl \
-  --output_path=output/query_minimal.jsonl \
-  --d_star=0.6 \
-  --model_name=gpt-5.4-nano-2026-03-17
+# python -m modules.query_generator \
+#   --input_path=scene_graphs.jsonl \
+#   --output_path=output/query_minimal.jsonl \
+#   --d_star=0.6 \
+#   --model_name=gpt-5.4-nano-2026-03-17
+
+# cd /Users/themaoqiu/CodeRepo/DORO-STVG
+python -m modules.query_generator_cpsat \
+  --input_path /Users/themaoqiu/CodeRepo/DORO-STVG/graph_generator/scene_graphs.jsonl \
+  --output_path /Users/themaoqiu/CodeRepo/DORO-STVG/graph_generator/output/query.jsonl \
+  --queries_per_graph 12 \
+  --time_limit_sec 2.0 \
+  --seed 7
+
 
 # full command
 # cd /home/wangxingjian/DORO-STVG/graph_generator && \
@@ -99,8 +108,5 @@ python -m modules.query_generator \
 #   --relation_crop_output_dir /home/wangxingjian/DORO-STVG/graph_generator/output/relation_crops \
 #   --relation_min_shared_frames 3 \
 #   --relation_save_intermediate_frames False \
-#   --with_reference False \
-#   --with_query True \
-#   --query_output_path output/query_minimal.jsonl \
-#   --query_model_name gpt-5.4-nano-2026-03-17
+#   --with_reference False
 
