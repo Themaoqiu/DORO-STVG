@@ -203,6 +203,225 @@ class GraphFilter:
             normalized.append(item)
         return normalized
 
+    def _merge_same_entity_objects(self, graph: Dict[str, Any]) -> None:
+        object_nodes = graph.get("object_nodes") or []
+        if not object_nodes:
+            return
+
+        obj_by_id: Dict[str, Dict[str, Any]] = {}
+        for obj in object_nodes:
+            node_id = str(obj.get("node_id", "")).strip()
+            if node_id:
+                obj_by_id[node_id] = obj
+        if not obj_by_id:
+            return
+
+        parent: Dict[str, str] = {node_id: node_id for node_id in obj_by_id.keys()}
+
+        def find(x: str) -> str:
+            p = parent.get(x, x)
+            while p != parent.get(p, p):
+                p = parent[p]
+            cur = x
+            while cur != p:
+                nxt = parent[cur]
+                parent[cur] = p
+                cur = nxt
+            return p
+
+        def union(a: str, b: str) -> None:
+            ra = find(a)
+            rb = find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        for edge in graph.get("edges") or []:
+            if not isinstance(edge, dict):
+                continue
+            if str(edge.get("reference_relationship", "")).strip() != "same_entity":
+                continue
+            src = str(edge.get("source_id", "")).strip()
+            tgt = str(edge.get("target_id", "")).strip()
+            if src in obj_by_id and tgt in obj_by_id and src != tgt:
+                union(src, tgt)
+
+        comps: Dict[str, List[str]] = {}
+        for node_id in obj_by_id.keys():
+            root = find(node_id)
+            comps.setdefault(root, []).append(node_id)
+
+        if not comps:
+            return
+
+        def node_key(node_id: str) -> Tuple[int, int, str]:
+            obj = obj_by_id[node_id]
+            start = _to_int(obj.get("start_frame"), 0)
+            gid = _to_int(obj.get("global_track_id"), 10**9)
+            return (start, gid, node_id)
+
+        remap: Dict[str, str] = {}
+        merged_nodes: List[Dict[str, Any]] = []
+
+        for members in comps.values():
+            members_sorted = sorted(members, key=node_key)
+            canonical = members_sorted[0]
+            for mid in members_sorted:
+                remap[mid] = canonical
+
+            base = dict(obj_by_id[canonical])
+            base["node_id"] = canonical
+
+            # Merge track-level scalar fields.
+            gid_vals = [
+                _to_int(obj_by_id[mid].get("global_track_id"), -1)
+                for mid in members_sorted
+                if _to_int(obj_by_id[mid].get("global_track_id"), -1) >= 0
+            ]
+            if gid_vals:
+                base["global_track_id"] = min(gid_vals)
+
+            # Merge class-like fields by keeping canonical; fallback to first non-empty.
+            if not str(base.get("object_class", "")).strip():
+                for mid in members_sorted:
+                    cls = str(obj_by_id[mid].get("object_class", "")).strip()
+                    if cls:
+                        base["object_class"] = cls
+                        break
+            if not str(base.get("dam_category", "")).strip():
+                for mid in members_sorted:
+                    cls = str(obj_by_id[mid].get("dam_category", "")).strip()
+                    if cls:
+                        base["dam_category"] = cls
+                        break
+
+            # Merge temporal coverage and boxes.
+            merged_bboxes: Dict[str, Any] = {}
+            for mid in members_sorted:
+                bboxes = obj_by_id[mid].get("bboxes") or {}
+                if not isinstance(bboxes, dict):
+                    continue
+                for fk, box in bboxes.items():
+                    frame_idx = _to_int(fk, -1)
+                    if frame_idx < 0:
+                        continue
+                    key = str(frame_idx)
+                    if key not in merged_bboxes:
+                        merged_bboxes[key] = box
+            if merged_bboxes:
+                ordered_keys = sorted(int(k) for k in merged_bboxes.keys())
+                base["bboxes"] = {str(f): merged_bboxes[str(f)] for f in ordered_keys}
+                base["start_frame"] = ordered_keys[0]
+                base["end_frame"] = ordered_keys[-1]
+            else:
+                starts = [_to_int(obj_by_id[mid].get("start_frame"), 0) for mid in members_sorted]
+                ends = [_to_int(obj_by_id[mid].get("end_frame"), starts[i]) for i, mid in enumerate(members_sorted)]
+                if starts and ends:
+                    base["start_frame"] = min(starts)
+                    base["end_frame"] = max(ends)
+
+            # Merge shot ids.
+            shot_ids: Set[int] = set()
+            for mid in members_sorted:
+                for sid in obj_by_id[mid].get("shot_ids") or []:
+                    shot_ids.add(_to_int(sid, -1))
+            shot_ids.discard(-1)
+            if shot_ids:
+                base["shot_ids"] = sorted(shot_ids)
+
+            def _merge_text_list(field: str) -> None:
+                seen: Set[str] = set()
+                values: List[str] = []
+                for mid in members_sorted:
+                    for val in obj_by_id[mid].get(field) or []:
+                        text = str(val).strip()
+                        if not text:
+                            continue
+                        key = text.lower()
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        values.append(text)
+                if values:
+                    base[field] = values
+                elif field in base:
+                    base[field] = []
+
+            _merge_text_list("attributes")
+            _merge_text_list("environment")
+            _merge_text_list("actions")
+
+            merged_nodes.append(base)
+
+        # Remap action groups to merged object ids.
+        remapped_action_nodes: List[Dict[str, Any]] = []
+        for group in graph.get("action_nodes") or []:
+            if not isinstance(group, dict):
+                continue
+            owner = str(group.get("object_id", "")).strip()
+            owner = remap.get(owner, owner)
+            if owner not in obj_by_id:
+                continue
+            new_group = dict(group)
+            new_group["object_id"] = owner
+            actions: List[Dict[str, Any]] = []
+            for action in group.get("actions") or []:
+                if not isinstance(action, dict):
+                    continue
+                new_action = dict(action)
+                targets = []
+                for tid in action.get("target_object_ids") or []:
+                    t = remap.get(str(tid).strip(), str(tid).strip())
+                    if t and t != owner:
+                        targets.append(t)
+                if targets:
+                    new_action["target_object_ids"] = sorted(set(targets))
+                elif "target_object_ids" in new_action:
+                    new_action.pop("target_object_ids", None)
+                actions.append(new_action)
+            new_group["actions"] = actions
+            remapped_action_nodes.append(new_group)
+
+        # Remap edges and drop same_entity links (already consumed).
+        remapped_edges: List[Dict[str, Any]] = []
+        for edge in graph.get("edges") or []:
+            if not isinstance(edge, dict):
+                continue
+            if str(edge.get("reference_relationship", "")).strip() == "same_entity":
+                continue
+            if "subject_id" in edge and "relationships" in edge:
+                sid = remap.get(str(edge.get("subject_id", "")).strip(), str(edge.get("subject_id", "")).strip())
+                if not sid:
+                    continue
+                rels: List[Dict[str, Any]] = []
+                for rel in edge.get("relationships") or []:
+                    if not isinstance(rel, dict):
+                        continue
+                    oid = remap.get(str(rel.get("object_id", "")).strip(), str(rel.get("object_id", "")).strip())
+                    if not oid or oid == sid:
+                        continue
+                    new_rel = dict(rel)
+                    new_rel["object_id"] = oid
+                    rels.append(new_rel)
+                if rels:
+                    remapped_edges.append({"subject_id": sid, "relationships": rels})
+                continue
+            if "source_id" in edge and "target_id" in edge:
+                src = remap.get(str(edge.get("source_id", "")).strip(), str(edge.get("source_id", "")).strip())
+                tgt = remap.get(str(edge.get("target_id", "")).strip(), str(edge.get("target_id", "")).strip())
+                if not src or not tgt or src == tgt:
+                    continue
+                new_edge = dict(edge)
+                new_edge["source_id"] = src
+                new_edge["target_id"] = tgt
+                remapped_edges.append(new_edge)
+                continue
+            remapped_edges.append(edge)
+
+        merged_nodes.sort(key=lambda x: (_to_int(x.get("start_frame"), 0), str(x.get("node_id", ""))))
+        graph["object_nodes"] = merged_nodes
+        graph["action_nodes"] = remapped_action_nodes
+        graph["edges"] = remapped_edges
+
     def _build_object_maps(
         self,
         object_nodes: List[Dict[str, Any]],
@@ -549,11 +768,19 @@ class GraphFilter:
     def normalize_graph(self, graph: Dict[str, Any], *, filter_objects: bool = False) -> Dict[str, Any]:
         object_nodes = self._normalize_object_nodes(
             graph.get("object_nodes") or [],
-            filter_objects=filter_objects,
+            filter_objects=False,
         )
         graph["object_nodes"] = object_nodes
+        self._merge_same_entity_objects(graph)
 
-        valid_node_ids = self._build_object_maps(object_nodes)
+        if filter_objects:
+            filtered_nodes: List[Dict[str, Any]] = []
+            for obj in graph.get("object_nodes") or []:
+                if self.should_keep(obj):
+                    filtered_nodes.append(obj)
+            graph["object_nodes"] = filtered_nodes
+
+        valid_node_ids = self._build_object_maps(graph.get("object_nodes") or [])
         edges, motion_actions = self._normalize_relation_edges(
             graph,
             valid_node_ids=valid_node_ids,
@@ -592,6 +819,31 @@ class GraphFilter:
         print(
             f"Filtered: {total_objects_before} -> {total_objects_after} objects "
             f"({total_objects_before - total_objects_after} removed)"
+        )
+
+    def normalize_jsonl(self, input_path: str, output_path: str) -> None:
+        input_file = Path(input_path)
+        output_file = Path(output_path)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        total_objects_before = 0
+        total_objects_after = 0
+
+        with input_file.open("r", encoding="utf-8") as f_in, output_file.open(
+            "w", encoding="utf-8"
+        ) as f_out:
+            for line in f_in:
+                graph = json.loads(line.strip())
+                total_objects_before += len(graph.get("object_nodes", []))
+
+                normalized_graph = self.normalize_graph(graph, filter_objects=False)
+                total_objects_after += len(normalized_graph.get("object_nodes", []))
+
+                f_out.write(json.dumps(normalized_graph, ensure_ascii=False) + "\n")
+
+        print(
+            f"Normalized: {total_objects_before} -> {total_objects_after} objects "
+            f"({total_objects_before - total_objects_after} merged/removed)"
         )
 
     def filter_video_folder(self, input_jsonl: str, video_folder: str, output_path: str) -> None:
@@ -646,6 +898,7 @@ def filter_scene_graphs(
     min_frames: int = 5,
     min_action_frames: int = 3,
     min_relation_frames: int = 3,
+    filter_objects: bool = True,
 ) -> None:
     graph_filter = GraphFilter(
         min_frames=min_frames,
@@ -653,12 +906,44 @@ def filter_scene_graphs(
         min_relation_frames=min_relation_frames,
     )
     if video_folder:
-        graph_filter.filter_video_folder(input_path, video_folder, output_path)
+        if filter_objects:
+            graph_filter.filter_video_folder(input_path, video_folder, output_path)
+        else:
+            raise ValueError("filter_objects=False is not supported with video_folder filtering.")
     else:
-        graph_filter.filter_jsonl(input_path, output_path)
+        if filter_objects:
+            graph_filter.filter_jsonl(input_path, output_path)
+        else:
+            graph_filter.normalize_jsonl(input_path, output_path)
 
 
 if __name__ == "__main__":
-    import fire
+    try:
+        import fire
+    except ModuleNotFoundError:  # pragma: no cover
+        fire = None
 
-    fire.Fire(filter_scene_graphs)
+    if fire is not None:
+        fire.Fire(filter_scene_graphs)
+    else:
+        import argparse
+
+        parser = argparse.ArgumentParser(description="Normalize/filter scene graph JSONL files.")
+        parser.add_argument("--input_path", required=True, type=str)
+        parser.add_argument("--output_path", required=True, type=str)
+        parser.add_argument("--video_folder", type=str, default=None)
+        parser.add_argument("--min_frames", type=int, default=5)
+        parser.add_argument("--min_action_frames", type=int, default=3)
+        parser.add_argument("--min_relation_frames", type=int, default=3)
+        parser.add_argument("--filter_objects", type=lambda x: str(x).lower() in {"1", "true", "yes"}, default=True)
+        args = parser.parse_args()
+
+        filter_scene_graphs(
+            input_path=args.input_path,
+            output_path=args.output_path,
+            video_folder=args.video_folder,
+            min_frames=args.min_frames,
+            min_action_frames=args.min_action_frames,
+            min_relation_frames=args.min_relation_frames,
+            filter_objects=args.filter_objects,
+        )

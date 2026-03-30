@@ -200,14 +200,6 @@ def _display_phrase(text: str) -> str:
     return _norm(str(text).replace("_", " "))
 
 
-def _make_act_token(action: str) -> str:
-    return f"act:{action}"
-
-
-def _make_rel_token(predicate: str, ref_cls: str) -> str:
-    return f"rel:{predicate}:{ref_cls}"
-
-
 def _parse_seq_token(token: str) -> Tuple[str, str, str]:
     if token.startswith("act:"):
         return "act", token[4:], ""
@@ -362,6 +354,32 @@ def _extract_relation_segments(rel: Dict[str, Any]) -> List[Tuple[int, int]]:
     return sorted(set(segments))
 
 
+def _relation_interval(rel: Dict[str, Any]) -> Tuple[int, int]:
+    start = _to_int(rel.get("start"), 0)
+    end = _to_int(rel.get("end"), start)
+    if end < start:
+        start, end = end, start
+    return start, end
+
+
+def _normalized_relation_pair(rel: Dict[str, Any]) -> Tuple[str, str]:
+    pred = _normalize_phrase(rel.get("predicate", ""), "rel")
+    ref_cls = _normalize_phrase(rel.get("ref_class", ""), "attr") or _normalize_phrase(rel.get("ref_class", ""), "rel")
+    return pred, ref_cls
+
+
+def _add_overlap_boundaries(
+    boundaries: Set[int],
+    span: Tuple[int, int],
+    full_span: Tuple[int, int],
+) -> None:
+    ov = _overlap(span, full_span)
+    if not ov:
+        return
+    boundaries.add(ov[0])
+    boundaries.add(ov[1] + 1)
+
+
 @dataclass(frozen=True)
 class CandidateMember:
     object_id: str
@@ -401,7 +419,7 @@ class AtomicClue:
     text: str
     signature: Tuple[Any, ...]
     member_indices: Tuple[int, ...]
-    time_anchor_indices: Tuple[int, ...]
+    is_temporal_evidence: bool
     chain_len: int
     cost: int = 1
 
@@ -416,17 +434,19 @@ class TemplateSpec:
     k_max: int
     q_min: int
     require_seq: int = 0
+    seq_min_chain_len: int = 0
+    seq_max_chain_len: int = 0
     min_long_seq_len: int = 0
     min_seq_chain_sum: int = 0
+    require_time_uniqueness: int = 0
     weight: float = 1.0
 
 
 @dataclass(frozen=True)
 class DifficultyWeights:
-    alpha_change: float = 1.0
-    alpha_time: float = 1.0
-    beta_same: float = 1.0
-    beta_sep: float = 1.0
+    alpha: float = 0.5
+    beta: float = 0.5
+    lambda_weight: float = 0.5
 
 
 @dataclass
@@ -480,6 +500,110 @@ def _action_target_desc_map(index: GraphIndex, member: CandidateMember) -> Dict[
                 continue
             out[action].add(_object_desc_for_action_target(index, tid))
     return out
+
+
+def _relation_target_desc_maps(
+    index: GraphIndex,
+    member: CandidateMember,
+) -> Tuple[Dict[Tuple[str, str], Set[str]], Dict[Tuple[str, str], Set[str]]]:
+    spatial: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
+    interacting: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
+    interval = (member.start, member.end)
+    for rel in index.relations_by_subj.get(member.object_id, []):
+        if not _overlap(interval, (rel["start"], rel["end"])):
+            continue
+        pred, ref_cls = _normalized_relation_pair(rel)
+        oid = str(rel.get("object_id", "")).strip()
+        if not pred or not oid or oid not in index.objects:
+            continue
+        desc = _object_desc_for_action_target(index, oid)
+        if not desc:
+            continue
+        key = (pred, ref_cls)
+        if str(rel.get("edge_type", "")).strip().lower() == "spatial":
+            spatial[key].add(desc)
+        else:
+            interacting[key].add(desc)
+    return spatial, interacting
+
+
+def _member_full_track_interval(index: GraphIndex, member: CandidateMember) -> Tuple[int, int]:
+    frames = index.frames.get(member.object_id, set())
+    if not frames:
+        return member.start, member.end
+    return min(frames), max(frames)
+
+
+def _is_local_interval(span: Tuple[int, int], full_track: Tuple[int, int]) -> bool:
+    return span[0] > full_track[0] or span[1] < full_track[1]
+
+
+def _has_local_dynamic_relation_pair(
+    index: GraphIndex,
+    member: CandidateMember,
+    pred: str,
+    ref_cls: str,
+    *,
+    require_spatial: Optional[bool],
+) -> bool:
+    full_track = _member_full_track_interval(index, member)
+    member_interval = (member.start, member.end)
+    for rel in index.relations_by_subj.get(member.object_id, []):
+        edge_type = str(rel.get("edge_type", "")).strip().lower()
+        if require_spatial is True and edge_type != "spatial":
+            continue
+        if require_spatial is False and edge_type == "spatial":
+            continue
+        rel_pred, rel_ref_cls = _normalized_relation_pair(rel)
+        if rel_pred != pred or rel_ref_cls != ref_cls:
+            continue
+        rel_interval = _relation_interval(rel)
+        ov_member = _overlap(member_interval, rel_interval)
+        if not ov_member:
+            continue
+        ov_full = _overlap(rel_interval, full_track)
+        if ov_full and _is_local_interval(ov_full, full_track):
+            return True
+    return False
+
+
+def _has_local_dynamic_action_target_pair(
+    index: GraphIndex,
+    member: CandidateMember,
+    pred: str,
+    ref_cls: str,
+) -> bool:
+    full_track = _member_full_track_interval(index, member)
+    member_interval = (member.start, member.end)
+    for item in index.actions_by_obj.get(member.object_id, []):
+        ov_member = _overlap(member_interval, (item["start"], item["end"]))
+        if not ov_member:
+            continue
+        action = _normalize_phrase(item.get("label", ""), "act")
+        if action != pred:
+            continue
+        has_target = False
+        for tid in item.get("targets", []):
+            if tid not in index.objects:
+                continue
+            tcls = _normalize_phrase(_sample_class(index.objects[tid], tid), "attr")
+            if tcls == ref_cls:
+                has_target = True
+                break
+        if not has_target:
+            continue
+        ov_full = _overlap((item["start"], item["end"]), full_track)
+        if ov_full and _is_local_interval(ov_full, full_track):
+            return True
+    return False
+
+
+def _candidate_is_full_track(index: GraphIndex, target: CandidateTarget) -> bool:
+    for member in target.members:
+        full_s, full_e = _member_full_track_interval(index, member)
+        if member.start != full_s or member.end != full_e:
+            return False
+    return True
 
 
 def build_graph_index(graph: Dict[str, Any]) -> GraphIndex:
@@ -564,15 +688,14 @@ def build_graph_index(graph: Dict[str, Any]) -> GraphIndex:
                     }
                 )
 
-    temporal_spans: List[Dict[str, int]] = []
-    for tn in graph.get("temporal_nodes") or []:
-        temporal_spans.append(
-            {
-                "clip_id": _to_int(tn.get("clip_id"), 0),
-                "start": _to_int(tn.get("start_frame"), 0),
-                "end": _to_int(tn.get("end_frame"), 0),
-            }
-        )
+    temporal_spans: List[Dict[str, int]] = [
+        {
+            "clip_id": _to_int(tn.get("clip_id"), 0),
+            "start": _to_int(tn.get("start_frame"), 0),
+            "end": _to_int(tn.get("end_frame"), 0),
+        }
+        for tn in (graph.get("temporal_nodes") or [])
+    ]
 
     return GraphIndex(
         objects=objects,
@@ -600,23 +723,13 @@ def build_candidate_intervals(
         full_s, full_e = min(obj_frames), max(obj_frames)
         boundaries: Set[int] = {full_s, full_e + 1}
 
+        full_span = (full_s, full_e)
         for item in index.actions_by_obj.get(object_id, []):
-            ov = _overlap((item["start"], item["end"]), (full_s, full_e))
-            if ov:
-                boundaries.add(ov[0])
-                boundaries.add(ov[1] + 1)
-
+            _add_overlap_boundaries(boundaries, (item["start"], item["end"]), full_span)
         for rel in index.relations_by_subj.get(object_id, []):
-            ov = _overlap((rel["start"], rel["end"]), (full_s, full_e))
-            if ov:
-                boundaries.add(ov[0])
-                boundaries.add(ov[1] + 1)
-
+            _add_overlap_boundaries(boundaries, (rel["start"], rel["end"]), full_span)
         for tn in index.temporal_spans:
-            ov = _overlap((tn["start"], tn["end"]), (full_s, full_e))
-            if ov:
-                boundaries.add(ov[0])
-                boundaries.add(ov[1] + 1)
+            _add_overlap_boundaries(boundaries, (tn["start"], tn["end"]), full_span)
 
         intervals: Set[Tuple[int, int]] = set()
         if include_full_track and full_e - full_s + 1 >= min_interval_len:
@@ -647,7 +760,11 @@ def build_candidate_intervals(
                 CandidateTarget(
                     candidate_id=f"{object_id}@{s}-{e}",
                     members=[CandidateMember(object_id=object_id, start=s, end=e)],
-                    meta={"object_id": object_id, "target_class": _sample_class(obj, object_id)},
+                    meta={
+                        "object_id": object_id,
+                        "target_class": _sample_class(obj, object_id),
+                        "is_full_track_interval": int(s == full_s and e == full_e),
+                    },
                 )
             )
 
@@ -731,9 +848,9 @@ def _profile_for_candidate(index: GraphIndex, candidate: CandidateTarget, max_ch
         spa.append(spa_set)
         inter.append(int_set)
 
-        action_events_for_chain = [(a["start"], a["end"], _make_act_token(a["label"])) for a in act_events]
+        action_events_for_chain = [(a["start"], a["end"], f"act:{a['label']}") for a in act_events]
         relation_events_for_chain = [
-            (r["start"], r["end"], _make_rel_token(r["predicate"], r["ref_class"]))
+            (r["start"], r["end"], f"rel:{r['predicate']}:{r['ref_class']}")
             for r in rel_events
         ]
         act_chains = _enumerate_ordered_chains(action_events_for_chain, max_chain_len=max_chain_len)
@@ -769,7 +886,7 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
         text: str,
         signature: Tuple[Any, ...],
         member_indices: Tuple[int, ...],
-        time_anchor_indices: Tuple[int, ...],
+        is_temporal_evidence: bool,
         chain_len: int,
     ) -> None:
         if signature in seen:
@@ -782,7 +899,7 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
                 text=text,
                 signature=signature,
                 member_indices=member_indices,
-                time_anchor_indices=time_anchor_indices,
+                is_temporal_evidence=is_temporal_evidence,
                 chain_len=chain_len,
                 cost=1,
             )
@@ -791,13 +908,15 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
     for k in range(profile.arity):
         cls = profile.classes[k]
         member = candidate.members[k]
+        member_idx = (k,)
         action_target_descs = _action_target_desc_map(index, member)
+        spa_target_descs, int_target_descs = _relation_target_desc_maps(index, member)
         add(
             "cls",
             f"the {cls}",
             ("cls", k, cls),
-            (k,),
-            tuple(),
+            member_idx,
+            False,
             0,
         )
 
@@ -806,8 +925,8 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
                 "app",
                 f"with {attr}",
                 ("app", k, attr),
-                (k,),
-                tuple(),
+                member_idx,
+                False,
                 0,
             )
 
@@ -816,8 +935,8 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
                 "env",
                 f"that is {phrase}",
                 ("env", "general", k, phrase),
-                (k,),
-                tuple(),
+                member_idx,
+                False,
                 0,
             )
 
@@ -827,8 +946,8 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
                 "env",
                 f"during temporal segment {clip_id}",
                 ("env", "temporal", k, tag),
-                (k,),
-                (k,),
+                member_idx,
+                True,
                 0,
             )
 
@@ -846,8 +965,8 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
                 "act",
                 action_text,
                 ("act", k, action),
-                (k,),
-                (k,),
+                member_idx,
+                True,
                 1,
             )
 
@@ -859,28 +978,59 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
                 "seq",
                 f"that {chain_text}",
                 ("seq", k, *chain),
-                (k,),
-                (k,),
+                member_idx,
+                True,
                 len(chain),
             )
 
         for pred, ref_cls in sorted(profile.spa[k]):
+            target_descs = sorted(spa_target_descs.get((pred, ref_cls), set()))
+            if target_descs:
+                spa_text = f"that is {pred} {target_descs[0]}"
+            else:
+                spa_text = f"that is {pred} the {ref_cls}"
+            spa_temporal = _has_local_dynamic_relation_pair(
+                index,
+                member,
+                pred,
+                ref_cls,
+                require_spatial=True,
+            )
             add(
                 "spa",
-                f"that is {pred} the {ref_cls}",
+                spa_text,
                 ("spa", k, pred, ref_cls),
-                (k,),
-                (k,),
+                member_idx,
+                spa_temporal,
                 0,
             )
 
         for pred, ref_cls in sorted(profile.inter[k]):
+            target_descs = sorted(int_target_descs.get((pred, ref_cls), set()))
+            if not target_descs:
+                target_descs = sorted(action_target_descs.get(pred, set()))
+            if target_descs:
+                int_text = f"that {pred} {target_descs[0]}"
+            else:
+                int_text = f"that {pred} the {ref_cls}"
+            int_temporal = _has_local_dynamic_relation_pair(
+                index,
+                member,
+                pred,
+                ref_cls,
+                require_spatial=False,
+            ) or _has_local_dynamic_action_target_pair(
+                index,
+                member,
+                pred,
+                ref_cls,
+            )
             add(
                 "int",
-                f"that {pred} the {ref_cls}",
+                int_text,
                 ("int", k, pred, ref_cls),
-                (k,),
-                (k,),
+                member_idx,
+                int_temporal,
                 1,
             )
 
@@ -923,24 +1073,32 @@ def build_exclusion_matrix(
     all_candidates: List[CandidateTarget],
     clues: List[AtomicClue],
     profile_map: Dict[str, CandidateProfile],
-) -> Tuple[List[CandidateTarget], List[List[int]]]:
+) -> Tuple[List[CandidateTarget], List[List[int]], List[List[int]]]:
     others = [c for c in all_candidates if c.candidate_id != target.candidate_id and c.arity == target.arity]
-    rows: List[List[int]] = []
+    target_obj_sig = tuple(m.object_id for m in target.members)
+    object_rows: List[List[int]] = []
+    time_rows: List[List[int]] = []
     for cand in others:
         prof = profile_map[cand.candidate_id]
         row = []
         for clue in clues:
             p = 1 if _clue_satisfied(prof, clue) else 0
             row.append(1 - p)
-        rows.append(row)
-    return others, rows
+        cand_obj_sig = tuple(m.object_id for m in cand.members)
+        if cand_obj_sig == target_obj_sig:
+            time_rows.append(row)
+        else:
+            object_rows.append(row)
+    return others, object_rows, time_rows
 
 
 def solve_query_cpsat(
     target: CandidateTarget,
     template: TemplateSpec,
     clues: List[AtomicClue],
-    exclusion_matrix: List[List[int]],
+    object_exclusion_matrix: List[List[int]],
+    time_exclusion_matrix: List[List[int]],
+    require_local_time_evidence: bool = False,
     time_limit_sec: float = 2.0,
 ) -> Optional[Dict[str, Any]]:
     if cp_model is None:
@@ -949,16 +1107,12 @@ def solve_query_cpsat(
     model = cp_model.CpModel()
     x = [model.NewBoolVar(f"x_{j}") for j in range(len(clues))]
 
-    for row in exclusion_matrix:
+    for row in object_exclusion_matrix:
         model.Add(sum(row[j] * x[j] for j in range(len(clues))) >= 1)
 
-    for k in range(target.arity):
-        model.Add(
-            sum(x[j] for j, clue in enumerate(clues) if k in clue.member_indices) >= 1
-        )
-        model.Add(
-            sum(x[j] for j, clue in enumerate(clues) if k in clue.time_anchor_indices) >= 1
-        )
+    if template.require_time_uniqueness:
+        for row in time_exclusion_matrix:
+            model.Add(sum(row[j] * x[j] for j in range(len(clues))) >= 1)
 
     for c in CLUE_TYPES:
         idx = [j for j, clue in enumerate(clues) if clue.clue_type == c]
@@ -968,18 +1122,32 @@ def solve_query_cpsat(
         elif template.type_min.get(c, 0) > 0:
             return None
 
+    if require_local_time_evidence:
+        temporal_idx = [j for j, clue in enumerate(clues) if clue.is_temporal_evidence]
+        if not temporal_idx:
+            return None
+        model.Add(sum(x[j] for j in temporal_idx) >= 1)
+
     model.Add(sum(x) >= int(template.k_min))
     model.Add(sum(x) <= int(template.k_max))
 
     model.Add(sum(clue.chain_len * x[j] for j, clue in enumerate(clues)) >= int(template.q_min))
 
-    if template.require_seq:
-        seq_idx = [j for j, clue in enumerate(clues) if clue.clue_type == "seq"]
-        if not seq_idx:
-            return None
-        model.Add(sum(x[j] for j in seq_idx) >= int(template.require_seq))
-
     seq_idx = [j for j, clue in enumerate(clues) if clue.clue_type == "seq"]
+    seq_min_len = int(template.seq_min_chain_len)
+    seq_max_len = int(template.seq_max_chain_len)
+    seq_required_idx = [
+        j
+        for j in seq_idx
+        if (seq_min_len <= 0 or clues[j].chain_len >= seq_min_len)
+        and (seq_max_len <= 0 or clues[j].chain_len <= seq_max_len)
+    ]
+
+    if template.require_seq:
+        if not seq_required_idx:
+            return None
+        model.Add(sum(x[j] for j in seq_required_idx) >= int(template.require_seq))
+
     if template.min_long_seq_len > 0 or template.min_seq_chain_sum > 0:
         if not seq_idx:
             return None
@@ -1033,6 +1201,7 @@ def _build_default_templates() -> List[TemplateSpec]:
             k_max=3,
             q_min=0,
             require_seq=0,
+            require_time_uniqueness=0,
             weight=1.0,
         ),
         TemplateSpec(
@@ -1044,28 +1213,63 @@ def _build_default_templates() -> List[TemplateSpec]:
             k_max=3,
             q_min=1,
             require_seq=0,
+            require_time_uniqueness=0,
             weight=1.0,
         ),
         TemplateSpec(
-            name="medium_act_spa_combo",
+            name="medium_short_seq",
             bucket="medium",
-            type_min={"act": 1, "spa": 1},
-            type_max={"cls": 1, "app": 2, "act": 2, "seq": 1, "spa": 2, "env": inf, "int": 1},
-            k_min=3,
-            k_max=5,
+            type_min={"seq": 1},
+            type_max={"cls": 1, "app": 1, "act": 1, "seq": 1, "spa": 1, "env": inf, "int": 1},
+            k_min=1,
+            k_max=2,
             q_min=2,
-            require_seq=0,
+            require_seq=1,
+            seq_min_chain_len=2,
+            seq_max_chain_len=2,
+            require_time_uniqueness=1,
             weight=1.0,
         ),
         TemplateSpec(
-            name="medium_act_int_combo",
+            name="medium_short_seq_app",
             bucket="medium",
-            type_min={"act": 1, "int": 1},
-            type_max={"cls": 1, "app": 2, "act": 2, "seq": 1, "spa": 1, "env": inf, "int": 2},
-            k_min=3,
-            k_max=5,
+            type_min={"seq": 1, "app": 1},
+            type_max={"cls": 1, "app": 2, "act": 1, "seq": 1, "spa": 1, "env": inf, "int": 1},
+            k_min=2,
+            k_max=3,
             q_min=2,
-            require_seq=0,
+            require_seq=1,
+            seq_min_chain_len=2,
+            seq_max_chain_len=2,
+            require_time_uniqueness=1,
+            weight=1.0,
+        ),
+        TemplateSpec(
+            name="medium_short_seq_spa",
+            bucket="medium",
+            type_min={"seq": 1, "spa": 1},
+            type_max={"cls": 1, "app": 1, "act": 1, "seq": 1, "spa": 2, "env": inf, "int": 1},
+            k_min=2,
+            k_max=3,
+            q_min=2,
+            require_seq=1,
+            seq_min_chain_len=2,
+            seq_max_chain_len=2,
+            require_time_uniqueness=1,
+            weight=1.0,
+        ),
+        TemplateSpec(
+            name="medium_short_seq_int",
+            bucket="medium",
+            type_min={"seq": 1, "int": 1},
+            type_max={"cls": 1, "app": 1, "act": 1, "seq": 1, "spa": 1, "env": inf, "int": 2},
+            k_min=2,
+            k_max=4,
+            q_min=2,
+            require_seq=1,
+            seq_min_chain_len=2,
+            seq_max_chain_len=2,
+            require_time_uniqueness=1,
             weight=1.0,
         ),
         TemplateSpec(
@@ -1077,8 +1281,10 @@ def _build_default_templates() -> List[TemplateSpec]:
             k_max=7,
             q_min=5,
             require_seq=1,
+            seq_min_chain_len=3,
             min_long_seq_len=3,
-            min_seq_chain_sum=5,
+            min_seq_chain_sum=7,
+            require_time_uniqueness=1,
             weight=1.0,
         ),
         TemplateSpec(
@@ -1090,26 +1296,13 @@ def _build_default_templates() -> List[TemplateSpec]:
             k_max=8,
             q_min=6,
             require_seq=1,
+            seq_min_chain_len=3,
             min_long_seq_len=3,
-            min_seq_chain_sum=6,
+            min_seq_chain_sum=8,
+            require_time_uniqueness=1,
             weight=1.0,
         ),
     ]
-
-
-def _quantile(sorted_values: List[float], q: float) -> float:
-    if not sorted_values:
-        return 0.0
-    if len(sorted_values) == 1:
-        return sorted_values[0]
-    q = min(max(q, 0.0), 1.0)
-    idx = q * (len(sorted_values) - 1)
-    lo = int(math.floor(idx))
-    hi = int(math.ceil(idx))
-    if lo == hi:
-        return sorted_values[lo]
-    frac = idx - lo
-    return sorted_values[lo] * (1.0 - frac) + sorted_values[hi] * frac
 
 
 def _compute_candidate_difficulty(
@@ -1143,7 +1336,6 @@ def _compute_candidate_difficulty(
 
         n_time += sum(1 for tn in index.temporal_spans if _overlap(cur, (tn["start"], tn["end"])))
 
-        same_ids = []
         for other_id, other_obj in index.objects.items():
             if other_id == obj_id:
                 continue
@@ -1153,33 +1345,69 @@ def _compute_candidate_difficulty(
             ov = _overlap(cur, other_range)
             if not ov:
                 continue
-            same_ids.append((other_id, other_range))
-        n_same += len(same_ids)
-        for _, other_range in same_ids:
+            n_same += 1
             tiou_vals.append(_interval_tiou(cur, other_range))
 
     avg_tiou = (sum(tiou_vals) / len(tiou_vals)) if tiou_vals else 0.0
 
-    D_t = weights.alpha_change * n_change + weights.alpha_time * n_time
-    D_s = weights.beta_same * n_same + weights.beta_sep * avg_tiou
-    D = D_t + D_s
+    alpha = min(max(float(weights.alpha), 0.0), 1.0)
+    beta = min(max(float(weights.beta), 0.0), 1.0)
+    lambda_weight = min(max(float(weights.lambda_weight), 0.0), 1.0)
+
+    D_t = alpha * (n_change / (1.0 + n_change)) + (1.0 - alpha) * (n_time / (1.0 + n_time))
+    D_s = beta * (n_same / (1.0 + n_same)) + (1.0 - beta) * avg_tiou
+    D = lambda_weight * D_t + (1.0 - lambda_weight) * D_s
 
     return D_t, D_s, D, {
         "n_change": n_change,
         "n_time": n_time,
         "n_same": n_same,
         "avg_tiou": avg_tiou,
+        "alpha": alpha,
+        "beta": beta,
+        "lambda_weight": lambda_weight,
     }
 
 
 def _assign_buckets(candidates: List[CandidateTarget]) -> None:
-    scores = sorted(c.difficulty for c in candidates)
-    t1 = _quantile(scores, 0.33)
-    t2 = _quantile(scores, 0.66)
-    for c in candidates:
-        if c.difficulty <= t1:
+    if not candidates:
+        return
+    ordered = sorted(candidates, key=lambda c: (c.difficulty, c.interval[1] - c.interval[0] + 1))
+    n = len(ordered)
+    ratios = {"easy": 0.30, "medium": 0.45, "hard": 0.25}
+
+    raw_counts = {k: ratios[k] * n for k in ratios}
+    counts = {k: int(math.floor(raw_counts[k])) for k in ratios}
+    remain = n - sum(counts.values())
+    for k in sorted(ratios.keys(), key=lambda x: raw_counts[x] - counts[x], reverse=True):
+        if remain <= 0:
+            break
+        counts[k] += 1
+        remain -= 1
+
+    if n >= 3:
+        if counts["medium"] == 0:
+            donor = "easy" if counts["easy"] > counts["hard"] else "hard"
+            if counts[donor] > 1:
+                counts[donor] -= 1
+                counts["medium"] += 1
+        if counts["easy"] == 0:
+            donor = "medium" if counts["medium"] > counts["hard"] else "hard"
+            if counts[donor] > 1:
+                counts[donor] -= 1
+                counts["easy"] += 1
+        if counts["hard"] == 0:
+            donor = "medium" if counts["medium"] > counts["easy"] else "easy"
+            if counts[donor] > 1:
+                counts[donor] -= 1
+                counts["hard"] += 1
+
+    easy_end = counts["easy"]
+    medium_end = counts["easy"] + counts["medium"]
+    for i, c in enumerate(ordered):
+        if i < easy_end:
             c.difficulty_bucket = "easy"
-        elif c.difficulty <= t2:
+        elif i < medium_end:
             c.difficulty_bucket = "medium"
         else:
             c.difficulty_bucket = "hard"
@@ -1309,12 +1537,14 @@ class CPSATQuerySampler:
         if not clues:
             return None
 
-        _, E = build_exclusion_matrix(candidate, all_candidates, clues, profile_map)
+        _, object_E, time_E = build_exclusion_matrix(candidate, all_candidates, clues, profile_map)
         solved = solve_query_cpsat(
             target=candidate,
             template=template,
             clues=clues,
-            exclusion_matrix=E,
+            object_exclusion_matrix=object_E,
+            time_exclusion_matrix=time_E,
+            require_local_time_evidence=not _candidate_is_full_track(self._index, candidate),
             time_limit_sec=self.time_limit_sec,
         )
         if not solved:
@@ -1440,7 +1670,7 @@ class CPSATQuerySampler:
                             "type": c.clue_type,
                             "text": c.text,
                             "chain_len": c.chain_len,
-                            "time_anchor_indices": list(c.time_anchor_indices),
+                            "is_temporal_evidence": c.is_temporal_evidence,
                         }
                         for c in picked["selected_clues"]
                     ],
@@ -1551,10 +1781,9 @@ def main(
     max_queries_per_candidate: int = 1,
     time_limit_sec: float = 2.0,
     seed: int = 7,
-    alpha_change: float = 1.0,
-    alpha_time: float = 1.0,
-    beta_same: float = 1.0,
-    beta_sep: float = 1.0,
+    alpha: float = 0.5,
+    beta: float = 0.5,
+    lambda_weight: float = 0.5,
 ) -> None:
     sampler = CPSATQuerySampler(
         min_interval_len=min_interval_len,
@@ -1565,10 +1794,9 @@ def main(
         time_limit_sec=time_limit_sec,
         seed=seed,
         weights=DifficultyWeights(
-            alpha_change=alpha_change,
-            alpha_time=alpha_time,
-            beta_same=beta_same,
-            beta_sep=beta_sep,
+            alpha=alpha,
+            beta=beta,
+            lambda_weight=lambda_weight,
         ),
     )
     sampler.process_jsonl(input_path=input_path, output_path=output_path)
