@@ -28,6 +28,7 @@ from mmaction.utils import get_str_type
 
 
 HUMAN_CLASSES = {"person", "man", "woman", "boy", "girl", "people"}
+SKIP_ACTION_LABELS = {"watch (a person)", "listen to (a person)"}
 
 
 @dataclass
@@ -80,11 +81,15 @@ class VideoMAEActionDetector:
         self.img_norm_cfg = self._read_img_norm_cfg()
 
     def _read_clip_params(self) -> Tuple[int, int]:
+        # Keep clip length fixed to 16 for this VideoMAE checkpoint.
+        pipeline_interval = 4
         val_pipeline = self.cfg.get("val_pipeline", None) or self.cfg.get("test_pipeline", [])
         for step in val_pipeline:
             if get_str_type(step.get("type")) == "SampleAVAFrames":
-                return int(step.get("clip_len", 16)), int(step.get("frame_interval", 4))
-        return 16, 4
+                pipeline_interval = int(step.get("frame_interval", 4))
+                break
+
+        return 16, pipeline_interval
 
     def _read_img_norm_cfg(self) -> Dict[str, object]:
         pre = self.cfg.get("model", {}).get("data_preprocessor", {})
@@ -201,6 +206,8 @@ class VideoMAEActionDetector:
                 continue  # background class
 
             label = self.label_map.get(int(cls_idx), str(int(cls_idx)))
+            if _should_skip_action_label(label):
+                continue
             out.append((label, score))
             if topk > 0 and len(out) >= topk:
                 break
@@ -264,6 +271,10 @@ def _is_human_object(obj_node: Dict) -> bool:
     if cls in HUMAN_CLASSES:
         return True
     return "person" in cls
+
+
+def _should_skip_action_label(label: str) -> bool:
+    return label.strip().lower() in SKIP_ACTION_LABELS
 
 
 def _aggregate_action_segments(

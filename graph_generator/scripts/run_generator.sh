@@ -30,14 +30,14 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #   --model_path /home/wangxingjian/model/DAM-3B-Video
 
 # source /home/wangxingjian/DORO-STVG/graph_generator/.venv/mmaction/bin/activate
-# export PYTHONPATH="/home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2:${PYTHONPATH}"
-# python -m modules.action_detector \
-#   --config /home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2/configs/detection/videomae/vit-large-p16_videomae-k400-pre_8xb8-16x4x1-20e-adamw_ava-kinetics-rgb.py \
-#   --checkpoint /home/wangxingjian/model/vit-large-p16_videomae-k400-pre.pth \
-#   --label-map /home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2/tools/data/ava/label_map.txt \
-#   --frame_interval 1 \
-#   --jsonl /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
-#   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
+export PYTHONPATH="/home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2:${PYTHONPATH}"
+python -m modules.action_detector \
+  --config /home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2/configs/detection/videomae/vit-large-p16_videomae-k400-pre_8xb8-16x4x1-20e-adamw_ava-kinetics-rgb.py \
+  --checkpoint /home/wangxingjian/model/vit-large-p16_videomae-k400-pre.pth \
+  --label-map /home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2/tools/data/ava/label_map.txt \
+  --frame_interval 1 \
+  --jsonl /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
+  --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
 
 # python -m modules.relation_generator \
 #   --jsonl /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
@@ -71,12 +71,12 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #   --model_name=gpt-5.4-nano-2026-03-17
 
 # cd /Users/themaoqiu/CodeRepo/DORO-STVG
-python -m modules.query_generator_cpsat \
-  --input_path /Users/themaoqiu/CodeRepo/DORO-STVG/graph_generator/scene_graphs.jsonl \
-  --output_path /Users/themaoqiu/CodeRepo/DORO-STVG/graph_generator/output/query.jsonl \
-  --queries_per_graph 12 \
-  --time_limit_sec 2.0 \
-  --seed 7
+# python -m modules.query_generator_cpsat \
+#   --input_path /Users/themaoqiu/CodeRepo/DORO-STVG/graph_generator/scene_graphs.jsonl \
+#   --output_path /Users/themaoqiu/CodeRepo/DORO-STVG/graph_generator/output/query.jsonl \
+#   --queries_per_graph 12 \
+#   --time_limit_sec 2.0 \
+#   --seed 7
 
 
 # full command
