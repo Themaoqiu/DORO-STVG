@@ -168,7 +168,7 @@ def process_video(
     annotation_color: Tuple[int, int, int] = (255, 0, 0),
     annotation_font_path: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any]]:
-    
+    # Keep this branch for backward compatibility if annotation is explicitly requested.
     if annotate_frames:
         os.makedirs(output_folder, exist_ok=True)
         base_name = os.path.splitext(os.path.basename(video_path))[0]
@@ -231,14 +231,15 @@ def process_video(
         fps = cap.get(cv2.CAP_PROP_FPS)
         cap.release()
         
-        frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int).tolist()
+        # Use all original frames directly.
+        frame_indices = list(range(total_frames))
         frame_times = [idx / fps for idx in frame_indices]
         
         video_metadata = {
             'fps': fps,
             'frames_indices': frame_indices,
             'total_num_frames': total_frames,
-            'num_frames_sampled': num_frames,
+            'num_frames_sampled': len(frame_indices),
             'frame_times': frame_times,
             'video_duration': (total_frames - 1) / fps,
         }

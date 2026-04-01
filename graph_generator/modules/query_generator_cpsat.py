@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
+import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import fire
 
 from ortools.sat.python import cp_model
+from api_sync.api import StreamGenerator
+from api_sync.utils.parser import JSONParser
 
 
 CLUE_TYPES = ("cls", "app", "act", "seq", "spa", "env", "int")
@@ -38,6 +42,70 @@ DECORATION_POOL: Dict[str, Tuple[str, ...]] = {
         "as the referred instance",
     ),
 }
+
+QUERY_POLISH_SYSTEM_PROMPT = """## Role
+You are a precise Query Rewriter for spatiotemporal video grounding. Your task is
+to polish a machine-generated query into natural, concise English while preserving
+all grounding semantics.
+## Core Principle
+- Preserve semantics exactly. Do not add, remove, or alter target identity clues.
+- Keep temporal meaning faithful to the original clue set.
+- Use clear and fluent wording suitable for human annotation.
+## Clue Roles (must be respected)
+- cls: target class anchor, defines the object category to locate.
+- app: appearance cue, disambiguates by visual attributes.
+- env: context cue, describes scene/environment or temporal segment.
+- act: action cue, provides dynamic behavior evidence.
+- seq: sequence cue, constrains event order and temporal progression.
+- spa: spatial relation cue, constrains geometric/positional relation.
+- int: interaction cue, constrains interaction with another object.
+## Output Rule
+Return strict JSON only:
+{
+  "query": "<polished query>"
+}
+"""
+
+QUERY_POLISH_PROMPT_TEMPLATE = """## Task Context
+- You are given a CPSAT-generated grounding query and its explicit clue list.
+- You must rewrite the query to be fluent, concise, and unambiguous.
+- You must preserve every effective clue signal; no hallucinated details.
+## Input Format
+- raw_query: the generated query string before polishing.
+- core_query: the core clue composition before optional decorations.
+- target_interval: [start_frame, end_frame] of the target instance.
+- template: CPSAT template name and difficulty bucket.
+- clue_lines: each clue with type and role.
+## Inputs
+raw_query:
+{raw_query}
+
+core_query:
+{core_query}
+
+target_interval:
+{target_interval}
+
+template:
+{template_name} (difficulty={difficulty_bucket})
+
+clue_lines:
+{clue_lines}
+## Guidelines
+- Keep the subject identity and all discriminative clues consistent.
+- Prefer compact natural expressions; avoid redundancy and awkward conjunction chains.
+- Temporal clues (env temporal / act / seq) should remain temporally meaningful.
+- If clues conflict in wording, prioritize literal clue content over stylistic rewrite.
+- Do not introduce frame indices or numeric timestamps unless already required by clues.
+## Output Format
+Return one valid JSON object:
+{{
+  "query": "..."
+}}
+## Output Specifications
+- Output strict JSON only.
+- "query" must be non-empty and in English.
+"""
 
 
 def _norm(text: Any) -> str:
@@ -279,6 +347,106 @@ def _uniq(values: Iterable[Any]) -> List[str]:
         seen.add(k)
         out.append(s)
     return out
+
+
+def _normalize_api_keys(api_keys: Optional[Union[str, Iterable[str]]]) -> List[str]:
+    if isinstance(api_keys, str):
+        return [key.strip() for key in api_keys.split(",") if key.strip()]
+    if api_keys is None:
+        return []
+    return [str(key).strip() for key in api_keys if str(key).strip()]
+
+
+def _load_api_keys_from_project_env() -> str:
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if not env_path.exists():
+        return ""
+    with env_path.open("r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() != "API_KEYS":
+                continue
+            return value.strip().strip('"').strip("'")
+    return ""
+
+
+def _load_env_var_from_project_env(var_name: str) -> str:
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if not env_path.exists():
+        return ""
+    with env_path.open("r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() != var_name:
+                continue
+            return value.strip().strip('"').strip("'")
+    return ""
+
+
+def _resolve_api_keys(api_keys: Optional[Union[str, Iterable[str]]]) -> List[str]:
+    if api_keys is None:
+        api_keys = os.getenv("API_KEYS", "")
+    keys = _normalize_api_keys(api_keys)
+    if keys:
+        return keys
+    return _normalize_api_keys(_load_api_keys_from_project_env())
+
+
+def _resolve_api_base_url() -> str:
+    return (
+        os.getenv("MM_API_BASE_URL", "").strip()
+        or os.getenv("VISION_API_BASE_URL", "").strip()
+        or os.getenv("VIDEO_API_BASE_URL", "").strip()
+        or _load_env_var_from_project_env("MM_API_BASE_URL")
+        or _load_env_var_from_project_env("VISION_API_BASE_URL")
+        or _load_env_var_from_project_env("VIDEO_API_BASE_URL")
+    )
+
+
+def _extract_polished_query(response: str) -> Optional[str]:
+    parsed = JSONParser.parse(response)
+    if not isinstance(parsed, dict):
+        return None
+    query = parsed.get("query")
+    if not isinstance(query, str):
+        return None
+    query = _norm(query)
+    return query if query else None
+
+
+def _clue_role_text(clue_type: str) -> str:
+    role_map = {
+        "cls": "class anchor: define object category",
+        "app": "appearance cue: visual attribute disambiguation",
+        "env": "context cue: scene or temporal-segment grounding",
+        "act": "action cue: dynamic behavior evidence",
+        "seq": "sequence cue: temporal order constraint",
+        "spa": "spatial cue: geometric/positional constraint",
+        "int": "interaction cue: relational interaction constraint",
+    }
+    return role_map.get(str(clue_type), "generic grounding cue")
+
+
+def _format_clue_lines(clues: List[Dict[str, Any]]) -> str:
+    if not clues:
+        return "- (none)"
+    lines: List[str] = []
+    for i, clue in enumerate(clues, start=1):
+        ctype = str(clue.get("type", "")).strip().lower() or "unknown"
+        text = _norm(clue.get("text", ""))
+        chain_len = _to_int(clue.get("chain_len"), 0)
+        temporal = bool(clue.get("is_temporal_evidence", False))
+        lines.append(
+            f"- {i}. type={ctype}; role={_clue_role_text(ctype)}; temporal_evidence={int(temporal)}; "
+            f"chain_len={chain_len}; clue=\"{text}\""
+        )
+    return "\n".join(lines)
 
 
 def _sample_class(obj: Dict[str, Any], node_id: str) -> str:
@@ -1465,6 +1633,13 @@ def decorate_query(core_clues: List[AtomicClue], profile: CandidateProfile) -> T
     return _norm(", " + "; ".join(decorations)), decorations
 
 
+def _query_core_from_clues(core_clues: List[AtomicClue]) -> str:
+    parts = [_norm(c.text) for c in core_clues if _norm(c.text)]
+    if not parts:
+        return ""
+    return "，".join(parts)
+
+
 class CPSATQuerySampler:
     def __init__(
         self,
@@ -1552,7 +1727,7 @@ class CPSATQuerySampler:
 
         selected = [clues[i] for i in solved["selected_indices"]]
         profile = profile_map[candidate.candidate_id]
-        core_query = _render_query(profile, selected)
+        core_query = _query_core_from_clues(selected) or _render_query(profile, selected)
         suffix, decorations = decorate_query(selected, profile)
         query = _norm(core_query + suffix)
 
@@ -1680,6 +1855,80 @@ class CPSATQuerySampler:
 
         return results
 
+    async def polish_queries_with_llm(
+        self,
+        query_nodes: List[Dict[str, Any]],
+        model_name: str,
+        api_keys: Optional[Union[str, Iterable[str]]],
+        max_concurrent_per_key: int = 100,
+        max_retries: int = 5,
+        system_prompt: str = QUERY_POLISH_SYSTEM_PROMPT,
+    ) -> Dict[str, str]:
+        if not query_nodes:
+            return {}
+
+        keys = _resolve_api_keys(api_keys)
+        if not keys:
+            raise ValueError("API_KEYS is required when use_llm_polish=True (set env/.env or pass --api_keys).")
+
+        # Align with other API modules: read base URL from env/.env chain.
+        api_base_url = _resolve_api_base_url()
+        if api_base_url:
+            os.environ.setdefault("MM_API_BASE_URL", api_base_url)
+
+        generator = StreamGenerator(
+            model_name=model_name,
+            api_keys=keys,
+            max_concurrent_per_key=max_concurrent_per_key,
+            max_retries=max_retries,
+            rational=False,
+            with_unique_id=True,
+        )
+
+        prompts: List[Dict[str, Any]] = []
+        for idx, node in enumerate(query_nodes):
+            query_id = str(node.get("query_id", f"cpsat_{idx}"))
+            target = node.get("target") or {}
+            members = target.get("members") or []
+            if members:
+                first = members[0]
+                s = _to_int(first.get("start_frame"), 0)
+                e = _to_int(first.get("end_frame"), s)
+                if e < s:
+                    s, e = e, s
+                target_interval = f"[{s}, {e}]"
+            else:
+                target_interval = "[unknown, unknown]"
+
+            prompt_text = QUERY_POLISH_PROMPT_TEMPLATE.format(
+                raw_query=_norm(node.get("query", "")),
+                core_query=_norm(node.get("query_core", "")),
+                target_interval=target_interval,
+                template_name=_norm(node.get("template", "unknown")),
+                difficulty_bucket=_norm(node.get("difficulty_bucket", "unknown")),
+                clue_lines=_format_clue_lines(node.get("clues") or []),
+            )
+            prompts.append({"id": query_id, "prompt": prompt_text})
+
+        print(
+            f"[query_cpsat] llm_polish_start: model={model_name} prompts={len(prompts)} keys={len(keys)} "
+            f"base_url={'set' if api_base_url else 'default'}",
+            flush=True,
+        )
+        polished_map: Dict[str, str] = {}
+        completed = 0
+        async for item in generator.generate_stream(
+            prompts=prompts,
+            system_prompt=system_prompt,
+            validate_func=lambda resp: polished if (polished := _extract_polished_query(resp)) is not None else False,
+        ):
+            if item and isinstance(item.get("result"), str) and item["result"].strip():
+                polished_map[str(item["id"])] = _norm(item["result"])
+                completed += 1
+                print(f"[query_cpsat] llm_polish_progress: {completed}/{len(prompts)}", flush=True)
+        print(f"[query_cpsat] llm_polish_done: polished={len(polished_map)}", flush=True)
+        return polished_map
+
     def _build_minimal_records(self, graph: Dict[str, Any], query_nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         objects = {
             str(obj.get("node_id")): obj
@@ -1718,6 +1967,7 @@ class CPSATQuerySampler:
                     "video_path": graph.get("video_path"),
                     "query_id": q.get("query_id"),
                     "query": q.get("query"),
+                    "llm_polished": q.get("llm_polished", False),
                     "query_core": q.get("query_core"),
                     "query_decorations": q.get("query_decorations", []),
                     "template": q.get("template"),
@@ -1736,7 +1986,16 @@ class CPSATQuerySampler:
             )
         return records
 
-    def process_jsonl(self, input_path: str, output_path: str) -> None:
+    def process_jsonl(
+        self,
+        input_path: str,
+        output_path: str,
+        use_llm_polish: bool = False,
+        polish_model_name: str = "gpt-4.1-mini",
+        api_keys: Optional[Union[str, Iterable[str]]] = None,
+        max_concurrent_per_key: int = 100,
+        max_retries: int = 5,
+    ) -> None:
         global RELATION_SYNONYMS, ATTRIBUTE_SYNONYMS
         in_path = Path(input_path)
         out_path = Path(output_path)
@@ -1762,6 +2021,24 @@ class CPSATQuerySampler:
                     continue
                 graph = json.loads(line)
                 query_nodes = self.generate_for_graph(graph)
+                if use_llm_polish and query_nodes:
+                    polished_map = asyncio.run(
+                        self.polish_queries_with_llm(
+                            query_nodes=query_nodes,
+                            model_name=polish_model_name,
+                            api_keys=api_keys,
+                            max_concurrent_per_key=max_concurrent_per_key,
+                            max_retries=max_retries,
+                        )
+                    )
+                    for q in query_nodes:
+                        qid = str(q.get("query_id", ""))
+                        polished = polished_map.get(qid)
+                        if polished:
+                            q["query"] = polished
+                            q["llm_polished"] = True
+                        else:
+                            q["llm_polished"] = False
                 records = self._build_minimal_records(graph, query_nodes)
                 for record in records:
                     fout.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -1784,6 +2061,11 @@ def main(
     alpha: float = 0.5,
     beta: float = 0.5,
     lambda_weight: float = 0.5,
+    use_llm_polish: bool = False,
+    polish_model_name: str = "gpt-4.1-mini",
+    api_keys: Optional[Union[str, Iterable[str]]] = None,
+    max_concurrent_per_key: int = 100,
+    max_retries: int = 5,
 ) -> None:
     sampler = CPSATQuerySampler(
         min_interval_len=min_interval_len,
@@ -1799,7 +2081,15 @@ def main(
             lambda_weight=lambda_weight,
         ),
     )
-    sampler.process_jsonl(input_path=input_path, output_path=output_path)
+    sampler.process_jsonl(
+        input_path=input_path,
+        output_path=output_path,
+        use_llm_polish=use_llm_polish,
+        polish_model_name=polish_model_name,
+        api_keys=api_keys,
+        max_concurrent_per_key=max_concurrent_per_key,
+        max_retries=max_retries,
+    )
 
 
 if __name__ == "__main__":

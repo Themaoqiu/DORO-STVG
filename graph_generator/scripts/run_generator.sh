@@ -3,6 +3,15 @@ set -e
 export CUDA_VISIBLE_DEVICES=7
 export HF_ENDPOINT=https://hf-mirror.com
 
+# Load project env vars if available (API_KEYS / MM_API_BASE_URL / etc.).
+PROJECT_ROOT="/home/wangxingjian/DORO-STVG/graph_generator"
+if [ -f "${PROJECT_ROOT}/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${PROJECT_ROOT}/.env"
+  set +a
+fi
+
 SAM2_MODEL_CFG="configs/sam2.1/sam2.1_hiera_l.yaml"
 SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/GroundedSAM2/checkpoints/sam2.1_hiera_large.pt"
 
@@ -101,13 +110,17 @@ python -m main \
   --relation_model_name gemini-3-flash-preview \
   --relation_crop_output_dir /home/wangxingjian/DORO-STVG/graph_generator/output/relation_crops \
   --relation_min_shared_frames 3 \
-  --relation_save_intermediate_frames False \
-  --with_reference False
+  --relation_save_intermediate_frames True \
+  --with_reference True
 
-# cd /Users/themaoqiu/CodeRepo/DORO-STVG
+
 # python -m modules.query_generator_cpsat \
-#   --input_path /Users/themaoqiu/CodeRepo/DORO-STVG/graph_generator/scene_graphs.jsonl \
-#   --output_path /Users/themaoqiu/CodeRepo/DORO-STVG/graph_generator/output/query.jsonl \
+#   --input_path /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
+#   --output_path /home/wangxingjian/DORO-STVG/graph_generator/output/query.jsonl \
 #   --queries_per_graph 12 \
-#   --time_limit_sec 2.0 \
-#   --seed 7
+#   --time_limit_sec 3.0 \
+#   --seed 7 \
+#   --use_llm_polish True \
+#   --polish_model_name gemini-3-flash-preview \
+#   --max_concurrent_per_key 100 \
+#   --max_retries 5

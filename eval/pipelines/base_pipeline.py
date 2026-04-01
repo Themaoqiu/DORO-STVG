@@ -60,7 +60,8 @@ class BasePipeline(ABC):
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
         
-        sampled_indices = np.linspace(0, total_frames - 1, self.num_frames, dtype=int)
+        # Use full original frames without down-sampling.
+        sampled_indices = np.arange(total_frames, dtype=int)
         
         orig2sampled = {}
         for sampled_idx, orig_idx in enumerate(sampled_indices):
@@ -73,7 +74,10 @@ class BasePipeline(ABC):
         return int(np.argmin(distances))
     
     def _map_sampled_to_original(self, sampled_frame: int, sampled_indices: List[int]) -> int:
-        return sampled_indices[sampled_frame]
+        if not sampled_indices:
+            return sampled_frame
+        clamped_idx = max(0, min(int(sampled_frame), len(sampled_indices) - 1))
+        return sampled_indices[clamped_idx]
     
     def run_evaluation(self):
         logger.info(f"Starting {self.get_dataset_name()} Evaluation")
@@ -97,22 +101,23 @@ class BasePipeline(ABC):
         return all_results, avg_metrics
     
     def _process_batch(self, batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        annotated_video_paths = []
+        video_paths = []
         for sample in batch:
-            annotated_path, _ = process_video(
+            processed_video_path, video_metadata = process_video(
                 video_path=sample['video_path'],
                 output_folder=str(self.annotated_video_dir),
                 num_frames=self.num_frames,
-                annotate_frames=True
+                annotate_frames=False
             )
-            annotated_video_paths.append(annotated_path)
-            logger.info(f"Annotated video saved: {annotated_path}")
+            video_paths.append(processed_video_path)
+            sample['video_metadata'] = video_metadata
+            logger.info(f"Using original video: {processed_video_path}")
         
         queries = [format_prompt(sample['query']) for sample in batch]
 
         full_responses = self.model.predict_batch(
             queries=queries,
-            annotated_video_paths=annotated_video_paths,
+            annotated_video_paths=video_paths,
             system_prompt=SYSTEM_PROMPT
         )
         
@@ -128,7 +133,7 @@ class BasePipeline(ABC):
                 pred_span=pred_temporal_sampled,
                 gt_bboxes=sample['gt_bboxes_sampled'],
                 pred_bboxes=pred_bboxes_sampled,
-                num_frames=self.num_frames
+                num_frames=len(sample['sampled_indices'])
             )
             
             pred_temporal_orig = None

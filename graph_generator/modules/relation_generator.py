@@ -233,6 +233,28 @@ def _draw_label(frame: Any, bbox: List[float], label: str) -> bool:
     return True
 
 
+def _draw_frame_index_bottom_right(frame: Any, frame_idx: int) -> None:
+    h, w = frame.shape[:2]
+    text = f"frame: {int(frame_idx)}"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.9
+    thickness = 2
+    margin = 10
+    (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+    x = max(0, w - tw - margin)
+    y = max(th + baseline, h - margin)
+    cv2.putText(
+        frame,
+        text,
+        (x, y),
+        font,
+        font_scale,
+        (0, 255, 0),
+        thickness,
+        cv2.LINE_AA,
+    )
+
+
 def _collect_pair_frames(
     video_path: str,
     obj_a: Dict[str, Any],
@@ -274,6 +296,7 @@ def _collect_pair_frames(
         ok_b = _draw_label(annotated, frames_b[frame_idx], str(gid_b))
         if not ok_a or not ok_b:
             continue
+        _draw_frame_index_bottom_right(annotated, frame_idx)
 
         path_img = pair_dir / f"frame_{frame_idx}.jpg"
         cv2.imwrite(str(path_img), annotated)

@@ -64,7 +64,6 @@ class QwenVLBase:
                     {
                         "type": "video",
                         "video": annotated_video_path,
-                        "nframes": self.nframes,
                         "max_pixels": 1280 * 28 * 28,
                     },
                     {
