@@ -1,0 +1,111 @@
+data:
+  train_files: /home/wangxingjian/videothinker/vsitest.jsonl  # 训练集 jsonl 路径
+  val_files: /home/wangxingjian/videothinker/vsitest.jsonl  # 验证集 jsonl 路径
+  prompt_key: problem  # 题目字段名
+  answer_key: solution  # 标准答案字段名
+  image_key: images  # 图像字段名（纯视频任务可不使用）
+  video_key: path  # 视频字段名（支持字符串或列表）
+  image_dir: null
+  video_dir_map:  # data_source -> 视频根目录，最终拼成 root/path
+    VSIBench: /home/wangxingjian/videothinker/vsi
+  video_fps: 1.0  # 采样帧率（越高 token 越多，显存/时延越大）
+  max_prompt_length: 16384  # 输入最大长度（含多模态 token）
+  max_response_length: 1024  # 生成上限
+  rollout_batch_size: 1  # 采样批大小
+  mini_rollout_batch_size: 1  # 实际 dataloader batch，需与并行策略匹配
+  val_batch_size: 1  # 验证 batch
+  format_prompt: ./examples/format_prompt/videothinker.jinja  # 指定 videothinker 提示模板
+  override_chat_template: null
+  shuffle: true
+  seed: 1  # 采样随机种子
+  min_pixels: 3136  # 视频帧最小像素数（过小会被放大）
+  max_pixels: 200704  # 视频帧最大像素数（越大细节越多、token 越多）
+  filter_overlong_prompts: false  # 是否过滤超长样本
+
+algorithm:
+  adv_estimator: grpo
+  disable_kl: false  # 是否禁用参考模型 KL
+  use_kl_loss: true  # 是否把 KL 作为损失项
+  kl_penalty: low_var_kl  # KL 形式
+  kl_coef: 1.0e-2  # KL 强度，过大易抑制探索
+  online_filtering: false
+  filter_key: overall
+  filter_low: 0.01
+  filter_high: 0.99
+
+worker:
+  actor:
+    global_batch_size: 1  # Actor 更新批大小（全局）
+    micro_batch_size_per_device_for_update: 1  # 单卡更新 micro-batch
+    micro_batch_size_per_device_for_experience: 1  # 单卡经验阶段 micro-batch
+    max_grad_norm: 1.0  # 梯度裁剪
+    padding_free: true
+    dynamic_batching: true
+    ulysses_size: 1
+    use_torch_compile: false  # 当前环境建议关闭，减少 inductor/cache 问题
+    model:
+      model_path: Qwen/Qwen3-VL-4B-Instruct  # 可在启动脚本里覆盖
+      enable_gradient_checkpointing: true
+      trust_remote_code: true
+      freeze_vision_tower: false
+    optim:
+      lr: 5.0e-6  # 主学习率
+      weight_decay: 1.0e-2
+      strategy: adamw
+      lr_warmup_ratio: 0.0
+    fsdp:
+      enable_full_shard: true
+      enable_cpu_offload: false
+      enable_rank0_init: true
+    offload:
+      offload_params: true  # 降低显存占用，增加 CPU 内存/通信开销
+      offload_optimizer: true
+
+  rollout:
+    n: 4  # 每条 prompt 采样的候选数（GRPO 组大小）
+    temperature: 1.0  # 训练采样温度
+    top_p: 1.0
+    max_model_len: 25600  # vLLM 最大上下文；过小会报 prompt 过长
+    max_num_batched_tokens: 25600  # vLLM 单批 token 上限
+    limit_images: 0
+    gpu_memory_utilization: 0.8  # vLLM 显存利用率上限
+    enforce_eager: false
+    enable_chunked_prefill: false
+    tensor_parallel_size: 1  # 单卡请保持 1
+    disable_tqdm: false
+    val_override_config:
+      temperature: 0.6  # 验证时更保守的采样
+      top_p: 0.95
+      n: 1
+
+  ref:
+    fsdp:
+      enable_full_shard: true
+      enable_cpu_offload: true
+      enable_rank0_init: true
+    offload:
+      offload_params: false
+
+  reward:
+    reward_type: batch  # 批量奖励函数接口
+    reward_function: ./examples/reward_function/videothinker.py:compute_score  # 格式+结果奖励
+
+trainer:
+  total_epochs: 1  # 训练轮数
+  max_steps: null
+  project_name: easy_r1
+  experiment_name: qwen3_vl_4b_videothinker_grpo
+  logger: ["file"]
+  nnodes: 1  # 节点数
+  n_gpus_per_node: 1  # 每节点 GPU 数（单卡）
+  max_try_make_batch: 20
+  val_freq: -1  # -1 表示关闭周期验证
+  val_before_train: false
+  val_only: false
+  val_generations_to_log: 3
+  save_freq: 5  # 每多少 step 存一次
+  save_limit: 3  # 最多保留多少检查点
+  save_model_only: false
+  save_checkpoint_path: null
+  load_checkpoint_path: null
+  find_last_checkpoint: true

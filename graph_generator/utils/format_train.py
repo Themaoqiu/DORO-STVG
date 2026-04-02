@@ -1,16 +1,4 @@
 #!/usr/bin/env python3
-"""Format graph_generator query.jsonl for easier reading/export.
-
-Output fields per line:
-- videopath: only basename, e.g. xxx.mp4
-- queryid
-- query
-- DsDtD: dict with D_s, D_t, D
-- video_width/video_height
-- box: "The object box is: <frame idx, time, x1, y1, x2, y2; ... />"
-- box_01: "The object box (0-1 normalized) is: <frame idx, time, x1, y1, x2, y2; ... />"
-"""
-
 from __future__ import annotations
 
 import json
