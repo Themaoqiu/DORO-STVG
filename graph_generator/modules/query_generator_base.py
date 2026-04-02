@@ -1453,6 +1453,8 @@ class MinimalSTVGQueryGenerator:
             records.append(
                 {
                     "video_path": graph.get("video_path"),
+                    "video_width": graph.get("video_width"),
+                    "video_height": graph.get("video_height"),
                     "target_node_id": target_id,
                     "same_entity_nodes": node_group,
                     "query": query,

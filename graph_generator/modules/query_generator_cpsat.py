@@ -1965,6 +1965,8 @@ class CPSATQuerySampler:
             records.append(
                 {
                     "video_path": graph.get("video_path"),
+                    "video_width": graph.get("video_width"),
+                    "video_height": graph.get("video_height"),
                     "query_id": q.get("query_id"),
                     "query": q.get("query"),
                     "llm_polished": q.get("llm_polished", False),

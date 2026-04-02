@@ -110,7 +110,7 @@ python -m main \
   --relation_model_name gemini-3-flash-preview \
   --relation_crop_output_dir /home/wangxingjian/DORO-STVG/graph_generator/output/relation_crops \
   --relation_min_shared_frames 3 \
-  --relation_save_intermediate_frames True \
+  --relation_save_intermediate_frames False \
   --with_reference True
 
 

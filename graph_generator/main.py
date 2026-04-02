@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import cv2
 import fire
 from modules.scene_detector import SceneDetector
 from modules.yolo_detector import YOLOKeyframeDetector
@@ -105,6 +106,8 @@ class Edge:
 class SceneGraph:
     video: str
     video_path: str
+    video_width: Optional[int] = None
+    video_height: Optional[int] = None
     temporal_nodes: List[Dict] = field(default_factory=list)
     object_nodes: List[Dict] = field(default_factory=list)
     attribute_nodes: List[Dict] = field(default_factory=list)
@@ -115,6 +118,8 @@ class SceneGraph:
         return {
             'video': self.video,
             'video_path': self.video_path,
+            'video_width': self.video_width,
+            'video_height': self.video_height,
             'temporal_nodes': self.temporal_nodes,
             'object_nodes': self.object_nodes,
             'attribute_nodes': self.attribute_nodes,
@@ -186,7 +191,16 @@ class SceneGraphGenerator:
     
     def process_video(self, video_path: str, output_path: str) -> SceneGraph:
         video_name = Path(video_path).stem
-        graph = SceneGraph(video=video_name, video_path=video_path)
+        cap = cv2.VideoCapture(video_path)
+        video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        graph = SceneGraph(
+            video=video_name,
+            video_path=video_path,
+            video_width=video_width if video_width > 0 else None,
+            video_height=video_height if video_height > 0 else None,
+        )
 
         print(f"[1/5] Detecting scenes...")
         scene_detector = SceneDetector(
