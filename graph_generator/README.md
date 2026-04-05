@@ -8,7 +8,7 @@ This module generates shot-level scene graphs and STVG queries from a video.
 
 The full pipeline (as organized in `scripts/run_generator.sh`) is:
 
-1. Scene split + YOLO keyframe detection + tracker (SAM3 / Grounded-SAM2)
+1. Scene split + YOLO keyframe detection + tracker (SAM3 / Grounded-SAM2(main))
 2. Object attribute extraction
 3. Human action detection
 4. Inter-object relation generation

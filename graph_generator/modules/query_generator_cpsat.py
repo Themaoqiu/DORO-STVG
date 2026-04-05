@@ -892,19 +892,6 @@ def _action_target_desc_map(
     return out
 
 
-def _action_surface_form_map(index: GraphIndex, member: CandidateMember) -> Dict[str, Set[str]]:
-    out: Dict[str, Set[str]] = defaultdict(set)
-    interval = (member.start, member.end)
-    for item in index.actions_by_obj.get(member.object_id, []):
-        if not _overlap(interval, (item["start"], item["end"])):
-            continue
-        action = _normalize_phrase(item.get("label", ""), "act")
-        raw_label = _norm(item.get("raw_label", ""))
-        if action and raw_label:
-            out[action].add(raw_label)
-    return out
-
-
 def _relation_target_desc_maps(
     index: GraphIndex,
     member: CandidateMember,
@@ -928,28 +915,6 @@ def _relation_target_desc_maps(
             spatial[key].add(desc)
         else:
             interacting[key].add(desc)
-    return spatial, interacting
-
-
-def _relation_surface_form_maps(
-    index: GraphIndex,
-    member: CandidateMember,
-) -> Tuple[Dict[Tuple[str, str], Set[str]], Dict[Tuple[str, str], Set[str]]]:
-    spatial: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
-    interacting: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
-    interval = (member.start, member.end)
-    for rel in index.relations_by_subj.get(member.object_id, []):
-        if not _overlap(interval, (rel["start"], rel["end"])):
-            continue
-        pred, ref_cls = _normalized_relation_pair(rel)
-        raw_predicate = _norm(rel.get("raw_predicate", ""))
-        if not pred or not ref_cls or not raw_predicate:
-            continue
-        key = (pred, ref_cls)
-        if str(rel.get("edge_type", "")).strip().lower() == "spatial":
-            spatial[key].add(raw_predicate)
-        else:
-            interacting[key].add(raw_predicate)
     return spatial, interacting
 
 
@@ -1063,8 +1028,7 @@ def build_graph_index(graph: Dict[str, Any]) -> GraphIndex:
         if owner not in objects:
             continue
         for item in node.get("actions") or []:
-            raw_label = _norm(item.get("action_label", ""))
-            label = raw_label.lower()
+            label = _normalize_phrase(item.get("action_label", ""), "act")
             if not label:
                 continue
             s = _to_int(item.get("start_frame"), 0)
@@ -1077,7 +1041,6 @@ def build_graph_index(graph: Dict[str, Any]) -> GraphIndex:
             actions_by_obj[owner].append(
                 {
                     "label": label,
-                    "raw_label": raw_label,
                     "start": ov[0],
                     "end": ov[1],
                     "targets": [
@@ -1099,8 +1062,7 @@ def build_graph_index(graph: Dict[str, Any]) -> GraphIndex:
             oid = _resolve_node_id(rel.get("object_id"))
             if oid not in objects:
                 continue
-            raw_predicate = _norm(rel.get("predicate_verb", ""))
-            pred = raw_predicate.lower()
+            pred = _normalize_phrase(rel.get("predicate_verb", ""), "rel")
             if not pred:
                 continue
             segments = _extract_relation_segments(rel)
@@ -1117,7 +1079,6 @@ def build_graph_index(graph: Dict[str, Any]) -> GraphIndex:
                 relations_by_subj[sid].append(
                     {
                         "predicate": pred,
-                        "raw_predicate": raw_predicate,
                         "start": ov[0],
                         "end": ov[1],
                         "object_id": oid,
@@ -1455,10 +1416,8 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
         cls = profile.classes[k]
         member = candidate.members[k]
         member_idx = (k,)
-        action_surface_forms = _action_surface_form_map(index, member)
         action_target_descs = _action_target_desc_map(index, member, target_index_by_object_id)
         spa_target_descs, int_target_descs = _relation_target_desc_maps(index, member, target_index_by_object_id)
-        spa_surface_forms, int_surface_forms = _relation_surface_form_maps(index, member)
         add(
             "cls",
             f"the {cls}",
@@ -1500,19 +1459,17 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
             )
 
         for action in sorted(profile.actions[k]):
-            action_surface = sorted(action_surface_forms.get(action, set()))
-            action_text_base = action_surface[0] if action_surface else action
             target_descs = sorted(action_target_descs.get(action, set()))
             has_local_targets = _action_has_local_targets(index, member, action)
             if has_local_targets:
                 # If an action has concrete target objects, the clue must mention target info.
                 if not target_descs:
                     continue
-                action_text = f"{action_text_base} {target_descs[0]}"
+                action_text = f"{action} {target_descs[0]}"
             elif target_descs:
-                action_text = f"{action_text_base} {target_descs[0]}"
+                action_text = f"{action} {target_descs[0]}"
             else:
-                action_text = action_text_base
+                action_text = action
             add(
                 "act",
                 action_text,
@@ -1536,14 +1493,12 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
             )
 
         for pred, ref_cls in sorted(profile.spa[k]):
-            pred_surface = sorted(spa_surface_forms.get((pred, ref_cls), set()))
-            pred_text = pred_surface[0] if pred_surface else pred
             target_descs = sorted(spa_target_descs.get((pred, ref_cls), set()))
             # Spatial relations always come with an object_id in graph edges;
             # require target information in text when such clues are used.
             if not target_descs:
                 continue
-            spa_text = f"{pred_text} {target_descs[0]}"
+            spa_text = f"{pred} {target_descs[0]}"
             spa_temporal = _has_local_dynamic_relation_pair(
                 index,
                 member,
@@ -1561,15 +1516,13 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
             )
 
         for pred, ref_cls in sorted(profile.inter[k]):
-            pred_surface = sorted(int_surface_forms.get((pred, ref_cls), set()))
-            pred_text = pred_surface[0] if pred_surface else pred
             target_descs = sorted(int_target_descs.get((pred, ref_cls), set()))
             if not target_descs:
                 target_descs = sorted(action_target_descs.get(pred, set()))
             # Interaction clues with target objects must expose target info in query text.
             if not target_descs:
                 continue
-            int_text = f"{pred_text} {target_descs[0]}"
+            int_text = f"{pred} {target_descs[0]}"
             int_temporal = _has_local_dynamic_relation_pair(
                 index,
                 member,
