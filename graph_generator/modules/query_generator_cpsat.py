@@ -52,14 +52,6 @@ all grounding semantics.
 - Preserve semantics exactly. Do not add, remove, or alter target identity clues.
 - Keep temporal meaning faithful to the original clue set.
 - Use clear and fluent wording suitable for human annotation.
-## Clue Roles (must be respected)
-- cls: target class anchor, defines the object category to locate.
-- app: appearance cue, disambiguates by visual attributes.
-- env: context cue, describes scene/environment or temporal segment.
-- act: action cue, provides dynamic behavior evidence.
-- seq: sequence cue, constrains event order and temporal progression.
-- spa: spatial relation cue, constrains geometric/positional relation.
-- int: interaction cue, constrains interaction with another object.
 ## Output Rule
 Return strict JSON only:
 {
@@ -266,16 +258,6 @@ def _normalized_values(values: Iterable[Any], kind: str) -> List[str]:
     return out
 
 
-def _format_app_clue_text(attr: str) -> str:
-    a = _norm(attr)
-    if not a:
-        return "with distinctive appearance"
-    # Keep short attributes readable (e.g., "weathered" -> "with weathered appearance").
-    if " " not in a:
-        return f"with {a} appearance"
-    return f"with {a}"
-
-
 def _display_phrase(text: str) -> str:
     return _norm(str(text).replace("_", " "))
 
@@ -298,7 +280,9 @@ def _format_seq_part(token: str) -> str:
     if kind == "act":
         return _display_phrase(a)
     if kind == "rel":
-        return f"is {_display_phrase(a)} the {_display_phrase(b)}"
+        if b:
+            return _norm(f"{_display_phrase(a)} {_display_phrase(b)}")
+        return _display_phrase(a)
     return _display_phrase(a)
 
 
@@ -369,22 +353,6 @@ def _normalize_api_keys(api_keys: Optional[Union[str, Iterable[str]]]) -> List[s
     return [str(key).strip() for key in api_keys if str(key).strip()]
 
 
-def _load_api_keys_from_project_env() -> str:
-    env_path = Path(__file__).resolve().parents[1] / ".env"
-    if not env_path.exists():
-        return ""
-    with env_path.open("r", encoding="utf-8") as f:
-        for raw_line in f:
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            if key.strip() != "API_KEYS":
-                continue
-            return value.strip().strip('"').strip("'")
-    return ""
-
-
 def _load_env_var_from_project_env(var_name: str) -> str:
     env_path = Path(__file__).resolve().parents[1] / ".env"
     if not env_path.exists():
@@ -401,37 +369,6 @@ def _load_env_var_from_project_env(var_name: str) -> str:
     return ""
 
 
-def _resolve_api_keys(api_keys: Optional[Union[str, Iterable[str]]]) -> List[str]:
-    if api_keys is None:
-        api_keys = os.getenv("API_KEYS", "")
-    keys = _normalize_api_keys(api_keys)
-    if keys:
-        return keys
-    return _normalize_api_keys(_load_api_keys_from_project_env())
-
-
-def _resolve_api_base_url() -> str:
-    return (
-        os.getenv("MM_API_BASE_URL", "").strip()
-        or os.getenv("VISION_API_BASE_URL", "").strip()
-        or os.getenv("VIDEO_API_BASE_URL", "").strip()
-        or _load_env_var_from_project_env("MM_API_BASE_URL")
-        or _load_env_var_from_project_env("VISION_API_BASE_URL")
-        or _load_env_var_from_project_env("VIDEO_API_BASE_URL")
-    )
-
-
-def _extract_polished_query(response: str) -> Optional[str]:
-    parsed = JSONParser.parse(response)
-    if not isinstance(parsed, dict):
-        return None
-    query = parsed.get("query")
-    if not isinstance(query, str):
-        return None
-    query = _norm(query)
-    return query if query else None
-
-
 def _clue_role_text(clue_type: str) -> str:
     role_map = {
         "cls": "class anchor: define object category",
@@ -445,218 +382,6 @@ def _clue_role_text(clue_type: str) -> str:
     return role_map.get(str(clue_type), "generic grounding cue")
 
 
-def _member_class_from_clues(member_idx: int, clues: Optional[List[Dict[str, Any]]], fallback_id: str) -> str:
-    for clue in clues or []:
-        ctype = str(clue.get("type", "")).strip().lower()
-        if ctype != "cls":
-            continue
-        member_indices_raw = clue.get("member_indices")
-        if not isinstance(member_indices_raw, (list, tuple)):
-            continue
-        member_indices = sorted({_to_int(x, -1) for x in member_indices_raw})
-        if member_indices != [member_idx]:
-            continue
-        text = _norm(clue.get("text", ""))
-        if text.lower().startswith("the "):
-            text = _norm(text[4:])
-        if text:
-            return text
-    if "_" in fallback_id:
-        return _display_phrase(fallback_id.split("_", 1)[0]).lower()
-    return _display_phrase(fallback_id).lower() or "object"
-
-
-def _format_target_overview(members: List[Dict[str, Any]], clues: Optional[List[Dict[str, Any]]] = None) -> str:
-    payload: List[Dict[str, Any]] = []
-    for i, m in enumerate(members or [], start=1):
-        oid = _norm(m.get("object_id", "")) or "unknown_object"
-        cls = _member_class_from_clues(i - 1, clues, oid)
-        s = _to_int(m.get("start_frame"), 0)
-        e = _to_int(m.get("end_frame"), s)
-        if e < s:
-            s, e = e, s
-        payload.append(
-            {
-                "target_index": i,
-                "class": cls,
-                "interval": [s, e],
-            }
-        )
-    if not payload:
-        payload = [{"target_index": 1, "class": "object", "interval": ["unknown", "unknown"]}]
-    return json.dumps(payload, ensure_ascii=False)
-
-
-def _format_clue_lines(clues: List[Dict[str, Any]], members: Optional[List[Dict[str, Any]]] = None) -> str:
-    category_name = {
-        "cls": "target identity/class",
-        "app": "appearance",
-        "act": "action",
-        "seq": "action sequence",
-        "spa": "spatial relation",
-        "int": "interaction relation",
-        "env": "environment/temporal context",
-    }
-    categories = ["cls", "app", "act", "seq", "spa", "int", "env"]
-    member_count = len(members or [])
-    per_member: Dict[str, Dict[str, List[str]]] = {
-        str(i + 1): {c: [] for c in categories} for i in range(member_count)
-    }
-    shared: Dict[str, List[str]] = {c: [] for c in categories}
-
-    def _append_unique(bucket: Dict[str, List[str]], ctype: str, text: str) -> None:
-        if not text:
-            return
-        if ctype not in bucket:
-            bucket[ctype] = []
-        if text not in bucket[ctype]:
-            bucket[ctype].append(text)
-
-    for clue in clues:
-        ctype = str(clue.get("type", "")).strip().lower() or "unknown"
-        text = _norm(clue.get("text", ""))
-        member_indices_raw = clue.get("member_indices")
-        member_indices: List[int] = []
-        if isinstance(member_indices_raw, (list, tuple)):
-            for x in member_indices_raw:
-                k = _to_int(x, -1)
-                if 0 <= k < member_count:
-                    member_indices.append(k)
-        member_indices = sorted(set(member_indices))
-
-        if member_count > 0 and len(member_indices) == 1:
-            _append_unique(per_member[str(member_indices[0] + 1)], ctype, text)
-        else:
-            _append_unique(shared, ctype, text)
-
-    # Keep only non-empty categories.
-    per_member_clean: Dict[str, Dict[str, List[str]]] = {}
-    for tid, buckets in per_member.items():
-        compact = {k: v for k, v in buckets.items() if v}
-        if compact:
-            per_member_clean[tid] = compact
-    shared_clean = {k: v for k, v in shared.items() if v}
-
-    payload = {
-        "category_legend": category_name,
-        "per_target": per_member_clean,
-        "shared": shared_clean,
-    }
-    return json.dumps(payload, ensure_ascii=False)
-
-
-def _split_prompt_inputs(
-    members: List[Dict[str, Any]],
-    clues: List[Dict[str, Any]],
-) -> Dict[str, str]:
-    targets = json.loads(_format_target_overview(members, clues))
-    clue_payload = json.loads(_format_clue_lines(clues, members))
-
-    target_classes = [
-        {
-            "target_index": t.get("target_index"),
-            "class": t.get("class", "object"),
-        }
-        for t in targets
-    ]
-    target_intervals = [
-        {
-            "target_index": t.get("target_index"),
-            "interval": t.get("interval", ["unknown", "unknown"]),
-        }
-        for t in targets
-    ]
-
-    per_target = clue_payload.get("per_target", {}) or {}
-    shared = clue_payload.get("shared", {}) or {}
-    if shared and target_classes:
-        for t in target_classes:
-            tid = str(_to_int(t.get("target_index"), -1))
-            if tid not in per_target:
-                per_target[tid] = {}
-            for ctype, vals in shared.items():
-                if not isinstance(vals, list) or not vals:
-                    continue
-                existing = per_target[tid].get(ctype, [])
-                merged = list(existing)
-                for v in vals:
-                    vv = _norm(v)
-                    if vv and vv not in merged:
-                        merged.append(vv)
-                per_target[tid][ctype] = merged
-
-    return {
-        "target_classes": json.dumps(target_classes, ensure_ascii=False),
-        "target_intervals": json.dumps(target_intervals, ensure_ascii=False),
-        "clues_per_target": json.dumps(per_target, ensure_ascii=False),
-        "category_legend": json.dumps(clue_payload.get("category_legend", {}), ensure_ascii=False),
-    }
-
-
-def _render_target_classes_text(target_classes_json: str) -> str:
-    try:
-        targets = json.loads(target_classes_json)
-    except Exception:
-        targets = []
-    if not isinstance(targets, list) or not targets:
-        return "- target 1: object"
-
-    lines: List[str] = []
-    for item in targets:
-        if not isinstance(item, dict):
-            continue
-        tid = _to_int(item.get("target_index"), -1)
-        cls = _norm(item.get("class", "object")) or "object"
-        if tid <= 0:
-            tid = len(lines) + 1
-        lines.append(f"- target {tid}: {cls}")
-    return "\n".join(lines) if lines else "- target 1: object"
-
-
-def _render_clues_per_target_text(clues_per_target_json: str) -> str:
-    try:
-        per_target = json.loads(clues_per_target_json)
-    except Exception:
-        per_target = {}
-    if not isinstance(per_target, dict) or not per_target:
-        return "  target 1:\n    - xxx"
-
-    def _sort_key(tid: str) -> Tuple[int, str]:
-        return (_to_int(tid, 10**9), str(tid))
-
-    lines: List[str] = []
-    for tid in sorted(per_target.keys(), key=_sort_key):
-        lines.append(f"  target {tid}:")
-        buckets = per_target.get(tid, {})
-        if not isinstance(buckets, dict):
-            lines.append("    - xxx")
-            continue
-        wrote = False
-        for ctype in PROMPT_CATEGORY_ORDER:
-            vals = buckets.get(ctype, [])
-            if not isinstance(vals, list) or not vals:
-                continue
-            clean_vals = []
-            for v in vals:
-                vv = _norm(v)
-                lower = vv.lower()
-                for p in ("that is ", "that ", "the "):
-                    if lower.startswith(p):
-                        vv = _norm(vv[len(p):])
-                        lower = vv.lower()
-                if vv:
-                    clean_vals.append(vv)
-            if not clean_vals:
-                continue
-            label = PROMPT_CATEGORY_TEXT.get(ctype, ctype)
-            lines.append(f"    - {label}: {', '.join(clean_vals)}")
-            wrote = True
-        if not wrote:
-            lines.append("    - xxx")
-        lines.append("")
-    while lines and not lines[-1].strip():
-        lines.pop()
-    return "\n".join(lines) if lines else "  target 1:\n    - xxx"
 
 
 def _sample_class(obj: Dict[str, Any], node_id: str) -> str:
@@ -824,8 +549,7 @@ class TemplateSpec:
 
 @dataclass(frozen=True)
 class DifficultyWeights:
-    alpha: float = 0.5
-    beta: float = 0.5
+    eps: float = 0.01
     lambda_weight: float = 0.5
 
 
@@ -861,15 +585,15 @@ def _object_desc_for_action_target(
         return f"target {target_index_by_object_id[object_id]}"
     obj = index.objects.get(object_id)
     if obj is None:
-        return "the object"
+        return "object"
     cls = _display_phrase(_sample_class(obj, object_id))
     attrs = _normalized_values(obj.get("attributes") or [], "attr")
     envs = _normalized_values(obj.get("environment") or [], "rel")
     if attrs:
-        return _norm(f"the {cls} with {attrs[0]}")
+        return _norm(f"{cls} {attrs[0]}")
     if envs:
-        return _norm(f"the {cls} that is {envs[0]}")
-    return _norm(f"the {cls}")
+        return _norm(f"{cls} {envs[0]}")
+    return cls
 
 
 def _action_target_desc_map(
@@ -1122,20 +846,6 @@ def _ranked_multi_object_ids(index: GraphIndex, max_objects: int = 18) -> List[s
         return object_ids
     # Prefer objects with longer tracks when multi-target combinations must be capped.
     return sorted(object_ids, key=lambda oid: (-len(index.frames.get(oid, set())), oid))[:max_objects]
-
-
-def _extract_boxes_for_interval(obj: Dict[str, Any], start: int, end: int) -> Dict[str, Any]:
-    raw_boxes = obj.get("bboxes") or {}
-    boxes: Dict[str, Any] = {}
-    for frame, box in raw_boxes.items():
-        frame_int = _to_int(frame, -1)
-        if frame_int < 0:
-            continue
-        if start <= frame_int <= end:
-            boxes[str(frame_int)] = box
-    if not boxes:
-        return {}
-    return {str(f): boxes[str(f)] for f in sorted(int(k) for k in boxes.keys())}
 
 
 def _interval_group_gap(intervals: Tuple[Tuple[int, int], ...]) -> int:
@@ -1420,7 +1130,7 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
         spa_target_descs, int_target_descs = _relation_target_desc_maps(index, member, target_index_by_object_id)
         add(
             "cls",
-            f"the {cls}",
+            cls,
             ("cls", k, cls),
             member_idx,
             False,
@@ -1430,7 +1140,7 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
         for attr in sorted(profile.attrs[k]):
             add(
                 "app",
-                _format_app_clue_text(attr),
+                attr,
                 ("app", k, attr),
                 member_idx,
                 False,
@@ -1448,10 +1158,9 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
             )
 
         for tag in sorted(profile.temporal_tags[k]):
-            clip_id = tag.split("_", 1)[-1]
             add(
                 "env",
-                f"during temporal segment {clip_id}",
+                tag,
                 ("env", "temporal", k, tag),
                 member_idx,
                 True,
@@ -1631,16 +1340,15 @@ def solve_query_cpsat(
         if not idx:
             return None
         model.Add(sum(x[j] for j in idx) >= 1)
-        # Class-anchor coverage is only enforced for multi-target to keep legacy single-target behavior.
         if target.arity > 1:
-            cls_idx = [
+            non_cls_idx = [
                 j
                 for j, clue in enumerate(clues)
-                if clue.clue_type == "cls" and k in clue.member_indices
+                if clue.clue_type != "cls" and k in clue.member_indices
             ]
-            if not cls_idx:
+            if not non_cls_idx:
                 return None
-            model.Add(sum(x[j] for j in cls_idx) >= 1)
+            model.Add(sum(x[j] for j in non_cls_idx) >= 1)
 
     for c in CLUE_TYPES:
         idx = [j for j, clue in enumerate(clues) if clue.clue_type == c]
@@ -1952,12 +1660,18 @@ def _compute_candidate_difficulty(
     n_time_norm = n_time / arity_norm
     n_same_norm = n_same / arity_norm
 
-    alpha = min(max(float(weights.alpha), 0.0), 1.0)
-    beta = min(max(float(weights.beta), 0.0), 1.0)
+    eps = max(0.0, float(weights.eps))
     lambda_weight = min(max(float(weights.lambda_weight), 0.0), 1.0)
 
-    D_t = alpha * (n_change_norm / (1.0 + n_change_norm)) + (1.0 - alpha) * (n_time_norm / (1.0 + n_time_norm))
-    D_s = beta * (n_same_norm / (1.0 + n_same_norm)) + (1.0 - beta) * avg_tiou
+    # Use geometric means to emphasize co-occurring difficulty factors rather than
+    # letting a single large term dominate the score. A small epsilon prevents
+    # one zero-valued factor from collapsing the whole component to zero.
+    change_score = n_change_norm / (1.0 + n_change_norm)
+    time_score = n_time_norm / (1.0 + n_time_norm)
+    same_score = n_same_norm / (1.0 + n_same_norm)
+
+    D_t = math.sqrt((eps + change_score) * (eps + time_score))
+    D_s = math.sqrt((eps + same_score) * (eps + avg_tiou))
     D = lambda_weight * D_t + (1.0 - lambda_weight) * D_s
 
     return D_t, D_s, D, {
@@ -1969,8 +1683,7 @@ def _compute_candidate_difficulty(
         "n_same_norm": n_same_norm,
         "arity_norm": arity_norm,
         "avg_tiou": avg_tiou,
-        "alpha": alpha,
-        "beta": beta,
+        "eps": eps,
         "lambda_weight": lambda_weight,
     }
 
@@ -2253,7 +1966,51 @@ class CPSATQuerySampler:
 
     def _node_from_solution(self, picked: Dict[str, Any], query_index: int) -> Dict[str, Any]:
         cand: CandidateTarget = picked["candidate"]
+        profile: CandidateProfile = picked["profile"]
         template: TemplateSpec = picked["template"]
+        members = [
+            {
+                "object_id": m.object_id,
+                "class": profile.classes[idx],
+                "start_frame": m.start,
+                "end_frame": m.end,
+            }
+            for idx, m in enumerate(cand.members)
+        ]
+        per_target_clues: List[Dict[str, Any]] = []
+        for idx, member in enumerate(members, 1):
+            grouped = []
+            for c in picked["selected_clues"]:
+                if tuple(c.member_indices) != (idx - 1,):
+                    continue
+                grouped.append(
+                    {
+                        "type": c.clue_type,
+                        "text": c.text,
+                        "chain_len": c.chain_len,
+                        "is_temporal_evidence": c.is_temporal_evidence,
+                    }
+                )
+            per_target_clues.append(
+                {
+                    "target_index": idx,
+                    **member,
+                    "clues": grouped,
+                }
+            )
+
+        shared_clues = [
+            {
+                "type": c.clue_type,
+                "text": c.text,
+                "member_indices": list(c.member_indices),
+                "chain_len": c.chain_len,
+                "is_temporal_evidence": c.is_temporal_evidence,
+            }
+            for c in picked["selected_clues"]
+            if len(c.member_indices) != 1
+        ]
+
         return {
             "query_id": f"cpsat_{query_index}_{cand.candidate_id}",
             "query": picked["query"],
@@ -2266,25 +2023,12 @@ class CPSATQuerySampler:
             "D": cand.difficulty,
             "target": {
                 "candidate_id": cand.candidate_id,
-                "members": [
-                    {
-                        "object_id": m.object_id,
-                        "start_frame": m.start,
-                        "end_frame": m.end,
-                    }
-                    for m in cand.members
-                ],
+                "members": members,
             },
-            "clues": [
-                {
-                    "type": c.clue_type,
-                    "text": c.text,
-                    "member_indices": list(c.member_indices),
-                    "chain_len": c.chain_len,
-                    "is_temporal_evidence": c.is_temporal_evidence,
-                }
-                for c in picked["selected_clues"]
-            ],
+            "clues": {
+                "per_target": per_target_clues,
+                "shared": shared_clues,
+            },
             "solver": picked["solver"],
         }
 
@@ -2421,12 +2165,34 @@ class CPSATQuerySampler:
         if not query_nodes:
             return {}
 
-        keys = _resolve_api_keys(api_keys)
+        if api_keys is None:
+            api_keys = os.getenv("API_KEYS", "")
+        keys = _normalize_api_keys(api_keys)
+        if not keys:
+            env_path = Path(__file__).resolve().parents[1] / ".env"
+            if env_path.exists():
+                with env_path.open("r", encoding="utf-8") as f:
+                    for raw_line in f:
+                        line = raw_line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        key, value = line.split("=", 1)
+                        if key.strip() == "API_KEYS":
+                            keys = _normalize_api_keys(value.strip().strip('"').strip("'"))
+                            if keys:
+                                break
         if not keys:
             raise ValueError("API_KEYS is required when use_llm_polish=True (set env/.env or pass --api_keys).")
 
         # Align with other API modules: read base URL from env/.env chain.
-        api_base_url = _resolve_api_base_url()
+        api_base_url = (
+            os.getenv("MM_API_BASE_URL", "").strip()
+            or os.getenv("VISION_API_BASE_URL", "").strip()
+            or os.getenv("VIDEO_API_BASE_URL", "").strip()
+            or _load_env_var_from_project_env("MM_API_BASE_URL")
+            or _load_env_var_from_project_env("VISION_API_BASE_URL")
+            or _load_env_var_from_project_env("VIDEO_API_BASE_URL")
+        )
         if api_base_url:
             os.environ.setdefault("MM_API_BASE_URL", api_base_url)
 
@@ -2444,10 +2210,118 @@ class CPSATQuerySampler:
             query_id = str(node.get("query_id", f"cpsat_{idx}"))
             target = node.get("target") or {}
             members = target.get("members") or []
-            clues = node.get("clues") or []
-            prompt_inputs = _split_prompt_inputs(members, clues)
-            target_classes_text = _render_target_classes_text(prompt_inputs["target_classes"])
-            clues_per_target_text = _render_clues_per_target_text(prompt_inputs["clues_per_target"])
+            clues = node.get("clues") or {}
+
+            target_classes = []
+            for i, m in enumerate(members, start=1):
+                cls = _norm(m.get("class", "object")) or "object"
+                s = _to_int(m.get("start_frame"), 0)
+                e = _to_int(m.get("end_frame"), s)
+                if e < s:
+                    s, e = e, s
+                target_classes.append({"target_index": i, "class": cls, "interval": [s, e]})
+            if not target_classes:
+                target_classes = [{"target_index": 1, "class": "object", "interval": ["unknown", "unknown"]}]
+
+            target_lines: List[str] = []
+            for item in target_classes:
+                tid = _to_int(item.get("target_index"), -1)
+                cls = _norm(item.get("class", "object")) or "object"
+                if tid <= 0:
+                    tid = len(target_lines) + 1
+                target_lines.append(f"- target {tid}: {cls}")
+            target_classes_text = "\n".join(target_lines) if target_lines else "- target 1: object"
+
+            category_name = {
+                "cls": "target identity/class",
+                "app": "appearance",
+                "act": "action",
+                "seq": "action sequence",
+                "spa": "spatial relation",
+                "int": "interaction relation",
+                "env": "environment/temporal context",
+            }
+            categories = ["cls", "app", "act", "seq", "spa", "int", "env"]
+            per_target: Dict[str, Dict[str, List[str]]] = {
+                str(i + 1): {c: [] for c in categories} for i in range(len(members))
+            }
+            shared: Dict[str, List[str]] = {c: [] for c in categories}
+
+            def append_unique(bucket: Dict[str, List[str]], ctype: str, text: str) -> None:
+                if not text:
+                    return
+                bucket.setdefault(ctype, [])
+                if text not in bucket[ctype]:
+                    bucket[ctype].append(text)
+
+            for item in clues.get("per_target", []) or []:
+                tid = _to_int(item.get("target_index"), -1)
+                if not (1 <= tid <= len(members)):
+                    continue
+                for clue in item.get("clues", []) or []:
+                    append_unique(
+                        per_target[str(tid)],
+                        str(clue.get("type", "")).strip().lower() or "unknown",
+                        _norm(clue.get("text", "")),
+                    )
+            for clue in clues.get("shared", []) or []:
+                append_unique(
+                    shared,
+                    str(clue.get("type", "")).strip().lower() or "unknown",
+                    _norm(clue.get("text", "")),
+                )
+
+            if shared and target_classes:
+                for t in target_classes:
+                    tid = str(_to_int(t.get("target_index"), -1))
+                    per_target.setdefault(tid, {})
+                    for ctype, vals in shared.items():
+                        if not isinstance(vals, list) or not vals:
+                            continue
+                        existing = per_target[tid].get(ctype, [])
+                        merged = list(existing)
+                        for v in vals:
+                            vv = _norm(v)
+                            if vv and vv not in merged:
+                                merged.append(vv)
+                        per_target[tid][ctype] = merged
+
+            def sort_key(tid: str) -> Tuple[int, str]:
+                return (_to_int(tid, 10**9), str(tid))
+
+            clue_lines: List[str] = []
+            for tid in sorted(per_target.keys(), key=sort_key):
+                clue_lines.append(f"  target {tid}:")
+                buckets = per_target.get(tid, {})
+                if not isinstance(buckets, dict):
+                    clue_lines.append("    - xxx")
+                    continue
+                wrote = False
+                for ctype in PROMPT_CATEGORY_ORDER:
+                    vals = buckets.get(ctype, [])
+                    if not isinstance(vals, list) or not vals:
+                        continue
+                    clean_vals = []
+                    for v in vals:
+                        vv = _norm(v)
+                        lower = vv.lower()
+                        for p in ("that is ", "that ", "the "):
+                            if lower.startswith(p):
+                                vv = _norm(vv[len(p):])
+                                lower = vv.lower()
+                        if vv:
+                            clean_vals.append(vv)
+                    if not clean_vals:
+                        continue
+                    label = PROMPT_CATEGORY_TEXT.get(ctype, ctype)
+                    clue_lines.append(f"    - {label}: {', '.join(clean_vals)}")
+                    wrote = True
+                if not wrote:
+                    clue_lines.append("    - xxx")
+                clue_lines.append("")
+            while clue_lines and not clue_lines[-1].strip():
+                clue_lines.pop()
+            clues_per_target_text = "\n".join(clue_lines) if clue_lines else "  target 1:\n    - xxx"
 
             prompt_text = QUERY_POLISH_PROMPT_TEMPLATE.format(
                 target_classes_text=target_classes_text,
@@ -2462,10 +2336,21 @@ class CPSATQuerySampler:
         )
         polished_map: Dict[str, str] = {}
         completed = 0
+
+        def extract_polished_query(response: str) -> Optional[str]:
+            parsed = JSONParser.parse(response)
+            if not isinstance(parsed, dict):
+                return None
+            query = parsed.get("query")
+            if not isinstance(query, str):
+                return None
+            query = _norm(query)
+            return query if query else None
+
         async for item in generator.generate_stream(
             prompts=prompts,
             system_prompt=system_prompt,
-            validate_func=lambda resp: polished if (polished := _extract_polished_query(resp)) is not None else False,
+            validate_func=lambda resp: polished if (polished := extract_polished_query(resp)) is not None else False,
         ):
             if item and isinstance(item.get("result"), str) and item["result"].strip():
                 polished_map[str(item["id"])] = _norm(item["result"])
@@ -2496,7 +2381,16 @@ class CPSATQuerySampler:
                 end = _to_int(m.get("end_frame"), start)
                 if end < start:
                     start, end = end, start
-                boxes = _extract_boxes_for_interval(objects[oid], start, end)
+                raw_boxes = objects[oid].get("bboxes") or {}
+                boxes: Dict[str, Any] = {}
+                for frame, box in raw_boxes.items():
+                    frame_int = _to_int(frame, -1)
+                    if frame_int < 0:
+                        continue
+                    if start <= frame_int <= end:
+                        boxes[str(frame_int)] = box
+                if boxes:
+                    boxes = {str(f): boxes[str(f)] for f in sorted(int(k) for k in boxes.keys())}
                 if not boxes:
                     continue
                 member_payload.append(
@@ -2519,7 +2413,6 @@ class CPSATQuerySampler:
                     "query": q.get("query"),
                     "llm_polished": q.get("llm_polished", False),
                     "query_core": q.get("query_core"),
-                    "query_decorations": q.get("query_decorations", []),
                     "template": q.get("template"),
                     "difficulty_bucket": q.get("difficulty_bucket"),
                     "D_t": q.get("D_t"),
@@ -2527,7 +2420,7 @@ class CPSATQuerySampler:
                     "D": q.get("D"),
                     "target_arity": len(member_payload),
                     "target_members": member_payload,
-                    "clues": q.get("clues", []),
+                    "clues": q.get("clues", {}),
                     "solver": q.get("solver"),
                 }
             )
@@ -2586,9 +2479,6 @@ class CPSATQuerySampler:
                         if polished:
                             q["query"] = polished
                             q["llm_polished"] = True
-                            # In LLM generation mode, do not keep heuristic composed strings as effective content.
-                            q["query_core"] = ""
-                            q["query_decorations"] = []
                             kept_nodes.append(q)
                         else:
                             dropped += 1
@@ -2619,8 +2509,7 @@ def main(
     max_queries_per_candidate: int = 1,
     time_limit_sec: float = 2.0,
     seed: int = 7,
-    alpha: float = 0.5,
-    beta: float = 0.5,
+    eps: float = 0.01,
     lambda_weight: float = 0.5,
     use_llm_polish: bool = False,
     polish_model_name: str = "gpt-4.1-mini",
@@ -2642,8 +2531,7 @@ def main(
         time_limit_sec=time_limit_sec,
         seed=seed,
         weights=DifficultyWeights(
-            alpha=alpha,
-            beta=beta,
+            eps=eps,
             lambda_weight=lambda_weight,
         ),
     )

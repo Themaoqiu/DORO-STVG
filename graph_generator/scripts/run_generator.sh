@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-export CUDA_VISIBLE_DEVICES=7
+export CUDA_VISIBLE_DEVICES=0
 export HF_ENDPOINT=https://hf-mirror.com
 
 # Load project env vars if available (API_KEYS / MM_API_BASE_URL / etc.).
@@ -83,7 +83,6 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 
 
 # full command (graph generation only)
-# cd /home/wangxingjian/DORO-STVG/graph_generator && \
 # python -m main \
 #   --full_pipeline True \
 #   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
@@ -106,7 +105,7 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #   --action_config /home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2/configs/detection/videomae/vit-large-p16_videomae-k400-pre_8xb8-16x4x1-20e-adamw_ava-kinetics-rgb.py \
 #   --action_checkpoint /home/wangxingjian/model/vit-large-p16_videomae-k400-pre.pth \
 #   --action_label_map /home/wangxingjian/DORO-STVG/graph_generator/dependence/mmaction2/tools/data/ava/label_map.txt \
-#   --action_python /home/wangxingjian/DORO-STVG/venv/graph_generator/action_detector/.venv/bin/python \
+#   --action_python /home/wangxingjian/DORO-STVG/envs/graph_generator/action_detector/.venv/bin/python \
 #   --relation_model_name gemini-3-flash-preview \
 #   --relation_crop_output_dir /home/wangxingjian/DORO-STVG/graph_generator/output/relation_crops \
 #   --relation_min_shared_frames 3 \
@@ -115,12 +114,12 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 
 
 python -m modules.query_generator_cpsat \
-  --input_path /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.updated.jsonl \
+  --input_path /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
   --output_path /home/wangxingjian/DORO-STVG/graph_generator/output/query.jsonl \
   --queries_per_graph 12 \
   --time_limit_sec 3.0 \
   --seed 7 \
-  --use_llm_polish False \
+  --use_llm_polish True \
   --polish_model_name gemini-3-flash-preview \
   --max_concurrent_per_key 100 \
   --max_retries 5
