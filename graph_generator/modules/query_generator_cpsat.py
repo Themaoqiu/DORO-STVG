@@ -74,7 +74,7 @@ You will receive visual cues for constructing query text for video localization 
 - target_intervals_json: target index to interval mapping.
 - clues_per_target_json: clues grouped by target and category.
 - category_legend_json: category name mapping.
-## The information you need to use:
+## The information you need to use: 
 1. target object class for localization:
 {target_classes_text}
 
@@ -83,7 +83,7 @@ You will receive visual cues for constructing query text for video localization 
 ## Guidelines
 - Carefully examine the content in the section Visual cues used to localize each object.
   - If have only one object: output a semantically clear query using all the provided clue information to locate this object.
-  - If have multi-target: Using all the provided clues, generate one semantically clear query that can locate all targets simultaneously.
+  - If have multi-target: Using all the provided clues, generate one semantically clear query that can locate both objects simultaneously. You may describe multiple objects separately, such as "the person in black clothing and the person leaning against the wall"; you may also fuse the descriptions of multiple objects, such as "the person in black clothing and the cat at his feet".
 - If a clue category is present in inputs, reflect it in wording.
 - Prefer concise natural English; avoid redundant filler phrases.
 - The clues may not be naturally phrased, and the generated query should not follow the language style of the clues.
@@ -112,18 +112,6 @@ PROMPT_CATEGORY_ORDER: Tuple[str, ...] = ("cls", "app", "env", "act", "seq", "sp
 
 def _norm(text: Any) -> str:
     return " ".join(str(text).strip().split())
-
-
-def _clean_prompt_clue_text(text: str) -> str:
-    s = _norm(text)
-    if not s:
-        return s
-    lower = s.lower()
-    for p in ("that is ", "that ", "the "):
-        if lower.startswith(p):
-            s = _norm(s[len(p):])
-            lower = s.lower()
-    return s
 
 
 def _canon_token(token: str) -> str:
@@ -581,20 +569,11 @@ def _split_prompt_inputs(
 
     per_target = clue_payload.get("per_target", {}) or {}
     shared = clue_payload.get("shared", {}) or {}
-    # User requested no standalone shared_clues field:
-    # merge shared clues into each target's clue buckets.
     if shared and target_classes:
-        target_ids = [str(_to_int(t.get("target_index"), -1)) for t in target_classes]
         for t in target_classes:
             tid = str(_to_int(t.get("target_index"), -1))
             if tid not in per_target:
                 per_target[tid] = {}
-            other_targets = [x for x in target_ids if x != tid and x != "-1"]
-            target_suffix = (
-                f" with target {'/'.join(other_targets)}"
-                if other_targets
-                else ""
-            )
             for ctype, vals in shared.items():
                 if not isinstance(vals, list) or not vals:
                     continue
@@ -602,11 +581,7 @@ def _split_prompt_inputs(
                 merged = list(existing)
                 for v in vals:
                     vv = _norm(v)
-                    if not vv:
-                        continue
-                    if target_suffix and target_suffix not in vv:
-                        vv = _norm(vv + target_suffix)
-                    if vv not in merged:
+                    if vv and vv not in merged:
                         merged.append(vv)
                 per_target[tid][ctype] = merged
 
@@ -663,7 +638,12 @@ def _render_clues_per_target_text(clues_per_target_json: str) -> str:
                 continue
             clean_vals = []
             for v in vals:
-                vv = _clean_prompt_clue_text(_norm(v))
+                vv = _norm(v)
+                lower = vv.lower()
+                for p in ("that is ", "that ", "the "):
+                    if lower.startswith(p):
+                        vv = _norm(vv[len(p):])
+                        lower = vv.lower()
                 if vv:
                     clean_vals.append(vv)
             if not clean_vals:
@@ -872,7 +852,13 @@ class CandidateProfile:
     inter: List[Set[Tuple[str, str]]]
 
 
-def _object_desc_for_action_target(index: GraphIndex, object_id: str) -> str:
+def _object_desc_for_action_target(
+    index: GraphIndex,
+    object_id: str,
+    target_index_by_object_id: Optional[Dict[str, int]] = None,
+) -> str:
+    if target_index_by_object_id and object_id in target_index_by_object_id:
+        return f"target {target_index_by_object_id[object_id]}"
     obj = index.objects.get(object_id)
     if obj is None:
         return "the object"
@@ -886,7 +872,11 @@ def _object_desc_for_action_target(index: GraphIndex, object_id: str) -> str:
     return _norm(f"the {cls}")
 
 
-def _action_target_desc_map(index: GraphIndex, member: CandidateMember) -> Dict[str, Set[str]]:
+def _action_target_desc_map(
+    index: GraphIndex,
+    member: CandidateMember,
+    target_index_by_object_id: Optional[Dict[str, int]] = None,
+) -> Dict[str, Set[str]]:
     out: Dict[str, Set[str]] = defaultdict(set)
     interval = (member.start, member.end)
     for item in index.actions_by_obj.get(member.object_id, []):
@@ -898,13 +888,27 @@ def _action_target_desc_map(index: GraphIndex, member: CandidateMember) -> Dict[
         for tid in item.get("targets", []):
             if tid not in index.objects:
                 continue
-            out[action].add(_object_desc_for_action_target(index, tid))
+            out[action].add(_object_desc_for_action_target(index, tid, target_index_by_object_id))
+    return out
+
+
+def _action_surface_form_map(index: GraphIndex, member: CandidateMember) -> Dict[str, Set[str]]:
+    out: Dict[str, Set[str]] = defaultdict(set)
+    interval = (member.start, member.end)
+    for item in index.actions_by_obj.get(member.object_id, []):
+        if not _overlap(interval, (item["start"], item["end"])):
+            continue
+        action = _normalize_phrase(item.get("label", ""), "act")
+        raw_label = _norm(item.get("raw_label", ""))
+        if action and raw_label:
+            out[action].add(raw_label)
     return out
 
 
 def _relation_target_desc_maps(
     index: GraphIndex,
     member: CandidateMember,
+    target_index_by_object_id: Optional[Dict[str, int]] = None,
 ) -> Tuple[Dict[Tuple[str, str], Set[str]], Dict[Tuple[str, str], Set[str]]]:
     spatial: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
     interacting: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
@@ -916,7 +920,7 @@ def _relation_target_desc_maps(
         oid = str(rel.get("object_id", "")).strip()
         if not pred or not oid or oid not in index.objects:
             continue
-        desc = _object_desc_for_action_target(index, oid)
+        desc = _object_desc_for_action_target(index, oid, target_index_by_object_id)
         if not desc:
             continue
         key = (pred, ref_cls)
@@ -924,6 +928,28 @@ def _relation_target_desc_maps(
             spatial[key].add(desc)
         else:
             interacting[key].add(desc)
+    return spatial, interacting
+
+
+def _relation_surface_form_maps(
+    index: GraphIndex,
+    member: CandidateMember,
+) -> Tuple[Dict[Tuple[str, str], Set[str]], Dict[Tuple[str, str], Set[str]]]:
+    spatial: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
+    interacting: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
+    interval = (member.start, member.end)
+    for rel in index.relations_by_subj.get(member.object_id, []):
+        if not _overlap(interval, (rel["start"], rel["end"])):
+            continue
+        pred, ref_cls = _normalized_relation_pair(rel)
+        raw_predicate = _norm(rel.get("raw_predicate", ""))
+        if not pred or not ref_cls or not raw_predicate:
+            continue
+        key = (pred, ref_cls)
+        if str(rel.get("edge_type", "")).strip().lower() == "spatial":
+            spatial[key].add(raw_predicate)
+        else:
+            interacting[key].add(raw_predicate)
     return spatial, interacting
 
 
@@ -1015,14 +1041,6 @@ def _action_has_local_targets(
     return False
 
 
-def _candidate_is_full_track(index: GraphIndex, target: CandidateTarget) -> bool:
-    for member in target.members:
-        full_s, full_e = _member_full_track_interval(index, member)
-        if member.start != full_s or member.end != full_e:
-            return False
-    return True
-
-
 def build_graph_index(graph: Dict[str, Any]) -> GraphIndex:
     object_nodes = graph.get("object_nodes") or []
     objects: Dict[str, Dict[str, Any]] = {}
@@ -1045,7 +1063,8 @@ def build_graph_index(graph: Dict[str, Any]) -> GraphIndex:
         if owner not in objects:
             continue
         for item in node.get("actions") or []:
-            label = _norm(item.get("action_label", "")).lower()
+            raw_label = _norm(item.get("action_label", ""))
+            label = raw_label.lower()
             if not label:
                 continue
             s = _to_int(item.get("start_frame"), 0)
@@ -1058,6 +1077,7 @@ def build_graph_index(graph: Dict[str, Any]) -> GraphIndex:
             actions_by_obj[owner].append(
                 {
                     "label": label,
+                    "raw_label": raw_label,
                     "start": ov[0],
                     "end": ov[1],
                     "targets": [
@@ -1079,7 +1099,8 @@ def build_graph_index(graph: Dict[str, Any]) -> GraphIndex:
             oid = _resolve_node_id(rel.get("object_id"))
             if oid not in objects:
                 continue
-            pred = _norm(rel.get("predicate_verb", "")).lower()
+            raw_predicate = _norm(rel.get("predicate_verb", ""))
+            pred = raw_predicate.lower()
             if not pred:
                 continue
             segments = _extract_relation_segments(rel)
@@ -1096,6 +1117,7 @@ def build_graph_index(graph: Dict[str, Any]) -> GraphIndex:
                 relations_by_subj[sid].append(
                     {
                         "predicate": pred,
+                        "raw_predicate": raw_predicate,
                         "start": ov[0],
                         "end": ov[1],
                         "object_id": oid,
@@ -1195,7 +1217,7 @@ def build_candidate_intervals(
     max_intervals_per_object: int = 12,
     include_full_track: bool = True,
     max_target_arity: int = 3,
-    max_multi_intervals_per_group: int = 6,
+    max_multi_intervals_per_group: int = 8,
     max_multi_candidates_total: int = 240,
 ) -> List[CandidateTarget]:
     del graph
@@ -1400,6 +1422,10 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
     profile = _profile_for_candidate(index, candidate, max_chain_len=max_chain_len)
     clues: List[AtomicClue] = []
     seen: Set[Tuple[Any, ...]] = set()
+    target_index_by_object_id = {
+        member.object_id: idx + 1
+        for idx, member in enumerate(candidate.members)
+    }
 
     def add(
         clue_type: str,
@@ -1429,8 +1455,10 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
         cls = profile.classes[k]
         member = candidate.members[k]
         member_idx = (k,)
-        action_target_descs = _action_target_desc_map(index, member)
-        spa_target_descs, int_target_descs = _relation_target_desc_maps(index, member)
+        action_surface_forms = _action_surface_form_map(index, member)
+        action_target_descs = _action_target_desc_map(index, member, target_index_by_object_id)
+        spa_target_descs, int_target_descs = _relation_target_desc_maps(index, member, target_index_by_object_id)
+        spa_surface_forms, int_surface_forms = _relation_surface_form_maps(index, member)
         add(
             "cls",
             f"the {cls}",
@@ -1453,7 +1481,7 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
         for phrase in sorted(profile.env[k]):
             add(
                 "env",
-                f"that is {phrase}",
+                phrase,
                 ("env", "general", k, phrase),
                 member_idx,
                 False,
@@ -1472,21 +1500,19 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
             )
 
         for action in sorted(profile.actions[k]):
+            action_surface = sorted(action_surface_forms.get(action, set()))
+            action_text_base = action_surface[0] if action_surface else action
             target_descs = sorted(action_target_descs.get(action, set()))
             has_local_targets = _action_has_local_targets(index, member, action)
             if has_local_targets:
                 # If an action has concrete target objects, the clue must mention target info.
                 if not target_descs:
                     continue
-                action_text = f"that is {action} toward {target_descs[0]}"
+                action_text = f"{action_text_base} {target_descs[0]}"
             elif target_descs:
-                action_text = f"that is {action} toward {target_descs[0]}"
+                action_text = f"{action_text_base} {target_descs[0]}"
             else:
-                action_targets = sorted({ref_cls for pred, ref_cls in profile.inter[k] if pred == action})
-                if action_targets:
-                    action_text = f"that is {action} the {action_targets[0]}"
-                else:
-                    action_text = f"that is {action}"
+                action_text = action_text_base
             add(
                 "act",
                 action_text,
@@ -1502,7 +1528,7 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
             chain_text = " then ".join(_format_seq_part(tok) for tok in chain)
             add(
                 "seq",
-                f"that {chain_text}",
+                chain_text,
                 ("seq", k, *chain),
                 member_idx,
                 True,
@@ -1510,12 +1536,14 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
             )
 
         for pred, ref_cls in sorted(profile.spa[k]):
+            pred_surface = sorted(spa_surface_forms.get((pred, ref_cls), set()))
+            pred_text = pred_surface[0] if pred_surface else pred
             target_descs = sorted(spa_target_descs.get((pred, ref_cls), set()))
             # Spatial relations always come with an object_id in graph edges;
             # require target information in text when such clues are used.
             if not target_descs:
                 continue
-            spa_text = f"that is {pred} {target_descs[0]}"
+            spa_text = f"{pred_text} {target_descs[0]}"
             spa_temporal = _has_local_dynamic_relation_pair(
                 index,
                 member,
@@ -1533,13 +1561,15 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
             )
 
         for pred, ref_cls in sorted(profile.inter[k]):
+            pred_surface = sorted(int_surface_forms.get((pred, ref_cls), set()))
+            pred_text = pred_surface[0] if pred_surface else pred
             target_descs = sorted(int_target_descs.get((pred, ref_cls), set()))
             if not target_descs:
                 target_descs = sorted(action_target_descs.get(pred, set()))
             # Interaction clues with target objects must expose target info in query text.
             if not target_descs:
                 continue
-            int_text = f"that {pred} {target_descs[0]}"
+            int_text = f"{pred_text} {target_descs[0]}"
             int_temporal = _has_local_dynamic_relation_pair(
                 index,
                 member,
@@ -1625,7 +1655,6 @@ def solve_query_cpsat(
     clues: List[AtomicClue],
     object_exclusion_matrix: List[List[int]],
     time_exclusion_matrix: List[List[int]],
-    require_local_time_evidence: bool = False,
     enforce_time_uniqueness: bool = True,
     time_limit_sec: float = 2.0,
 ) -> Optional[Dict[str, Any]]:
@@ -1667,12 +1696,6 @@ def solve_query_cpsat(
             model.Add(sum(x[j] for j in idx) <= int(template.type_max.get(c, template.k_max)))
         elif template.type_min.get(c, 0) > 0:
             return None
-
-    if require_local_time_evidence:
-        temporal_idx = [j for j, clue in enumerate(clues) if clue.is_temporal_evidence]
-        if not temporal_idx:
-            return None
-        model.Add(sum(x[j] for j in temporal_idx) >= 1)
 
     model.Add(sum(x) >= int(template.k_min))
     model.Add(sum(x) <= int(template.k_max))
@@ -1885,7 +1908,7 @@ def _build_default_templates() -> List[TemplateSpec]:
             name="easy_pair_attr_env",
             bucket="easy",
             type_min={"app": 1, "env": 1},
-            type_max={"cls": 3, "app": 3, "act": 1, "seq": 0, "spa": 1, "env": 2, "int": 1},
+            type_max={"cls": 3, "app": 3, "act": 2, "seq": 0, "spa": 1, "env": 2, "int": 1},
             k_min=3,
             k_max=5,
             q_min=0,
@@ -2096,20 +2119,12 @@ def decorate_query(core_clues: List[AtomicClue], profile: CandidateProfile) -> T
     return _norm(", " + "; ".join(decorations)), decorations
 
 
-def _strip_member_clause_prefix(text: str) -> str:
-    s = _norm(text)
-    for prefix in ("that is ", "that "):
-        if s.startswith(prefix):
-            return _norm(s[len(prefix) :])
-    return s
-
-
 def _query_core_from_clues(core_clues: List[AtomicClue], profile: CandidateProfile) -> str:
     if profile.arity <= 1:
         parts = [_norm(c.text) for c in core_clues if _norm(c.text)]
         if not parts:
             return ""
-        return "，".join(parts)
+        return ", ".join(parts)
 
     member_cls: Dict[int, str] = {}
     member_props: Dict[int, List[str]] = defaultdict(list)
@@ -2128,7 +2143,12 @@ def _query_core_from_clues(core_clues: List[AtomicClue], profile: CandidateProfi
             continue
         if clue.clue_type == "seq":
             continue
-        member_props[k].append(_strip_member_clause_prefix(text))
+        s = _norm(text)
+        for prefix in ("that is ", "that "):
+            if s.startswith(prefix):
+                s = _norm(s[len(prefix) :])
+                break
+        member_props[k].append(s)
 
     parts: List[str] = []
     for k in range(profile.arity):
@@ -2157,7 +2177,7 @@ class CPSATQuerySampler:
         min_interval_len: int = 3,
         max_intervals_per_object: int = 12,
         max_target_arity: int = 3,
-        max_multi_intervals_per_group: int = 6,
+        max_multi_intervals_per_group: int = 8,
         max_multi_candidates_total: int = 240,
         multi_queries_per_graph: Optional[int] = None,
         strict_time_uniqueness_multi_target: bool = False,
@@ -2250,7 +2270,6 @@ class CPSATQuerySampler:
             clues=clues,
             object_exclusion_matrix=object_E,
             time_exclusion_matrix=time_E,
-            require_local_time_evidence=not _candidate_is_full_track(self._index, candidate),
             enforce_time_uniqueness=(candidate.arity == 1 or self.strict_time_uniqueness_multi_target),
             time_limit_sec=self.time_limit_sec,
         )
