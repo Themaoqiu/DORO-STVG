@@ -1751,28 +1751,18 @@ def _assign_sampling_buckets(candidates: List[CandidateTarget]) -> None:
 def _assign_difficulty_buckets_5(candidates: List[CandidateTarget]) -> None:
     if not candidates:
         return
-    ordered = sorted(candidates, key=lambda c: (c.difficulty, c.interval[1] - c.interval[0] + 1))
-    labels = ("very_easy", "easy", "medium", "hard", "very_hard")
-    n = len(ordered)
-    base = n // len(labels)
-    remain = n % len(labels)
-    counts = {label: base for label in labels}
-    for label in labels[:remain]:
-        counts[label] += 1
-
-    if n >= len(labels):
-        for label in labels:
-            if counts[label] == 0:
-                donor = max(labels, key=lambda x: counts[x])
-                if counts[donor] > 1:
-                    counts[donor] -= 1
-                    counts[label] += 1
-
-    cursor = 0
-    for label in labels:
-        for c in ordered[cursor : cursor + counts[label]]:
-            c.difficulty_bucket = label
-        cursor += counts[label]
+    for cand in candidates:
+        score = float(cand.difficulty)
+        if score < 0.2:
+            cand.difficulty_bucket = "very_easy"
+        elif score < 0.4:
+            cand.difficulty_bucket = "easy"
+        elif score < 0.6:
+            cand.difficulty_bucket = "medium"
+        elif score < 0.8:
+            cand.difficulty_bucket = "hard"
+        else:
+            cand.difficulty_bucket = "very_hard"
 
 
 def _render_query(profile: CandidateProfile, clues: List[AtomicClue]) -> str:
