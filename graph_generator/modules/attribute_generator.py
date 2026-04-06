@@ -405,9 +405,7 @@ def apply_attributes_to_object_nodes(
         obj_node["actions"] = info.actions
         resolved_category = _strip_uncertainty_suffix(info.category)
         current_class = _normalize_text(str(obj_node.get("object_class", "")))
-        if resolved_category and (
-            overwrite_object_class or resolved_category.lower() != current_class.lower()
-        ):
+        if resolved_category and not current_class:
             obj_node["object_class"] = resolved_category
     return graph
 

@@ -70,6 +70,119 @@ def format_box_string(
     return "<" + "; ".join(entries) + " />"
 
 
+def _humanize_object_id(object_id: str) -> str:
+    text = str(object_id).strip()
+    if not text:
+        return "object"
+    parts = text.split("_")
+    if len(parts) >= 2 and parts[-1].isdigit():
+        parts = parts[:-1]
+    text = " ".join(parts).replace("-", " ").strip()
+    return text or "object"
+
+
+def _strip_leading_article(text: str) -> str:
+    text = str(text).strip()
+    for prefix in ("the ", "a ", "an "):
+        if text.lower().startswith(prefix):
+            return text[len(prefix):].strip()
+    return text
+
+
+def _build_target_labels(obj: Dict[str, Any], target_members: List[Dict[str, Any]]) -> List[str]:
+    clues = obj.get("clues") or {}
+    per_target = clues.get("per_target") if isinstance(clues, dict) else None
+    if not isinstance(per_target, list):
+        per_target = []
+
+    clue_map: Dict[str, Dict[str, Any]] = {}
+    for idx, item in enumerate(per_target, start=1):
+        if not isinstance(item, dict):
+            continue
+        object_id = str(item.get("object_id", "")).strip()
+        target_index = int(item.get("target_index") or idx)
+        key = object_id or f"target_{target_index}"
+        clue_map[key] = item
+
+    labels: List[str] = []
+    for idx, member in enumerate(target_members, start=1):
+        object_id = str(member.get("object_id", "")).strip()
+        info = clue_map.get(object_id) or clue_map.get(f"target_{idx}") or {}
+        clue_items = info.get("clues") if isinstance(info, dict) else None
+        if not isinstance(clue_items, list):
+            clue_items = []
+
+        cls_text = ""
+        extra_texts: List[str] = []
+        for clue in clue_items:
+            if not isinstance(clue, dict):
+                continue
+            text = str(clue.get("text", "")).strip()
+            if not text:
+                continue
+            if str(clue.get("type", "")).strip().lower() == "cls" and not cls_text:
+                cls_text = _strip_leading_article(text)
+            else:
+                extra_texts.append(text)
+
+        base = cls_text or _humanize_object_id(object_id)
+        if extra_texts:
+            labels.append(f"{base}, {', '.join(extra_texts)}")
+        else:
+            labels.append(base)
+    return labels
+
+
+def _format_target_box_text(
+    obj: Dict[str, Any],
+    fps: float,
+    video_width: Optional[float],
+    video_height: Optional[float],
+) -> str:
+    target_members = obj.get("target_members")
+    if not isinstance(target_members, list) or not target_members:
+        boxes = obj.get("boxes")
+        if not isinstance(boxes, dict):
+            boxes = {}
+        return "The object box is: " + format_box_string(
+            boxes=boxes,
+            fps=fps,
+            video_width=video_width,
+            video_height=video_height,
+            coord_decimals=4,
+        )
+
+    labels = _build_target_labels(obj, target_members)
+    if len(target_members) == 1:
+        boxes = target_members[0].get("boxes")
+        if not isinstance(boxes, dict):
+            boxes = {}
+        return "The object box is: " + format_box_string(
+            boxes=boxes,
+            fps=fps,
+            video_width=video_width,
+            video_height=video_height,
+            coord_decimals=4,
+        )
+
+    parts: List[str] = []
+    for member, label in zip(target_members, labels):
+        boxes = member.get("boxes")
+        if not isinstance(boxes, dict):
+            boxes = {}
+        parts.append(
+            f"{label}: "
+            + format_box_string(
+                boxes=boxes,
+                fps=fps,
+                video_width=video_width,
+                video_height=video_height,
+                coord_decimals=4,
+            )
+        )
+    return "The object boxes are: " + "; ".join(parts)
+
+
 def _probe_video_size(video_path: str) -> Tuple[Optional[int], Optional[int]]:
     if not video_path:
         return None, None
@@ -111,9 +224,6 @@ def transform_record(
     size_cache: Dict[str, Tuple[Optional[int], Optional[int]]],
 ) -> Dict[str, Any]:
     video_path = str(obj.get("video_path", ""))
-    boxes = obj.get("boxes")
-    if not isinstance(boxes, dict):
-        boxes = {}
     video_width = obj.get("video_width")
     video_height = obj.get("video_height")
     if not isinstance(video_width, int) or video_width <= 0 or not isinstance(video_height, int) or video_height <= 0:
@@ -132,13 +242,11 @@ def transform_record(
         },
         "Width": video_width,
         "Height": video_height,
-        "box": "The object box is: "
-        + format_box_string(
-            boxes=boxes,
+        "box": _format_target_box_text(
+            obj=obj,
             fps=fps,
             video_width=video_width,
             video_height=video_height,
-            coord_decimals=4,
         ),
     }
 

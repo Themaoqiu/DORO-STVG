@@ -93,10 +93,31 @@ def build_messages(
     assistant_format: str,
     include_system: bool,
 ) -> List[Dict[str, str]]:
+    has_multi_targets = any(
+        text and str(text).strip().lower().startswith("the object boxes are:")
+        for text in (pixel_box_text, norm_box_text)
+    )
     user_content = (
         f"<video>{query}\n\n"
-        "Please localize the referred object across frames and provide the target trajectory in the required format."
+        "Localize every referred target across frames and output trajectories in the exact required format.\n"
+        "Output requirements:\n"
+        "- Use normalized box coordinates in [0, 1].\n"
+        "- Do not output explanations, reasoning, or extra text beyond the required answer.\n"
+        "- Keep the frame-level coordinate format exactly as <frame_idx, time_sec, x1, y1, x2, y2; ... />.\n"
     )
+    if has_multi_targets:
+        user_content += (
+            "Multi-target format:\n"
+            "- Output one trajectory for each referred target.\n"
+            "- Before each <... />, write a short target description that identifies which target it is.\n"
+            "- Separate different targets with '; '.\n"
+            "- Exact format: The object boxes are: target description 1: <...>; target description 2: <...>\n"
+        )
+    else:
+        user_content += (
+            "Single-target format:\n"
+            "- Exact format: The object box is: <frame_idx, time_sec, x1, y1, x2, y2; ... />\n"
+        )
 
     if assistant_format == "pixel":
         assistant_content = pixel_box_text or "The object box is: < />"
@@ -117,7 +138,8 @@ def build_messages(
                 "role": "system",
                 "content": (
                     "You are an expert video grounding assistant. "
-                    "Given a query and a video, output the referred object's trajectory accurately."
+                    "Given a query and a video, return only the target trajectory answer in the required format. "
+                    "Do not add explanations. Preserve all referred targets in multi-target queries."
                 ),
             }
         )
