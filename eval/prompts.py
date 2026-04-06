@@ -5,9 +5,11 @@ from typing import Dict, Any, Optional
 SYSTEM_PROMPT = """You are an expert in spatiotemporal video grounding tasked with precisely locating objects/subjects in videos. When localizing the query in the video, you should watch the entire video carefully before producing an answer. For every subject/object you are asked to find, observe the video carefully first. Then provide the most plausible time interval in which the target appears, along with its bounding-box coordinates in every relevant frame."""
 
 
-USER_PROMPT = """Localize the referred target or targets for the query "{query}" in the video.
+USER_PROMPT = """At which time interval in the video can we see {query}? Please find the location of the corresponding subject/object in this video. Give the corresponding bounding boxes for the object(s) in each corresponding frame.
 
-Answer requirements:
+
+Guidelines:
+- Videos are sampled at 2 fps.
 - Use normalized box coordinates in [0, 1].
 - Do not output explanations.
 - Keep each trajectory in this exact coordinate format: <frame_idx, time_sec, x1, y1, x2, y2; ... />

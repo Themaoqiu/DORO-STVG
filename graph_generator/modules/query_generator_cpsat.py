@@ -52,10 +52,15 @@ all grounding semantics.
 - Preserve semantics exactly. Do not add, remove, or alter target identity clues.
 - Keep temporal meaning faithful to the original clue set.
 - Use clear and fluent wording suitable for human annotation.
+- Also produce one standalone natural-language target description for each target object.
 ## Output Rule
 Return strict JSON only:
 {
-  "query": "<polished query>"
+  "query": "<polished full query>",
+  "target_queries": {
+    "target 1": "<standalone natural-language description for target 1>",
+    "target 2": "<standalone natural-language description for target 2>"
+  }
 }
 """
 
@@ -76,17 +81,27 @@ You will receive visual cues for constructing query text for video localization 
 - Carefully examine the content in the section Visual cues used to localize each object.
   - If have only one object: output a semantically clear query using all the provided clue information to locate this object.
   - If have multi-target: Using all the provided clues, generate one semantically clear query that can locate both objects simultaneously. You may describe multiple objects separately, such as "the person in black clothing and the person leaning against the wall"; you may also fuse the descriptions of multiple objects, such as "the person in black clothing and the cat at his feet".
+- In addition to the full query, also output one standalone natural-language target description for each target separately.
 - If a clue category is present in inputs, reflect it in wording.
 - Prefer concise natural English; avoid redundant filler phrases.
 - The clues may not be naturally phrased, and the generated query should not follow the language style of the clues.
+- Each standalone target description should be a natural referring expression rather than a keyword list.
+- For example, prefer "the person standing in a suit jacket with slightly open lapels" over "person, stand, suit jacket".
 ## Output Format
 Return one valid JSON object:
 {{
-  "query": "..."
+  "query": "...",
+  "target_queries": {{
+    "target 1": "...",
+    "target 2": "..."
+  }}
 }}
 ## Output Specifications
 - Output strict JSON only.
 - "query" must be non-empty and in English.
+- "target_queries" must be an object.
+- Each target listed in the input must have exactly one entry in "target_queries".
+- Each target description must be non-empty and in English.
 """
 
 PROMPT_CATEGORY_TEXT: Dict[str, str] = {
@@ -2197,7 +2212,7 @@ class CPSATQuerySampler:
         max_concurrent_per_key: int = 100,
         max_retries: int = 5,
         system_prompt: str = QUERY_POLISH_SYSTEM_PROMPT,
-    ) -> Dict[str, str]:
+    ) -> Dict[str, Dict[str, Any]]:
         if not query_nodes:
             return {}
 
@@ -2370,10 +2385,10 @@ class CPSATQuerySampler:
             f"base_url={'set' if api_base_url else 'default'}",
             flush=True,
         )
-        polished_map: Dict[str, str] = {}
+        polished_map: Dict[str, Dict[str, Any]] = {}
         completed = 0
 
-        def extract_polished_query(response: str) -> Optional[str]:
+        def extract_polished_query(response: str) -> Optional[Dict[str, Any]]:
             parsed = JSONParser.parse(response)
             if not isinstance(parsed, dict):
                 return None
@@ -2381,15 +2396,30 @@ class CPSATQuerySampler:
             if not isinstance(query, str):
                 return None
             query = _norm(query)
-            return query if query else None
+            if not query:
+                return None
+            target_queries_raw = parsed.get("target_queries")
+            if not isinstance(target_queries_raw, dict):
+                return None
+            target_queries: Dict[str, str] = {}
+            for key, value in target_queries_raw.items():
+                kk = _norm(key)
+                vv = _norm(value)
+                if not kk or not vv:
+                    continue
+                target_queries[kk] = vv
+            if not target_queries:
+                return None
+            return {"query": query, "target_queries": target_queries}
 
         async for item in generator.generate_stream(
             prompts=prompts,
             system_prompt=system_prompt,
             validate_func=lambda resp: polished if (polished := extract_polished_query(resp)) is not None else False,
         ):
-            if item and isinstance(item.get("result"), str) and item["result"].strip():
-                polished_map[str(item["id"])] = _norm(item["result"])
+            result = item.get("result") if item else None
+            if item and isinstance(result, dict):
+                polished_map[str(item["id"])] = result
                 completed += 1
                 print(f"[query_cpsat] llm_polish_progress: {completed}/{len(prompts)}", flush=True)
         print(f"[query_cpsat] llm_polish_done: polished={len(polished_map)}", flush=True)
@@ -2434,6 +2464,7 @@ class CPSATQuerySampler:
                         "object_id": oid,
                         "start_frame": start,
                         "end_frame": end,
+                        "target_index": len(member_payload) + 1,
                         "boxes": boxes,
                     }
                 )
@@ -2456,6 +2487,7 @@ class CPSATQuerySampler:
                     "D": q.get("D"),
                     "target_arity": len(member_payload),
                     "target_members": member_payload,
+                    "per_target_queries": q.get("per_target_queries", {}),
                     "clues": q.get("clues", {}),
                     "solver": q.get("solver"),
                 }
@@ -2511,9 +2543,11 @@ class CPSATQuerySampler:
                     dropped = 0
                     for q in query_nodes:
                         qid = str(q.get("query_id", ""))
-                        polished = polished_map.get(qid)
-                        if polished:
-                            q["query"] = polished
+                        polished = polished_map.get(qid) or {}
+                        polished_query = _norm(polished.get("query", ""))
+                        if polished_query:
+                            q["query"] = polished_query
+                            q["per_target_queries"] = polished.get("target_queries", {})
                             q["llm_polished"] = True
                             kept_nodes.append(q)
                         else:

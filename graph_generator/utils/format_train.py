@@ -81,55 +81,25 @@ def _humanize_object_id(object_id: str) -> str:
     return text or "object"
 
 
-def _strip_leading_article(text: str) -> str:
+def _ensure_definite_np(text: str) -> str:
     text = str(text).strip()
-    for prefix in ("the ", "a ", "an "):
-        if text.lower().startswith(prefix):
-            return text[len(prefix):].strip()
-    return text
+    if not text:
+        return "the object"
+    lowered = text.lower()
+    if lowered.startswith(("the ", "a ", "an ")):
+        return text
+    return f"the {text}"
 
 
 def _build_target_labels(obj: Dict[str, Any], target_members: List[Dict[str, Any]]) -> List[str]:
-    clues = obj.get("clues") or {}
-    per_target = clues.get("per_target") if isinstance(clues, dict) else None
-    if not isinstance(per_target, list):
-        per_target = []
-
-    clue_map: Dict[str, Dict[str, Any]] = {}
-    for idx, item in enumerate(per_target, start=1):
-        if not isinstance(item, dict):
-            continue
-        object_id = str(item.get("object_id", "")).strip()
-        target_index = int(item.get("target_index") or idx)
-        key = object_id or f"target_{target_index}"
-        clue_map[key] = item
-
+    saved_target_queries = obj.get("per_target_queries")
     labels: List[str] = []
     for idx, member in enumerate(target_members, start=1):
-        object_id = str(member.get("object_id", "")).strip()
-        info = clue_map.get(object_id) or clue_map.get(f"target_{idx}") or {}
-        clue_items = info.get("clues") if isinstance(info, dict) else None
-        if not isinstance(clue_items, list):
-            clue_items = []
-
-        cls_text = ""
-        extra_texts: List[str] = []
-        for clue in clue_items:
-            if not isinstance(clue, dict):
-                continue
-            text = str(clue.get("text", "")).strip()
-            if not text:
-                continue
-            if str(clue.get("type", "")).strip().lower() == "cls" and not cls_text:
-                cls_text = _strip_leading_article(text)
-            else:
-                extra_texts.append(text)
-
-        base = cls_text or _humanize_object_id(object_id)
-        if extra_texts:
-            labels.append(f"{base}, {', '.join(extra_texts)}")
-        else:
-            labels.append(base)
+        value = saved_target_queries.get(f"target {idx}") if isinstance(saved_target_queries, dict) else None
+        if value is None and isinstance(saved_target_queries, dict):
+            value = saved_target_queries.get(str(idx))
+        text = str(value).strip() if value is not None else ""
+        labels.append(text or _ensure_definite_np(_humanize_object_id(str(member.get("object_id", "")))))
     return labels
 
 
