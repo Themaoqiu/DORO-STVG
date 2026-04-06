@@ -180,7 +180,7 @@ def _format_target_box_text(
                 coord_decimals=4,
             )
         )
-    return "The object boxes are: " + "; ".join(parts)
+    return "; ".join(parts)
 
 
 def _probe_video_size(video_path: str) -> Tuple[Optional[int], Optional[int]]:

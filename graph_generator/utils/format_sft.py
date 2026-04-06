@@ -94,7 +94,7 @@ def build_messages(
     include_system: bool,
 ) -> List[Dict[str, str]]:
     has_multi_targets = any(
-        text and str(text).strip().lower().startswith("the object boxes are:")
+        text and "<" in str(text) and ": <" in str(text) and "The object box is:" not in str(text)
         for text in (pixel_box_text, norm_box_text)
     )
     user_content = (
@@ -111,7 +111,7 @@ def build_messages(
             "- Output one trajectory for each referred target.\n"
             "- Before each <... />, write a short target description that identifies which target it is.\n"
             "- Separate different targets with '; '.\n"
-            "- Exact format: The object boxes are: target description 1: <...>; target description 2: <...>\n"
+            "- Exact format: target description 1: <...>; target description 2: <...>\n"
         )
     else:
         user_content += (

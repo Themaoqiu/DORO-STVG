@@ -12,7 +12,7 @@ Answer requirements:
 - Do not output explanations.
 - Keep each trajectory in this exact coordinate format: <frame_idx, time_sec, x1, y1, x2, y2; ... />
 - If there is one target, output: The object box is: <... />
-- If there are multiple targets, output: The object boxes are: target description 1: <...>; target description 2: <...>
+- If there are multiple targets, output: target description 1: <...>; target description 2: <...>
 """
 
 
