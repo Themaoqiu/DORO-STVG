@@ -196,7 +196,14 @@ class StreamGenerator:
                     # If validation function exists, validate the answer
                     if validate_func is not None:
                         if not validate_func(answer):
-                            logger.warning(f"Answer validation failed, retrying (attempt {retry_count + 1})")
+                            answer_preview = str(answer).strip().replace("\n", "\\n")
+                            if len(answer_preview) > 800:
+                                answer_preview = answer_preview[:800] + "...<truncated>"
+                            logger.warning(
+                                "Answer validation failed, retrying (attempt %s). Raw answer: %s",
+                                retry_count + 1,
+                                answer_preview,
+                            )
                             retry_count += 1
                             continue
                         else:
