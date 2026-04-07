@@ -132,7 +132,10 @@ def _format_target_box_text(
         boxes = target_members[0].get("boxes")
         if not isinstance(boxes, dict):
             boxes = {}
-        return f"{_fallback_query_label(obj)}: " + format_box_string(
+        label = labels[0] if labels else _fallback_query_label(obj)
+        if label == _ensure_definite_np(_humanize_object_id(str(target_members[0].get("object_id", "")))):
+            label = _fallback_query_label(obj)
+        return f"{label}: " + format_box_string(
             boxes=boxes,
             fps=fps,
             video_width=video_width,
