@@ -47,10 +47,13 @@ solely on 2D bounding box coordinates. Do NOT output 'left of' or 'right of'.
 ### Temporal Grounding
 - Output relationships with one or more time spans ([[start_frame, end_frame], ...]), as continuous intervals where the relationship is visually supported and both objects are present.
 ## Output Format
-Return a single valid JSON object:
+You must only return a single valid JSON object strictly follwing this schema:
 {{
   "relationships": [
-    [subject_id, predicate_verb, object_id, [[start_frame, end_frame], ...]]
+    [subject_id, 
+    predicate_verb, 
+    object_id, 
+    [[start_frame, end_frame], ...]]
   ]
 }}
 ## Output Specifications

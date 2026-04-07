@@ -103,6 +103,11 @@ def _build_target_labels(obj: Dict[str, Any], target_members: List[Dict[str, Any
     return labels
 
 
+def _fallback_query_label(obj: Dict[str, Any]) -> str:
+    text = str(obj.get("query", "")).strip()
+    return text or "the object"
+
+
 def _format_target_box_text(
     obj: Dict[str, Any],
     fps: float,
@@ -114,7 +119,7 @@ def _format_target_box_text(
         boxes = obj.get("boxes")
         if not isinstance(boxes, dict):
             boxes = {}
-        return "The object box is: " + format_box_string(
+        return f"{_fallback_query_label(obj)}: " + format_box_string(
             boxes=boxes,
             fps=fps,
             video_width=video_width,
@@ -127,7 +132,7 @@ def _format_target_box_text(
         boxes = target_members[0].get("boxes")
         if not isinstance(boxes, dict):
             boxes = {}
-        return "The object box is: " + format_box_string(
+        return f"{_fallback_query_label(obj)}: " + format_box_string(
             boxes=boxes,
             fps=fps,
             video_width=video_width,

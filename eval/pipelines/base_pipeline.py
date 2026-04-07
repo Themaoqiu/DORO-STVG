@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 
 from utils.stvg_video_utils import process_video
-from utils.metrics import compute_metrics
+from utils.metrics import Track, compute_metrics, compute_multi_target_metrics
 from prompts import SYSTEM_PROMPT, format_prompt, parse_response
 
 
@@ -78,6 +78,84 @@ class BasePipeline(ABC):
             return sampled_frame
         clamped_idx = max(0, min(int(sampled_frame), len(sampled_indices) - 1))
         return sampled_indices[clamped_idx]
+
+    def _build_gt_tracks(self, sample: Dict[str, Any]) -> List[Track]:
+        tracks = sample.get("gt_tracks_sampled")
+        if not isinstance(tracks, list) or not tracks:
+            return [
+                Track(
+                    temporal_span=sample["gt_temporal_sampled"],
+                    spatial_bboxes=sample["gt_bboxes_sampled"],
+                    description=str(sample.get("query", "")),
+                )
+            ]
+
+        built_tracks: List[Track] = []
+        for item in tracks:
+            if not isinstance(item, dict):
+                continue
+            built_tracks.append(
+                Track(
+                    temporal_span=item.get("temporal_span"),
+                    spatial_bboxes=item.get("spatial_bboxes", {}),
+                    description=str(item.get("description", "")),
+                )
+            )
+        return built_tracks
+
+    def _build_pred_tracks(self, parsed: Dict[str, Any]) -> List[Track]:
+        objects = parsed.get("objects")
+        if not isinstance(objects, list) or not objects:
+            return [
+                Track(
+                    temporal_span=parsed.get("temporal_span"),
+                    spatial_bboxes=parsed.get("spatial_bboxes", {}),
+                    description="",
+                )
+            ]
+
+        tracks: List[Track] = []
+        for item in objects:
+            if not isinstance(item, dict):
+                continue
+            tracks.append(
+                Track(
+                    temporal_span=item.get("temporal_span"),
+                    spatial_bboxes=item.get("spatial_bboxes", {}),
+                    description=str(item.get("description", "")),
+                )
+            )
+        return tracks
+
+    def _map_tracks_to_original(
+        self,
+        tracks: List[Track],
+        sampled_indices: List[int],
+    ) -> List[Dict[str, Any]]:
+        mapped_tracks: List[Dict[str, Any]] = []
+        for track in tracks:
+            temporal_span = track.temporal_span
+            if temporal_span is None:
+                temporal_orig = None
+            else:
+                temporal_orig = (
+                    self._map_sampled_to_original(temporal_span[0], sampled_indices),
+                    self._map_sampled_to_original(temporal_span[1], sampled_indices),
+                )
+
+            spatial_orig: Dict[int, List[float]] = {}
+            for sampled_frame, bbox in track.spatial_bboxes.items():
+                orig_frame = self._map_sampled_to_original(sampled_frame, sampled_indices)
+                spatial_orig[orig_frame] = bbox
+
+            mapped_tracks.append(
+                {
+                    "description": track.description,
+                    "temporal_span": temporal_orig,
+                    "spatial_bboxes": spatial_orig,
+                }
+            )
+        return mapped_tracks
     
     def run_evaluation(self):
         logger.info(f"Starting {self.get_dataset_name()} Evaluation")
@@ -124,29 +202,26 @@ class BasePipeline(ABC):
         batch_results = []
         for sample, full_response in zip(batch, full_responses):
             parsed = parse_response(full_response)
-
-            pred_temporal_sampled = parsed.get('temporal_span')
-            pred_bboxes_sampled = parsed.get('spatial_bboxes', {})
-
-            metrics = compute_metrics(
-                gt_span=sample['gt_temporal_sampled'],
-                pred_span=pred_temporal_sampled,
-                gt_bboxes=sample['gt_bboxes_sampled'],
-                pred_bboxes=pred_bboxes_sampled,
-                num_frames=len(sample['sampled_indices'])
-            )
-            
-            pred_temporal_orig = None
-            if pred_temporal_sampled:
-                pred_temporal_orig = (
-                    self._map_sampled_to_original(pred_temporal_sampled[0], sample['sampled_indices']),
-                    self._map_sampled_to_original(pred_temporal_sampled[1], sample['sampled_indices'])
+            gt_tracks_sampled = self._build_gt_tracks(sample)
+            pred_tracks_sampled = self._build_pred_tracks(parsed)
+            if len(gt_tracks_sampled) == 1 and len(pred_tracks_sampled) == 1:
+                metrics = compute_metrics(
+                    gt_span=gt_tracks_sampled[0].temporal_span,
+                    pred_span=pred_tracks_sampled[0].temporal_span,
+                    gt_bboxes=gt_tracks_sampled[0].spatial_bboxes,
+                    pred_bboxes=pred_tracks_sampled[0].spatial_bboxes,
+                    num_frames=len(sample['sampled_indices']),
                 )
-            
-            pred_bboxes_orig = {}
-            for sampled_frame, bbox in pred_bboxes_sampled.items():
-                orig_frame = self._map_sampled_to_original(sampled_frame, sample['sampled_indices'])
-                pred_bboxes_orig[orig_frame] = bbox
+            else:
+                metrics = compute_multi_target_metrics(gt_tracks_sampled, pred_tracks_sampled)
+
+            gt_tracks_orig = self._map_tracks_to_original(gt_tracks_sampled, sample['sampled_indices'])
+            pred_tracks_orig = self._map_tracks_to_original(pred_tracks_sampled, sample['sampled_indices'])
+
+            pred_temporal_sampled = pred_tracks_sampled[0].temporal_span if pred_tracks_sampled else None
+            pred_bboxes_sampled = pred_tracks_sampled[0].spatial_bboxes if pred_tracks_sampled else {}
+            pred_temporal_orig = pred_tracks_orig[0]["temporal_span"] if pred_tracks_orig else None
+            pred_bboxes_orig = pred_tracks_orig[0]["spatial_bboxes"] if pred_tracks_orig else {}
             
             result = {
                 'video_name': sample['video_name'],
@@ -154,14 +229,32 @@ class BasePipeline(ABC):
                 'full_response': full_response,
                 'parsed': parsed,
                 
-                'gt_temporal_sampled': sample['gt_temporal_sampled'],
-                'gt_temporal_orig': (sample['st_frame_orig'], sample['ed_frame_orig']),
-                'gt_bboxes_sampled': sample['gt_bboxes_sampled'],
+                'gt_temporal_sampled': gt_tracks_sampled[0].temporal_span if gt_tracks_sampled else None,
+                'gt_temporal_orig': gt_tracks_orig[0]['temporal_span'] if gt_tracks_orig else None,
+                'gt_bboxes_sampled': gt_tracks_sampled[0].spatial_bboxes if gt_tracks_sampled else {},
+                'gt_tracks_sampled': [
+                    {
+                        'description': track.description,
+                        'temporal_span': track.temporal_span,
+                        'spatial_bboxes': track.spatial_bboxes,
+                    }
+                    for track in gt_tracks_sampled
+                ],
+                'gt_tracks_orig': gt_tracks_orig,
                 
                 'pred_temporal_sampled': pred_temporal_sampled,
                 'pred_temporal_orig': pred_temporal_orig,
                 'pred_bboxes_sampled': pred_bboxes_sampled,
                 'pred_bboxes_orig': pred_bboxes_orig,
+                'pred_tracks_sampled': [
+                    {
+                        'description': track.description,
+                        'temporal_span': track.temporal_span,
+                        'spatial_bboxes': track.spatial_bboxes,
+                    }
+                    for track in pred_tracks_sampled
+                ],
+                'pred_tracks_orig': pred_tracks_orig,
                 
                 'metrics': metrics,
                 
@@ -176,14 +269,11 @@ class BasePipeline(ABC):
         return batch_results
     
     def _compute_average_metrics(self, results: List[Dict[str, Any]]) -> Dict[str, float]:
-        avg_tiou = np.mean([r['metrics']['tIoU'] for r in results])
-        avg_siou = np.mean([r['metrics']['sIoU'] for r in results])
-        avg_mviou = np.mean([r['metrics']['m_vIoU'] for r in results])
-        
         return {
-            'tIoU': float(avg_tiou),
-            'sIoU': float(avg_siou),
-            'm_vIoU': float(avg_mviou),
+            'm_tIoU': float(np.mean([r['metrics']['m_tIoU'] for r in results])),
+            'm_vIoU': float(np.mean([r['metrics']['m_vIoU'] for r in results])),
+            'vIoU@0.3': float(np.mean([r['metrics']['vIoU@0.3'] for r in results])),
+            'vIoU@0.5': float(np.mean([r['metrics']['vIoU@0.5'] for r in results])),
         }
     
     def _save_results(self, results: List[Dict[str, Any]], avg_metrics: Dict[str, float]):
@@ -214,10 +304,11 @@ class BasePipeline(ABC):
         
         logger.info(f"Evaluation results saved to: {eval_folder}")
         logger.info(f"{'='*60}")
-        logger.info(f"Average Metrics:")
-        logger.info(f"  tIoU: {avg_metrics['tIoU']:.4f}")
-        logger.info(f"  sIoU: {avg_metrics['sIoU']:.4f}")
+        logger.info("Average Metrics:")
+        logger.info(f"  m_tIoU: {avg_metrics['m_tIoU']:.4f}")
         logger.info(f"  m_vIoU: {avg_metrics['m_vIoU']:.4f}")
+        logger.info(f"  vIoU@0.3: {avg_metrics['vIoU@0.3']:.4f}")
+        logger.info(f"  vIoU@0.5: {avg_metrics['vIoU@0.5']:.4f}")
     
     def cleanup_annotated_videos(self):
         if self.annotated_video_dir.exists():

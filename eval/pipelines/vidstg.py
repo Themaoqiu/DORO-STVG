@@ -131,20 +131,23 @@ class VidSTGPipeline(BaseSTVGPipeline):
         logger.info(f"Evaluation results saved to: {eval_folder}")
         logger.info(f"{'='*60}")
         logger.info(f"Overall Metrics:")
-        logger.info(f"  tIoU: {avg_metrics['overall']['tIoU']:.4f}")
-        logger.info(f"  sIoU: {avg_metrics['overall']['sIoU']:.4f}")
+        logger.info(f"  m_tIoU: {avg_metrics['overall']['m_tIoU']:.4f}")
         logger.info(f"  m_vIoU: {avg_metrics['overall']['m_vIoU']:.4f}")
+        logger.info(f"  vIoU@0.3: {avg_metrics['overall']['vIoU@0.3']:.4f}")
+        logger.info(f"  vIoU@0.5: {avg_metrics['overall']['vIoU@0.5']:.4f}")
         
         if 'declarative' in avg_metrics:
             logger.info(f"Declarative Metrics:")
-            logger.info(f"  tIoU: {avg_metrics['declarative']['tIoU']:.4f}")
-            logger.info(f"  sIoU: {avg_metrics['declarative']['sIoU']:.4f}")
+            logger.info(f"  m_tIoU: {avg_metrics['declarative']['m_tIoU']:.4f}")
             logger.info(f"  m_vIoU: {avg_metrics['declarative']['m_vIoU']:.4f}")
+            logger.info(f"  vIoU@0.3: {avg_metrics['declarative']['vIoU@0.3']:.4f}")
+            logger.info(f"  vIoU@0.5: {avg_metrics['declarative']['vIoU@0.5']:.4f}")
         
         if 'interrogative' in avg_metrics:
             logger.info(f"Interrogative Metrics:")
-            logger.info(f"  tIoU: {avg_metrics['interrogative']['tIoU']:.4f}")
-            logger.info(f"  sIoU: {avg_metrics['interrogative']['sIoU']:.4f}")
+            logger.info(f"  m_tIoU: {avg_metrics['interrogative']['m_tIoU']:.4f}")
             logger.info(f"  m_vIoU: {avg_metrics['interrogative']['m_vIoU']:.4f}")
+            logger.info(f"  vIoU@0.3: {avg_metrics['interrogative']['vIoU@0.3']:.4f}")
+            logger.info(f"  vIoU@0.5: {avg_metrics['interrogative']['vIoU@0.5']:.4f}")
         
         logger.info(f"{'='*60}")
