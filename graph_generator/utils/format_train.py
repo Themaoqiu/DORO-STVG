@@ -98,7 +98,7 @@ def _build_target_labels(obj: Dict[str, Any], target_members: List[Dict[str, Any
         value = saved_target_queries.get(f"target {idx}") if isinstance(saved_target_queries, dict) else None
         if value is None and isinstance(saved_target_queries, dict):
             value = saved_target_queries.get(str(idx))
-        text = str(value).strip() if value is not None else ""
+        text = str(value).strip().rstrip(".").strip() if value is not None else ""
         labels.append(text or _ensure_definite_np(_humanize_object_id(str(member.get("object_id", "")))))
     return labels
 

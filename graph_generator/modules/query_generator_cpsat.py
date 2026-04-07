@@ -2392,7 +2392,7 @@ class CPSATQuerySampler:
             target_queries: Dict[str, str] = {}
             for key, value in target_queries_raw.items():
                 kk = _norm(key)
-                vv = _norm(value)
+                vv = _norm(value).rstrip(".").strip()
                 if not kk or not vv:
                     continue
                 target_queries[kk] = vv
