@@ -81,12 +81,10 @@ You will receive visual cues for constructing query text for video localization 
 - Carefully examine the content in the section Visual cues used to localize each object.
   - If have only one object: output a semantically clear query using all the provided clue information to locate this object.
   - If have multi-target: Using all the provided clues, generate one semantically clear query that can locate both objects simultaneously. You may describe multiple objects separately, such as "the person in black clothing and the person leaning against the wall"; you may also fuse the descriptions of multiple objects, such as "the person in black clothing and the cat at his feet".
-- In addition to the full query, also output one standalone natural-language target description for each target separately.
-- If a clue category is present in inputs, reflect it in wording.
 - Prefer concise natural English; avoid redundant filler phrases.
 - The clues may not be naturally phrased, and the generated query should not follow the language style of the clues.
+- In addition to the full query, also output one simple general natural-language target description for each target separately. And keep it brief—just enough to distinguish the target objects.
 - Each standalone target description should be a natural referring expression rather than a keyword list.
-- For example, prefer "the person standing in a suit jacket with slightly open lapels" over "person, stand, suit jacket".
 ## Output Format
 Return one valid JSON object:
 {{
