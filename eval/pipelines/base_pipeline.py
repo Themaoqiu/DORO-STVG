@@ -1,15 +1,10 @@
 import json
 import logging
-import shutil
 from pathlib import Path
 from typing import List, Dict, Any
 from datetime import datetime
 from abc import ABC, abstractmethod
 
-import cv2
-import numpy as np
-
-from utils.stvg_video_utils import process_video
 from utils.metrics import Track, compute_metrics, compute_multi_target_metrics
 from prompts import SYSTEM_PROMPT, format_prompt, parse_response
 
@@ -27,8 +22,6 @@ class BasePipeline(ABC):
         annotation_path: str,
         video_dir: str,
         output_dir: str,
-        annotated_video_dir: str,
-        num_frames: int = 100,
         batch_size: int = 1,
     ):
         self.model = model
@@ -37,12 +30,9 @@ class BasePipeline(ABC):
         self.annotation_path = Path(annotation_path)
         self.video_dir = Path(video_dir)
         self.output_dir = Path(output_dir)
-        self.annotated_video_dir = Path(annotated_video_dir)
-        self.num_frames = num_frames
         self.batch_size = batch_size
         
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.annotated_video_dir.mkdir(parents=True, exist_ok=True)
     
     @abstractmethod
     def load_data(self) -> List[Dict[str, Any]]:
@@ -51,33 +41,6 @@ class BasePipeline(ABC):
     @abstractmethod
     def get_dataset_name(self) -> str:
         pass
-    
-    def _get_frame_mapping(self, video_path: str):
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise ValueError(f"Cannot open video: {video_path}")
-        
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.release()
-        
-        # Use full original frames without down-sampling.
-        sampled_indices = np.arange(total_frames, dtype=int)
-        
-        orig2sampled = {}
-        for sampled_idx, orig_idx in enumerate(sampled_indices):
-            orig2sampled[orig_idx] = sampled_idx
-        
-        return orig2sampled, sampled_indices
-    
-    def _map_frame_to_sampled(self, orig_frame: int, sampled_indices: np.ndarray) -> int:
-        distances = np.abs(sampled_indices - orig_frame)
-        return int(np.argmin(distances))
-    
-    def _map_sampled_to_original(self, sampled_frame: int, sampled_indices: List[int]) -> int:
-        if not sampled_indices:
-            return sampled_frame
-        clamped_idx = max(0, min(int(sampled_frame), len(sampled_indices) - 1))
-        return sampled_indices[clamped_idx]
 
     def _build_gt_tracks(self, sample: Dict[str, Any]) -> List[Track]:
         tracks = sample.get("gt_tracks_sampled")
@@ -127,36 +90,6 @@ class BasePipeline(ABC):
             )
         return tracks
 
-    def _map_tracks_to_original(
-        self,
-        tracks: List[Track],
-        sampled_indices: List[int],
-    ) -> List[Dict[str, Any]]:
-        mapped_tracks: List[Dict[str, Any]] = []
-        for track in tracks:
-            temporal_span = track.temporal_span
-            if temporal_span is None:
-                temporal_orig = None
-            else:
-                temporal_orig = (
-                    self._map_sampled_to_original(temporal_span[0], sampled_indices),
-                    self._map_sampled_to_original(temporal_span[1], sampled_indices),
-                )
-
-            spatial_orig: Dict[int, List[float]] = {}
-            for sampled_frame, bbox in track.spatial_bboxes.items():
-                orig_frame = self._map_sampled_to_original(sampled_frame, sampled_indices)
-                spatial_orig[orig_frame] = bbox
-
-            mapped_tracks.append(
-                {
-                    "description": track.description,
-                    "temporal_span": temporal_orig,
-                    "spatial_bboxes": spatial_orig,
-                }
-            )
-        return mapped_tracks
-    
     def run_evaluation(self):
         logger.info(f"Starting {self.get_dataset_name()} Evaluation")
         
@@ -181,21 +114,15 @@ class BasePipeline(ABC):
     def _process_batch(self, batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         video_paths = []
         for sample in batch:
-            processed_video_path, video_metadata = process_video(
-                video_path=sample['video_path'],
-                output_folder=str(self.annotated_video_dir),
-                num_frames=self.num_frames,
-                annotate_frames=False
-            )
-            video_paths.append(processed_video_path)
-            sample['video_metadata'] = video_metadata
-            logger.info(f"Using original video: {processed_video_path}")
+            video_path = sample['video_path']
+            video_paths.append(video_path)
+            logger.info(f"Using original video: {video_path}")
         
         queries = [format_prompt(sample['query']) for sample in batch]
 
         full_responses = self.model.predict_batch(
             queries=queries,
-            annotated_video_paths=video_paths,
+            video_paths=video_paths,
             system_prompt=SYSTEM_PROMPT
         )
         
@@ -210,13 +137,27 @@ class BasePipeline(ABC):
                     pred_span=pred_tracks_sampled[0].temporal_span,
                     gt_bboxes=gt_tracks_sampled[0].spatial_bboxes,
                     pred_bboxes=pred_tracks_sampled[0].spatial_bboxes,
-                    num_frames=len(sample['sampled_indices']),
+                    num_frames=len(gt_tracks_sampled[0].spatial_bboxes),
                 )
             else:
                 metrics = compute_multi_target_metrics(gt_tracks_sampled, pred_tracks_sampled)
 
-            gt_tracks_orig = self._map_tracks_to_original(gt_tracks_sampled, sample['sampled_indices'])
-            pred_tracks_orig = self._map_tracks_to_original(pred_tracks_sampled, sample['sampled_indices'])
+            gt_tracks_orig = [
+                {
+                    "description": track.description,
+                    "temporal_span": track.temporal_span,
+                    "spatial_bboxes": track.spatial_bboxes,
+                }
+                for track in gt_tracks_sampled
+            ]
+            pred_tracks_orig = [
+                {
+                    "description": track.description,
+                    "temporal_span": track.temporal_span,
+                    "spatial_bboxes": track.spatial_bboxes,
+                }
+                for track in pred_tracks_sampled
+            ]
 
             pred_temporal_sampled = pred_tracks_sampled[0].temporal_span if pred_tracks_sampled else None
             pred_bboxes_sampled = pred_tracks_sampled[0].spatial_bboxes if pred_tracks_sampled else {}
@@ -258,9 +199,6 @@ class BasePipeline(ABC):
                 
                 'metrics': metrics,
                 
-                'sampled_indices': sample['sampled_indices'],
-                'num_frames': self.num_frames,
-                
                 'metadata': sample['metadata'],
             }
             
@@ -269,11 +207,18 @@ class BasePipeline(ABC):
         return batch_results
     
     def _compute_average_metrics(self, results: List[Dict[str, Any]]) -> Dict[str, float]:
+        if not results:
+            return {
+                'm_tIoU': 0.0,
+                'm_vIoU': 0.0,
+                'vIoU@0.3': 0.0,
+                'vIoU@0.5': 0.0,
+            }
         return {
-            'm_tIoU': float(np.mean([r['metrics']['m_tIoU'] for r in results])),
-            'm_vIoU': float(np.mean([r['metrics']['m_vIoU'] for r in results])),
-            'vIoU@0.3': float(np.mean([r['metrics']['vIoU@0.3'] for r in results])),
-            'vIoU@0.5': float(np.mean([r['metrics']['vIoU@0.5'] for r in results])),
+            'm_tIoU': float(sum(r['metrics']['m_tIoU'] for r in results) / len(results)),
+            'm_vIoU': float(sum(r['metrics']['m_vIoU'] for r in results) / len(results)),
+            'vIoU@0.3': float(sum(r['metrics']['vIoU@0.3'] for r in results) / len(results)),
+            'vIoU@0.5': float(sum(r['metrics']['vIoU@0.5'] for r in results) / len(results)),
         }
     
     def _save_results(self, results: List[Dict[str, Any]], avg_metrics: Dict[str, float]):
@@ -293,7 +238,6 @@ class BasePipeline(ABC):
             'dataset': self.get_dataset_name(),
             'model': self.model_name,
             'num_samples': len(results),
-            'num_frames': self.num_frames,
             'timestamp': timestamp,
             'average_metrics': avg_metrics,
         }
@@ -309,10 +253,3 @@ class BasePipeline(ABC):
         logger.info(f"  m_vIoU: {avg_metrics['m_vIoU']:.4f}")
         logger.info(f"  vIoU@0.3: {avg_metrics['vIoU@0.3']:.4f}")
         logger.info(f"  vIoU@0.5: {avg_metrics['vIoU@0.5']:.4f}")
-    
-    def cleanup_annotated_videos(self):
-        if self.annotated_video_dir.exists():
-            logger.info(f"Cleaning up annotated videos in {self.annotated_video_dir}")
-            shutil.rmtree(self.annotated_video_dir)
-            self.annotated_video_dir.mkdir(parents=True, exist_ok=True)
-            logger.info("Cleanup completed")

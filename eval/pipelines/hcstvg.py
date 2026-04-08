@@ -1,17 +1,8 @@
 import json
 import logging
-import cv2
-import shutil
-from datetime import datetime
-from pathlib import Path
 from typing import List, Dict, Any
 
-import numpy as np
-
 from pipelines.base_pipeline import BasePipeline
-from utils.stvg_video_utils import process_video
-from prompts import format_prompt, parse_response, SYSTEM_PROMPT
-from utils.metrics import compute_metrics
 
 
 logger = logging.getLogger(__name__)
@@ -29,15 +20,10 @@ class HCSTVGPipeline(BasePipeline):
         samples = []
         for video_name, anno in data.items():
             video_path = self.video_dir / video_name
-            
-            orig2sampled, sampled_indices = self._get_frame_mapping(str(video_path))
-            
+
             st_frame_orig = anno['st_frame']
             ed_frame_orig = anno['ed_frame']
-            gt_temporal_sampled = (
-                self._map_frame_to_sampled(st_frame_orig, sampled_indices),
-                self._map_frame_to_sampled(ed_frame_orig, sampled_indices)
-            )
+            gt_temporal_sampled = (st_frame_orig, ed_frame_orig)
             
             width = anno['width']
             height = anno['height']
@@ -61,8 +47,7 @@ class HCSTVGPipeline(BasePipeline):
                 y2_norm = (y + h) / height
                 bbox_normalized = [x1_norm, y1_norm, x2_norm, y2_norm]
 
-                sampled_frame_idx = self._map_frame_to_sampled(frame_idx, sampled_indices)
-                gt_bboxes_sampled[sampled_frame_idx] = bbox_normalized
+                gt_bboxes_sampled[frame_idx] = bbox_normalized
 
             if invalid_bbox:
                 continue
@@ -73,7 +58,6 @@ class HCSTVGPipeline(BasePipeline):
                 'query': anno.get('English', ''),
                 'gt_temporal_sampled': gt_temporal_sampled,
                 'gt_bboxes_sampled': gt_bboxes_sampled,
-                'sampled_indices': sampled_indices.tolist(),
                 'st_frame_orig': st_frame_orig,
                 'ed_frame_orig': ed_frame_orig,
                 'metadata': {

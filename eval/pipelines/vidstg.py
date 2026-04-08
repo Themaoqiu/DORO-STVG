@@ -29,14 +29,9 @@ class VidSTGPipeline(BaseSTVGPipeline):
                 logger.warning(f"Video not found: {video_path}")
                 continue
             
-            orig2sampled, sampled_indices = self._get_frame_mapping(str(video_path))
-            
             begin_fid = anno['temp_gt']['begin_fid']
             end_fid = anno['temp_gt']['end_fid']
-            gt_temporal_sampled = (
-                self._map_frame_to_sampled(begin_fid, sampled_indices),
-                self._map_frame_to_sampled(end_fid, sampled_indices)
-            )
+            gt_temporal_sampled = (begin_fid, end_fid)
             
             width = anno['width']
             height = anno['height']
@@ -49,8 +44,7 @@ class VidSTGPipeline(BaseSTVGPipeline):
                 y2_norm = bbox['ymax'] / height
                 bbox_normalized = [x1_norm, y1_norm, x2_norm, y2_norm]
                 
-                sampled_frame_idx = self._map_frame_to_sampled(frame_idx, sampled_indices)
-                gt_bboxes_sampled[sampled_frame_idx] = bbox_normalized
+                gt_bboxes_sampled[frame_idx] = bbox_normalized
             
             qtype = anno['qtype']
             
@@ -61,7 +55,6 @@ class VidSTGPipeline(BaseSTVGPipeline):
                 'gt_temporal_sampled': gt_temporal_sampled,
                 'gt_temporal_orig': (begin_fid, end_fid),
                 'gt_bboxes_sampled': gt_bboxes_sampled,
-                'sampled_indices': sampled_indices.tolist(),
                 'metadata': {
                     'vid': vid,
                     'item_id': item_id,
@@ -118,7 +111,6 @@ class VidSTGPipeline(BaseSTVGPipeline):
                 'declarative': len([r for r in results if r['metadata']['qtype'] == 'declar']),
                 'interrogative': len([r for r in results if r['metadata']['qtype'] != 'declar']),
             },
-            'num_frames': self.num_frames,
             'timestamp': timestamp,
             'average_metrics': avg_metrics,
         }

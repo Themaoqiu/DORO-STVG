@@ -15,7 +15,6 @@ class QwenVLBase:
         self, 
         model_path: str,
         batch_size: int = 1,
-        nframes: int = 100,
         max_tokens: int = 512,
         max_model_len: int = 8192,
         temperature: float = 0.0,
@@ -24,7 +23,6 @@ class QwenVLBase:
     ):
         self.model_path = model_path
         self.batch_size = batch_size
-        self.nframes = nframes
         self.max_tokens = max_tokens
         self.max_model_len = max_model_len
         self.temperature = temperature
@@ -49,7 +47,7 @@ class QwenVLBase:
     def prepare_messages(
         self, 
         query: str, 
-        annotated_video_path: str,
+        video_path: str,
         system_prompt: str
     ) -> List[Dict[str, Any]]:
         """Prepare messages for model input."""
@@ -63,7 +61,7 @@ class QwenVLBase:
                 "content": [
                     {
                         "type": "video",
-                        "video": annotated_video_path,
+                        "video": video_path,
                         "max_pixels": 1280 * 28 * 28,
                     },
                     {
@@ -78,7 +76,7 @@ class QwenVLBase:
     def predict_batch(
         self, 
         queries: List[str],
-        annotated_video_paths: List[str],
+        video_paths: List[str],
         system_prompt: str
     ) -> List[str]:
         """
@@ -109,13 +107,13 @@ class Qwen2_5VL(QwenVLBase):
     def predict_batch(
         self, 
         queries: List[str],
-        annotated_video_paths: List[str],
+        video_paths: List[str],
         system_prompt: str
     ) -> List[str]:
         from qwen_vl_utils import process_vision_info
         
         batch_messages = []
-        for query, video_path in zip(queries, annotated_video_paths):
+        for query, video_path in zip(queries, video_paths):
             messages = self.prepare_messages(query, video_path, system_prompt)
             batch_messages.append(messages)
         
@@ -174,13 +172,13 @@ class Qwen3VL(QwenVLBase):
     def predict_batch(
         self, 
         queries: List[str],
-        annotated_video_paths: List[str],
+        video_paths: List[str],
         system_prompt: str
     ) -> List[str]:
         from qwen_vl_utils import process_vision_info
         
         llm_inputs = []
-        for query, video_path in zip(queries, annotated_video_paths):
+        for query, video_path in zip(queries, video_paths):
             messages = self.prepare_messages(query, video_path, system_prompt)
             
             text = self.processor.apply_chat_template(
