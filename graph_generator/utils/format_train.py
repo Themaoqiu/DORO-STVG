@@ -53,21 +53,46 @@ def _format_box_entries(
     return entries
 
 
-def format_box_string(
+def format_box_dict(
     boxes: Dict[str, List[Any]],
-    fps: float,
     video_width: Optional[float] = None,
     video_height: Optional[float] = None,
-    coord_decimals: int = 1,
+    coord_decimals: int = 4,
+) -> Dict[str, List[float]]:
+    frame_map: Dict[str, List[float]] = {}
+    for frame_idx, coords in _sorted_box_items(boxes):
+        if not isinstance(coords, list) or len(coords) != 4:
+            continue
+        x1, y1, x2, y2 = (_to_float(c) for c in coords)
+        if video_width and video_height and video_width > 0 and video_height > 0:
+            x1 = x1 / video_width
+            y1 = y1 / video_height
+            x2 = x2 / video_width
+            y2 = y2 / video_height
+        frame_map[str(frame_idx)] = [
+            round(x1, coord_decimals),
+            round(y1, coord_decimals),
+            round(x2, coord_decimals),
+            round(y2, coord_decimals),
+        ]
+    return frame_map
+
+
+def format_box_payload(
+    label_to_boxes: Dict[str, Dict[str, List[Any]]],
+    video_width: Optional[float] = None,
+    video_height: Optional[float] = None,
+    coord_decimals: int = 4,
 ) -> str:
-    entries = _format_box_entries(
-        boxes=boxes,
-        fps=fps,
-        video_width=video_width,
-        video_height=video_height,
-        coord_decimals=coord_decimals,
-    )
-    return "<" + "; ".join(entries) + " />"
+    payload: Dict[str, Dict[str, List[float]]] = {}
+    for label, boxes in label_to_boxes.items():
+        payload[str(label)] = format_box_dict(
+            boxes=boxes,
+            video_width=video_width,
+            video_height=video_height,
+            coord_decimals=coord_decimals,
+        )
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _humanize_object_id(object_id: str) -> str:
@@ -110,7 +135,6 @@ def _fallback_query_label(obj: Dict[str, Any]) -> str:
 
 def _format_target_box_text(
     obj: Dict[str, Any],
-    fps: float,
     video_width: Optional[float],
     video_height: Optional[float],
 ) -> str:
@@ -119,9 +143,8 @@ def _format_target_box_text(
         boxes = obj.get("boxes")
         if not isinstance(boxes, dict):
             boxes = {}
-        return f"{_fallback_query_label(obj)}: " + format_box_string(
-            boxes=boxes,
-            fps=fps,
+        return format_box_payload(
+            {_fallback_query_label(obj): boxes},
             video_width=video_width,
             video_height=video_height,
             coord_decimals=4,
@@ -135,30 +158,25 @@ def _format_target_box_text(
         label = labels[0] if labels else _fallback_query_label(obj)
         if label == _ensure_definite_np(_humanize_object_id(str(target_members[0].get("object_id", "")))):
             label = _fallback_query_label(obj)
-        return f"{label}: " + format_box_string(
-            boxes=boxes,
-            fps=fps,
+        return format_box_payload(
+            {label: boxes},
             video_width=video_width,
             video_height=video_height,
             coord_decimals=4,
         )
 
-    parts: List[str] = []
+    label_to_boxes: Dict[str, Dict[str, List[Any]]] = {}
     for member, label in zip(target_members, labels):
         boxes = member.get("boxes")
         if not isinstance(boxes, dict):
             boxes = {}
-        parts.append(
-            f"{label}: "
-            + format_box_string(
-                boxes=boxes,
-                fps=fps,
-                video_width=video_width,
-                video_height=video_height,
-                coord_decimals=4,
-            )
-        )
-    return "; ".join(parts)
+        label_to_boxes[label] = boxes
+    return format_box_payload(
+        label_to_boxes,
+        video_width=video_width,
+        video_height=video_height,
+        coord_decimals=4,
+    )
 
 
 def _probe_video_size(video_path: str) -> Tuple[Optional[int], Optional[int]]:
@@ -198,7 +216,6 @@ def _probe_video_size(video_path: str) -> Tuple[Optional[int], Optional[int]]:
 
 def transform_record(
     obj: Dict[str, Any],
-    fps: float,
     size_cache: Dict[str, Tuple[Optional[int], Optional[int]]],
 ) -> Dict[str, Any]:
     video_path = str(obj.get("video_path", ""))
@@ -222,7 +239,6 @@ def transform_record(
         "Height": video_height,
         "box": _format_target_box_text(
             obj=obj,
-            fps=fps,
             video_width=video_width,
             video_height=video_height,
         ),
@@ -249,7 +265,7 @@ def main(
             if not line:
                 continue
             obj = json.loads(line)
-            out = transform_record(obj, fps=fps, size_cache=size_cache)
+            out = transform_record(obj, size_cache=size_cache)
             fout.write(json.dumps(out, ensure_ascii=False) + "\n")
             count += 1
 

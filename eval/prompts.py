@@ -2,21 +2,24 @@ import re
 from typing import Dict, Any, Optional
 
 
-SYSTEM_PROMPT = """You are an expert in spatiotemporal video grounding tasked with precisely locating objects/subjects in videos. When localizing the query in the video, you should watch the entire video carefully before producing an answer. For every subject/object you are asked to find, observe the video carefully first. Then provide the most plausible time interval in which the target appears, along with its bounding-box coordinates in every relevant frame."""
+SYSTEM_PROMPT = """You are an expert in spatiotemporal video grounding tasked with precisely locating objects/subjects in videos. You should output the space-time tube for each object the user intends to find."""
 
 
-USER_PROMPT = """At which time interval in the video can we see {query}? Please find the location of the corresponding subject/object in this video. Give the corresponding bounding boxes for the object(s) in each corresponding frame.
+USER_PROMPT = """Where does {query} occur in the video? Please find the location of the corresponding subject/object in this video. Give the corresponding bounding boxes for the object(s) in each corresponding frame.\n\n
 
-
-Guidelines:
-- Videos are sampled at 2 fps.
-- Use normalized box coordinates in [0, 1].
-- Do not output explanations.
-- Keep each trajectory in this exact coordinate format: <frame_idx, time_sec, x1, y1, x2, y2; ... />
-- If there is one target, output: The object box is: <... />
-- If there are multiple targets, output: target description 1: <...>; target description 2: <...>
+Guidelines:\n
+- Videos are sampled at 2 fps.\n
+- Use normalized box coordinates in [0, 1].\n
+- Do not output explanations.\n
+- You must follow the exact output format below, and only output the format without any additional text or explanation.\n
+- Output a strict JSON object whose keys are target descriptions.\n
+- Each target description maps to a JSON object whose keys are frame indices as strings and whose values are normalized boxes [x1, y1, x2, y2].\n
+- Put frame indices first. Do not output timestamps.\n
+- Example for one target:\n
+  {{"chair": {{"12": [0.10, 0.20, 0.30, 0.40], "13": [0.11, 0.20, 0.31, 0.40]}}}}\n
+- Example for multiple targets:\n
+  {{"chair": {{"12": [0.10, 0.20, 0.30, 0.40]}}, "table": {{"12": [0.40, 0.50, 0.70, 0.90]}}}}\n
 """
-
 
 def format_prompt(query: str) -> str:
     return USER_PROMPT.format(query=query)
@@ -29,28 +32,25 @@ def parse_response(response_text: str) -> Dict[str, Any]:
         'objects': [],
     }
 
-    object_matches = re.findall(r'([^:;<>]+?)\s*:\s*(<[^>]*?/>)', response_text, flags=re.IGNORECASE)
-    if not object_matches:
-        single_box_match = re.search(r'The object box is:\s*(<[^>]*?/>)', response_text, flags=re.IGNORECASE)
-        if single_box_match:
-            object_matches = [('object', single_box_match.group(1))]
+    object_matches = re.findall(
+        r'["\']?([^"\':{}]+?)["\']?\s*:\s*\{([^{}]*)\}',
+        response_text,
+        flags=re.DOTALL,
+    )
 
     if object_matches:
-        for description, box_text in object_matches:
+        for description, frame_map_text in object_matches:
             spatial_bboxes = {}
-            inner = box_text.strip()
-            if inner.startswith("<"):
-                inner = inner[1:]
-            if inner.endswith("/>"):
-                inner = inner[:-2]
-            inner = inner.strip()
-            for chunk in inner.split(";"):
-                parts = [part.strip() for part in chunk.split(",")]
-                if len(parts) != 6:
-                    continue
+            frame_matches = re.findall(
+                r'["\']?(\d+)["\']?\s*:\s*\[\s*([^\]]+?)\s*\]',
+                frame_map_text,
+            )
+            for frame_idx_text, coords_text in frame_matches:
                 try:
-                    frame_idx = int(round(float(parts[0])))
-                    coords = [float(x) for x in parts[2:]]
+                    frame_idx = int(frame_idx_text)
+                    coords = [float(x.strip()) for x in coords_text.split(",")]
+                    if len(coords) != 4:
+                        continue
                     spatial_bboxes[frame_idx] = [max(0.0, min(1.0, c)) for c in coords]
                 except (ValueError, IndexError):
                     continue
@@ -70,28 +70,5 @@ def parse_response(response_text: str) -> Dict[str, Any]:
             result['temporal_span'] = result['objects'][0]['temporal_span']
             result['spatial_bboxes'] = result['objects'][0]['spatial_bboxes']
         return result
-
-    temporal_pattern = r'[\{\[](\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)[\}\]]'
-    temporal_match = re.search(temporal_pattern, response_text)
-
-    if temporal_match:
-        start = int(round(float(temporal_match.group(1))))
-        end = int(round(float(temporal_match.group(2))))
-        result['temporal_span'] = (start, end)
-
-    spatial_pattern = r'(\d+(?:\.\d+)?)\s*:\s*\[([^\]]+)\]'
-    spatial_matches = re.findall(spatial_pattern, response_text)
-
-    for frame_str, bbox_str in spatial_matches:
-        try:
-            frame_idx = int(round(float(frame_str)))
-            coords = [float(x.strip()) for x in bbox_str.split(',')]
-
-            if len(coords) == 4:
-                coords = [max(0.0, min(1.0, c)) for c in coords]
-                result['spatial_bboxes'][frame_idx] = coords
-
-        except (ValueError, IndexError):
-            continue
 
     return result

@@ -125,9 +125,12 @@ class BasePipeline(ABC):
             video_paths=video_paths,
             system_prompt=SYSTEM_PROMPT
         )
+        rendered_prompts = getattr(self.model, "last_rendered_prompts", [])
+        raw_responses = getattr(self.model, "last_raw_responses", full_responses)
         
         batch_results = []
-        for sample, full_response in zip(batch, full_responses):
+        for idx, (sample, full_response) in enumerate(zip(batch, full_responses)):
+            raw_response = raw_responses[idx] if idx < len(raw_responses) else full_response
             parsed = parse_response(full_response)
             gt_tracks_sampled = self._build_gt_tracks(sample)
             pred_tracks_sampled = self._build_pred_tracks(parsed)
@@ -142,38 +145,14 @@ class BasePipeline(ABC):
             else:
                 metrics = compute_multi_target_metrics(gt_tracks_sampled, pred_tracks_sampled)
 
-            gt_tracks_orig = [
-                {
-                    "description": track.description,
-                    "temporal_span": track.temporal_span,
-                    "spatial_bboxes": track.spatial_bboxes,
-                }
-                for track in gt_tracks_sampled
-            ]
-            pred_tracks_orig = [
-                {
-                    "description": track.description,
-                    "temporal_span": track.temporal_span,
-                    "spatial_bboxes": track.spatial_bboxes,
-                }
-                for track in pred_tracks_sampled
-            ]
-
-            pred_temporal_sampled = pred_tracks_sampled[0].temporal_span if pred_tracks_sampled else None
-            pred_bboxes_sampled = pred_tracks_sampled[0].spatial_bboxes if pred_tracks_sampled else {}
-            pred_temporal_orig = pred_tracks_orig[0]["temporal_span"] if pred_tracks_orig else None
-            pred_bboxes_orig = pred_tracks_orig[0]["spatial_bboxes"] if pred_tracks_orig else {}
-            
             result = {
                 'video_name': sample['video_name'],
                 'query_en': sample['query'],
-                'full_response': full_response,
+                'rendered_prompt': rendered_prompts[idx] if idx < len(rendered_prompts) else None,
+                'raw_response': raw_response,
                 'parsed': parsed,
                 
-                'gt_temporal_sampled': gt_tracks_sampled[0].temporal_span if gt_tracks_sampled else None,
-                'gt_temporal_orig': gt_tracks_orig[0]['temporal_span'] if gt_tracks_orig else None,
-                'gt_bboxes_sampled': gt_tracks_sampled[0].spatial_bboxes if gt_tracks_sampled else {},
-                'gt_tracks_sampled': [
+                'gt_tracks': [
                     {
                         'description': track.description,
                         'temporal_span': track.temporal_span,
@@ -181,22 +160,7 @@ class BasePipeline(ABC):
                     }
                     for track in gt_tracks_sampled
                 ],
-                'gt_tracks_orig': gt_tracks_orig,
-                
-                'pred_temporal_sampled': pred_temporal_sampled,
-                'pred_temporal_orig': pred_temporal_orig,
-                'pred_bboxes_sampled': pred_bboxes_sampled,
-                'pred_bboxes_orig': pred_bboxes_orig,
-                'pred_tracks_sampled': [
-                    {
-                        'description': track.description,
-                        'temporal_span': track.temporal_span,
-                        'spatial_bboxes': track.spatial_bboxes,
-                    }
-                    for track in pred_tracks_sampled
-                ],
-                'pred_tracks_orig': pred_tracks_orig,
-                
+
                 'metrics': metrics,
                 
                 'metadata': sample['metadata'],
@@ -229,9 +193,10 @@ class BasePipeline(ABC):
         eval_folder = self.output_dir / eval_folder_name
         eval_folder.mkdir(parents=True, exist_ok=True)
         
-        results_file = eval_folder / "results.json"
+        results_file = eval_folder / "results.jsonl"
         with open(results_file, 'w', encoding='utf-8') as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
+            for item in results:
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
         logger.info(f"Detailed results saved to {results_file}")
         
         summary = {

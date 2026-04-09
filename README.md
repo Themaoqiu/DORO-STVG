@@ -55,6 +55,14 @@ cd /home/wangxingjian/DORO-STVG/envs/eval
 uv sync
 ```
 
+If `uv sync` times out on `files.pythonhosted.org` in this environment, refresh the lock and sync against the configured mirror:
+
+```bash
+cd /home/wangxingjian/DORO-STVG/envs/eval
+uv lock --refresh
+uv sync --refresh
+```
+
 
 ```bash
 cd /home/wangxingjian/DORO-STVG/envs/graph_generator/main

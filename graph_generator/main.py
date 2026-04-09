@@ -188,6 +188,75 @@ class SceneGraphGenerator:
         self.action_frame_interval = action_frame_interval
         self.skip_filter = skip_filter
         self.filter_min_frames = filter_min_frames
+        self._graph_filter: Optional[GraphFilter] = None
+        self._keyframe_detector: Optional[YOLOKeyframeDetector] = None
+        self._tracker: Optional[Any] = None
+        self._action_detector: Optional[Any] = None
+
+    def _get_graph_filter(self) -> GraphFilter:
+        if self._graph_filter is None:
+            self._graph_filter = GraphFilter(min_frames=self.filter_min_frames)
+        return self._graph_filter
+
+    def _get_keyframe_detector(self) -> YOLOKeyframeDetector:
+        if self._keyframe_detector is None:
+            self._keyframe_detector = YOLOKeyframeDetector(
+                model_path=self.yolo_model,
+                conf=self.conf,
+                iou=self.iou,
+                keyframe_interval=self.sam3_redetection_interval,
+            )
+        return self._keyframe_detector
+
+    def _get_tracker(self):
+        if self._tracker is not None:
+            return self._tracker
+
+        if self.tracker_backend == "groundedsam2":
+            from modules.groundingedsam2_tracker import GroundedSAM2Tracker
+
+            self._tracker = GroundedSAM2Tracker(
+                sam2_model_cfg=self.sam2_model_cfg,
+                sam2_checkpoint=self.sam2_checkpoint,
+                iou_threshold=self.sam3_iou_threshold,
+                overlap_threshold=self.sam3_overlap_threshold,
+                redetection_interval=self.sam3_redetection_interval,
+                mask_output_dir=self.groundedsam2_mask_output_dir,
+            )
+        elif self.tracker_backend == "sam3":
+            from modules.sam3_tracker import SAM3Tracker
+
+            self._tracker = SAM3Tracker(
+                model_path=self.sam3_model,
+                iou_threshold=self.sam3_iou_threshold,
+                overlap_threshold=self.sam3_overlap_threshold,
+                redetection_interval=self.sam3_redetection_interval,
+                mask_output_dir=self.sam3_mask_output_dir,
+                match_output_dir=self.sam3_match_output_dir,
+                match_log_path=self.sam3_match_log_path,
+            )
+        elif self.tracker_backend == "yolo":
+            self._tracker = None
+        else:
+            raise ValueError(
+                "Invalid tracker_backend. Expected one of: sam3, groundedsam2, yolo"
+            )
+
+        return self._tracker
+
+    def _get_action_detector(self):
+        if self._action_detector is None:
+            from modules.action_detector import VideoMAEActionDetector
+
+            if not self.action_config or not self.action_checkpoint:
+                raise ValueError("Action detection requires action_config and action_checkpoint.")
+
+            self._action_detector = VideoMAEActionDetector(
+                config_path=self.action_config,
+                checkpoint_path=self.action_checkpoint,
+                label_map_path=self.action_label_map,
+            )
+        return self._action_detector
     
     def process_video(self, video_path: str, output_path: str) -> SceneGraph:
         video_name = Path(video_path).stem
@@ -214,41 +283,17 @@ class SceneGraphGenerator:
         print(f"  Found {len(clips)} scenes")
 
         print(f"[2/5] Detecting keyframes with YOLO...")
-        keyframe_detector = YOLOKeyframeDetector(
-            model_path=self.yolo_model,
-            conf=self.conf,
-            iou=self.iou,
-            keyframe_interval=self.sam3_redetection_interval,
-        )
+        keyframe_detector = self._get_keyframe_detector()
         all_detections = keyframe_detector.detect_keyframes(video_path, clips)
 
         if self.tracker_backend == "groundedsam2":
             print(f"[3/5] Tracking with Grounded-SAM2...")
-            from modules.groundingedsam2_tracker import GroundedSAM2Tracker
-
-            tracker = GroundedSAM2Tracker(
-                sam2_model_cfg=self.sam2_model_cfg,
-                sam2_checkpoint=self.sam2_checkpoint,
-                iou_threshold=self.sam3_iou_threshold,
-                overlap_threshold=self.sam3_overlap_threshold,
-                redetection_interval=self.sam3_redetection_interval,
-                mask_output_dir=self.groundedsam2_mask_output_dir,
-            )
+            tracker = self._get_tracker()
             global_tracks = tracker.track_video(video_path, clips, all_detections)
             print(f"  Tracked {len(global_tracks)} objects")
         elif self.tracker_backend == "sam3":
             print(f"[3/5] Tracking with SAM3...")
-            from modules.sam3_tracker import SAM3Tracker
-
-            tracker = SAM3Tracker(
-                model_path=self.sam3_model,
-                iou_threshold=self.sam3_iou_threshold,
-                overlap_threshold=self.sam3_overlap_threshold,
-                redetection_interval=self.sam3_redetection_interval,
-                mask_output_dir=self.sam3_mask_output_dir,
-                match_output_dir=self.sam3_match_output_dir,
-                match_log_path=self.sam3_match_log_path,
-            )
+            tracker = self._get_tracker()
             global_tracks = tracker.track_video(video_path, clips, all_detections)
             print(f"  Tracked {len(global_tracks)} objects")
         elif self.tracker_backend == "yolo":
@@ -279,7 +324,7 @@ class SceneGraphGenerator:
             graph.object_nodes.append(obj_node.to_dict())
 
         print(f"  Created {len(graph.object_nodes)} object nodes")
-        graph_filter = GraphFilter(min_frames=self.filter_min_frames)
+        graph_filter = self._get_graph_filter()
 
         if self.skip_filter:
             print(f"[5/5] Skipping graph filtering")
@@ -303,16 +348,9 @@ class SceneGraphGenerator:
             print(f"  Final graph: {len(graph.object_nodes)} object nodes, {len(graph.edges)} edges")
 
         if self.use_action_detection:
-            from modules.action_detector import VideoMAEActionDetector, add_actions_to_graph
+            from modules.action_detector import add_actions_to_graph
 
-            if not self.action_config or not self.action_checkpoint:
-                raise ValueError("Action detection requires action_config and action_checkpoint.")
-
-            action_detector = VideoMAEActionDetector(
-                config_path=self.action_config,
-                checkpoint_path=self.action_checkpoint,
-                label_map_path=self.action_label_map,
-            )
+            action_detector = self._get_action_detector()
             graph_dict = add_actions_to_graph(
                 graph.to_dict(),
                 video_path,

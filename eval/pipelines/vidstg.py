@@ -98,9 +98,10 @@ class VidSTGPipeline(BaseSTVGPipeline):
         eval_folder = self.output_dir / eval_folder_name
         eval_folder.mkdir(parents=True, exist_ok=True)
         
-        results_file = eval_folder / "results.json"
+        results_file = eval_folder / "results.jsonl"
         with open(results_file, 'w', encoding='utf-8') as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
+            for item in results:
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
         logger.info(f"Detailed results saved to {results_file}")
         
         summary = {
