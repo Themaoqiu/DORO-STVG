@@ -1,7 +1,7 @@
-python -m utils.graph_visualizer \
-    --jsonl_path /home/wangxingjian/DORO-STVG/graph_generator/output/scene_graphs.jsonl \
-    --video_path /home/wangxingjian/data/vidstg/2451862413_2fps.mp4 \
-    --output_path /home/wangxingjian/DORO-STVG/graph_generator/output/2451862413_2fps.mp4 \
+# python -m utils.graph_visualizer \
+#     --jsonl_path /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
+#     --video_path /home/wangxingjian/data/vidstg/video/2560825239.mp4 \
+#     --output_path /home/wangxingjian/DORO-STVG/graph_generator/output/2560825239.mp4 \
 
 # python3 utils/hc_stvg_visualizer.py \
 #     --ann /home/wangxingjian/data/hc-stvg2/annos/test.json \
@@ -15,3 +15,8 @@ python -m utils.graph_visualizer \
 #     --video-root /home/wangxingjian/data/vidstg \
 #     --output-dir /home/wangxingjian/DORO-STVG/graph_generator/output/2451862413.mp4 \
 #     --ann-id 56677
+
+python3 utils/query_web_viewer.py \
+    --jsonl /home/wangxingjian/DORO-STVG/graph_generator/output/query.jsonl \
+    --host 127.0.0.1\
+    --port 8765

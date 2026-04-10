@@ -404,6 +404,16 @@ def _extract_contacting_relationships(response: str) -> Optional[List[List[Any]]
     return out
 
 
+def _validate_spatial_relationships(response: str) -> Union[List[List[Any]], bool]:
+    rels = _extract_spatial_relationships(response)
+    return False if rels is None else rels
+
+
+def _validate_contacting_relationships(response: str) -> Union[List[List[Any]], bool]:
+    rels = _extract_contacting_relationships(response)
+    return False if rels is None else rels
+
+
 def _merge_intervals(intervals: List[List[int]]) -> List[List[int]]:
     if not intervals:
         return []
@@ -742,14 +752,14 @@ async def generate_relation_edges(
     spatial_results = await generator.generate_relations(
         spatial_prompts,
         system_prompt=spatial_system_prompt,
-        validate_func=lambda response: rels if (rels := _extract_spatial_relationships(response)) is not None else False,
+        validate_func=_validate_spatial_relationships,
         tag="spatial",
         verbose=verbose,
     )
     contacting_results = await generator.generate_relations(
         contacting_prompts,
         system_prompt=contacting_system_prompt,
-        validate_func=lambda response: rels if (rels := _extract_contacting_relationships(response)) is not None else False,
+        validate_func=_validate_contacting_relationships,
         tag="contacting",
         verbose=verbose,
     )

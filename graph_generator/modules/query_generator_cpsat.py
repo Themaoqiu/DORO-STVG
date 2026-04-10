@@ -262,6 +262,35 @@ def _normalize_phrase(text: Any, kind: str) -> str:
     return s
 
 
+def _query_target_signature(node: Dict[str, Any]) -> Tuple[Tuple[str, int, int], ...]:
+    target = node.get("target") or {}
+    members = target.get("members") or []
+    signature: List[Tuple[str, int, int]] = []
+    for member in members:
+        object_id = str(member.get("object_id", "")).strip()
+        if not object_id:
+            continue
+        start = _to_int(member.get("start_frame"), 0)
+        end = _to_int(member.get("end_frame"), start)
+        if end < start:
+            start, end = end, start
+        signature.append((object_id, start, end))
+    signature.sort()
+    return tuple(signature)
+
+
+def _dedupe_query_nodes(query_nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    seen_signatures: Set[Tuple[Tuple[str, int, int], ...]] = set()
+    for node in query_nodes:
+        signature = _query_target_signature(node)
+        if not signature or signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+        deduped.append(node)
+    return deduped
+
+
 def _normalized_values(values: Iterable[Any], kind: str) -> List[str]:
     out: List[str] = []
     for v in _uniq(values):
@@ -1876,10 +1905,8 @@ class CPSATQuerySampler:
         max_target_arity: int = 3,
         max_multi_intervals_per_group: int = 8,
         max_multi_candidates_total: int = 240,
-        multi_queries_per_graph: Optional[int] = None,
         strict_time_uniqueness_multi_target: bool = False,
         max_chain_len: int = 4,
-        queries_per_graph: int = 12,
         max_queries_per_candidate: int = 1,
         time_limit_sec: float = 2.0,
         seed: int = 7,
@@ -1890,32 +1917,13 @@ class CPSATQuerySampler:
         self.max_target_arity = min(3, max(1, int(max_target_arity)))
         self.max_multi_intervals_per_group = max(1, int(max_multi_intervals_per_group))
         self.max_multi_candidates_total = max(1, int(max_multi_candidates_total))
-        self.multi_queries_per_graph = (
-            max(0, int(multi_queries_per_graph))
-            if multi_queries_per_graph is not None
-            else max(0, int(queries_per_graph) // 3)
-        )
         self.strict_time_uniqueness_multi_target = bool(strict_time_uniqueness_multi_target)
         self.max_chain_len = max(2, int(max_chain_len))
-        self.queries_per_graph = max(1, int(queries_per_graph))
         self.max_queries_per_candidate = max(1, int(max_queries_per_candidate))
         self.time_limit_sec = max(0.1, float(time_limit_sec))
         self.seed = int(seed)
         self.weights = weights
         self.templates = _build_default_templates()
-
-    def _template_quotas(self, total: int, templates: List[TemplateSpec]) -> Dict[str, int]:
-        if total <= 0 or not templates:
-            return {}
-        weights = [max(0.0, t.weight) for t in templates]
-        total_w = sum(weights) or 1.0
-        raw = [w / total_w * total for w in weights]
-        quotas = [int(math.floor(x)) for x in raw]
-        remain = total - sum(quotas)
-        order = sorted(range(len(raw)), key=lambda i: raw[i] - quotas[i], reverse=True)
-        for i in order[:remain]:
-            quotas[i] += 1
-        return {templates[i].name: quotas[i] for i in range(len(templates))}
 
     def _candidate_order(
         self,
@@ -2069,67 +2077,67 @@ class CPSATQuerySampler:
         candidates: List[CandidateTarget],
         profile_map: Dict[str, CandidateProfile],
         templates: List[TemplateSpec],
-        target_count: int,
         start_query_index: int,
     ) -> List[Dict[str, Any]]:
-        if target_count <= 0 or not candidates or not templates:
+        if not candidates or not templates:
             return []
 
-        quotas = self._template_quotas(target_count, templates)
-        cur_counts: Dict[str, int] = defaultdict(int)
         candidate_use_count: Dict[str, int] = defaultdict(int)
         sampled_intervals_by_sig: Dict[Tuple[str, ...], Set[Tuple[int, int]]] = defaultdict(set)
         used_object_sigs: Set[Tuple[str, ...]] = set()
         solve_cache: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}
-        blocked_templates: Set[str] = set()
-        template_by_name = {t.name: t for t in templates}
         nodes: List[Dict[str, Any]] = []
 
-        while len(nodes) < target_count:
-            deficits: List[Tuple[int, str]] = []
-            for t in templates:
-                if t.name in blocked_templates:
+        while True:
+            best_pick: Optional[Dict[str, Any]] = None
+            best_rank: Optional[Tuple[int, float, int, int, int]] = None
+
+            for template_index, template in enumerate(templates):
+                picked = None
+                for cand in self._candidate_order(candidates, template, sampled_intervals_by_sig, candidate_use_count):
+                    obj_sig = tuple(m.object_id for m in cand.members)
+                    if obj_sig in used_object_sigs:
+                        continue
+                    if candidate_use_count[cand.candidate_id] >= self.max_queries_per_candidate:
+                        continue
+                    cache_key = (cand.candidate_id, template.name)
+                    if cache_key not in solve_cache:
+                        solve_cache[cache_key] = self._solve_for_candidate_template(
+                            candidate=cand,
+                            all_candidates=candidates,
+                            profile_map=profile_map,
+                            template=template,
+                        )
+                    solved = solve_cache[cache_key]
+                    if solved:
+                        picked = solved
+                        break
+
+                if not picked:
                     continue
-                gap = quotas.get(t.name, 0) - cur_counts.get(t.name, 0)
-                if gap > 0:
-                    deficits.append((gap, t.name))
-            if not deficits:
+
+                cand = picked["candidate"]
+                interval = cand.interval
+                rank = (
+                    candidate_use_count.get(cand.candidate_id, 0),
+                    cand.difficulty,
+                    interval[1] - interval[0] + 1,
+                    -int(round(template.weight * 1000)),
+                    template_index,
+                )
+                if best_rank is None or rank < best_rank:
+                    best_rank = rank
+                    best_pick = picked
+
+            if not best_pick:
                 break
-            deficits.sort(reverse=True)
-            _, tname = deficits[0]
-            template = template_by_name[tname]
 
-            picked = None
-            for cand in self._candidate_order(candidates, template, sampled_intervals_by_sig, candidate_use_count):
-                obj_sig = tuple(m.object_id for m in cand.members)
-                if obj_sig in used_object_sigs:
-                    continue
-                if candidate_use_count[cand.candidate_id] >= self.max_queries_per_candidate:
-                    continue
-                cache_key = (cand.candidate_id, template.name)
-                if cache_key not in solve_cache:
-                    solve_cache[cache_key] = self._solve_for_candidate_template(
-                        candidate=cand,
-                        all_candidates=candidates,
-                        profile_map=profile_map,
-                        template=template,
-                    )
-                solved = solve_cache[cache_key]
-                if solved:
-                    picked = solved
-                    break
-
-            if not picked:
-                blocked_templates.add(template.name)
-                continue
-
-            cand: CandidateTarget = picked["candidate"]
+            cand: CandidateTarget = best_pick["candidate"]
             candidate_use_count[cand.candidate_id] += 1
             obj_sig = tuple(m.object_id for m in cand.members)
             sampled_intervals_by_sig[obj_sig].add(cand.interval)
             used_object_sigs.add(obj_sig)
-            cur_counts[template.name] += 1
-            nodes.append(self._node_from_solution(picked, start_query_index + len(nodes)))
+            nodes.append(self._node_from_solution(best_pick, start_query_index + len(nodes)))
 
         return nodes
 
@@ -2173,19 +2181,16 @@ class CPSATQuerySampler:
             candidates=single_candidates,
             profile_map=profile_map,
             templates=single_templates,
-            target_count=self.queries_per_graph,
             start_query_index=0,
         )
 
         multi_templates = self._templates_for_arity(multi=True)
-        multi_count = self.multi_queries_per_graph if self.max_target_arity > 1 else 0
-        if multi_count > 0:
+        if self.max_target_arity > 1:
             results.extend(
                 self._sample_with_templates(
                     candidates=multi_candidates,
                     profile_map=profile_map,
                     templates=multi_templates,
-                    target_count=multi_count,
                     start_query_index=len(results),
                 )
             )
@@ -2271,15 +2276,6 @@ class CPSATQuerySampler:
                 target_lines.append(f"- target {tid}: {cls}")
             target_classes_text = "\n".join(target_lines) if target_lines else "- target 1: object"
 
-            category_name = {
-                "cls": "target identity/class",
-                "app": "appearance",
-                "act": "action",
-                "seq": "action sequence",
-                "spa": "spatial relation",
-                "int": "interaction relation",
-                "env": "environment/temporal context",
-            }
             categories = ["cls", "app", "act", "seq", "spa", "int", "env"]
             per_target: Dict[str, Dict[str, List[str]]] = {
                 str(i + 1): {c: [] for c in categories} for i in range(len(members))
@@ -2517,6 +2513,15 @@ class CPSATQuerySampler:
                     continue
                 graph = json.loads(line)
                 query_nodes = self.generate_for_graph(graph)
+                raw_count = len(query_nodes)
+                query_nodes = _dedupe_query_nodes(query_nodes)
+                dropped_duplicates = raw_count - len(query_nodes)
+                if dropped_duplicates > 0:
+                    print(
+                        f"[query_cpsat] dedupe_drop: video={Path(str(graph.get('video_path', ''))).name} "
+                        f"dropped={dropped_duplicates}",
+                        flush=True,
+                    )
                 if use_llm_polish and query_nodes:
                     polished_map = asyncio.run(
                         self.polish_queries_with_llm(
@@ -2555,8 +2560,6 @@ class CPSATQuerySampler:
 def main(
     input_path: str,
     output_path: str,
-    queries_per_graph: int = 12,
-    multi_queries_per_graph: Optional[int] = None,
     min_interval_len: int = 3,
     max_intervals_per_object: int = 12,
     max_target_arity: int = 3,
@@ -2581,10 +2584,8 @@ def main(
         max_target_arity=max_target_arity,
         max_multi_intervals_per_group=max_multi_intervals_per_group,
         max_multi_candidates_total=max_multi_candidates_total,
-        multi_queries_per_graph=multi_queries_per_graph,
         strict_time_uniqueness_multi_target=strict_time_uniqueness_multi_target,
         max_chain_len=max_chain_len,
-        queries_per_graph=queries_per_graph,
         max_queries_per_candidate=max_queries_per_candidate,
         time_limit_sec=time_limit_sec,
         seed=seed,

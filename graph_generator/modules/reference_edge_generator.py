@@ -543,15 +543,19 @@ def run(
         effective_crop_dir = tmp_dir.name
 
     try:
-        image_paths, id_map_a, id_map_b, pair_meta = _build_pair_images(
-            graph=graph,
-            video_path=video,
-            shot_a=shot_a,
-            shot_b=shot_b,
-            output_dir=effective_crop_dir,
-            frames_per_shot=frames_per_shot,
-            boundary_margin_frames=boundary_margin_frames,
-        )
+        try:
+            image_paths, id_map_a, id_map_b, pair_meta = _build_pair_images(
+                graph=graph,
+                video_path=video,
+                shot_a=shot_a,
+                shot_b=shot_b,
+                output_dir=effective_crop_dir,
+                frames_per_shot=frames_per_shot,
+                boundary_margin_frames=boundary_margin_frames,
+            )
+        except ValueError as exc:
+            print(f"[reference] skip shot pair ({shot_a}, {shot_b}): {exc}")
+            return
 
         prompt_text = PROMPT_TEMPLATE.format(
             shot_a_ids=sorted(id_map_a.values()),

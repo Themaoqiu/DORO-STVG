@@ -195,7 +195,8 @@ class StreamGenerator:
 
                     # If validation function exists, validate the answer
                     if validate_func is not None:
-                        if not validate_func(answer):
+                        validated_answer = validate_func(answer)
+                        if validated_answer is False or validated_answer is None:
                             answer_preview = str(answer).strip().replace("\n", "\\n")
                             if len(answer_preview) > 800:
                                 answer_preview = answer_preview[:800] + "...<truncated>"
@@ -206,10 +207,7 @@ class StreamGenerator:
                             )
                             retry_count += 1
                             continue
-                        else:
-                            validated_answer = validate_func(answer)
-                            if validated_answer is not None:
-                                answer = validated_answer
+                        answer = validated_answer
 
                     return answer
 

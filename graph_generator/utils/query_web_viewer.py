@@ -204,7 +204,8 @@ function preview(rec) {
   els.metaVideo.textContent = rec.video_path || '';
   els.metaTarget.textContent = rec.target_node_id || '';
   els.metaDifficulty.textContent = rec.difficulty_bucket || '';
-  const boxCount = rec.boxes ? Object.keys(rec.boxes).length : 0;
+  const boxCount = (rec.target_members || []).reduce((acc, m) => acc + Object.keys(m.boxes || {}).length, 0)
+    || (rec.boxes ? Object.keys(rec.boxes).length : 0);
   els.metaBoxes.textContent = boxCount.toString();
   els.metaQuery.textContent = rec.query || '';
   resizeCanvas();
@@ -230,31 +231,53 @@ function pickBox(boxes, frame) {
 function drawOverlay() {
   const ctx = els.overlay.getContext('2d');
   ctx.clearRect(0, 0, els.overlay.width, els.overlay.height);
-  if (!current || !current.boxes || !els.video.videoWidth || !els.video.videoHeight) return;
+  if (!current || !els.video.videoWidth || !els.video.videoHeight) return;
 
   const fps = parseFloat(els.fpsInput.value || '2') || 2;
   const frame = Math.round(els.video.currentTime * fps);
-  const box = pickBox(current.boxes, frame);
-  if (!box || box.length < 4) return;
-
   const scaleX = els.overlay.width / els.video.videoWidth;
   const scaleY = els.overlay.height / els.video.videoHeight;
-  const x1 = box[0] * scaleX;
-  const y1 = box[1] * scaleY;
-  const x2 = box[2] * scaleX;
-  const y2 = box[3] * scaleY;
+  const members = (current.target_members && current.target_members.length)
+    ? current.target_members
+    : [{ target_index: 1, object_id: current.target_node_id || 'target', boxes: current.boxes || {} }];
+  const colors = ['#00ff6a', '#ffb703', '#4cc9f0', '#ff4d6d'];
+  let drew = false;
 
-  ctx.strokeStyle = '#00ff6a';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  members.forEach((member, idx) => {
+    const box = pickBox(member.boxes || {}, frame);
+    if (!box || box.length < 4) return;
+    drew = true;
+    const x1 = box[0] * scaleX;
+    const y1 = box[1] * scaleY;
+    const x2 = box[2] * scaleX;
+    const y2 = box[3] * scaleY;
+    const color = colors[idx % colors.length];
 
-  const label = `${current.target_node_id || 'target'} | f=${frame}`;
-  ctx.font = '12px sans-serif';
-  const w = ctx.measureText(label).width + 8;
-  ctx.fillStyle = 'rgba(0,0,0,0.6)';
-  ctx.fillRect(x1, Math.max(0, y1 - 18), w, 16);
-  ctx.fillStyle = '#fff';
-  ctx.fillText(label, x1 + 4, Math.max(12, y1 - 6));
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+    const targetName = member.object_id || `target ${member.target_index || idx + 1}`;
+    const label = `${targetName} | f=${frame}`;
+    ctx.font = '12px sans-serif';
+    const w = ctx.measureText(label).width + 8;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(x1, Math.max(0, y1 - 18), w, 16);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(label, x1 + 4, Math.max(12, y1 - 6));
+  });
+
+  if (!drew && current.boxes) {
+    const box = pickBox(current.boxes, frame);
+    if (!box || box.length < 4) return;
+    const x1 = box[0] * scaleX;
+    const y1 = box[1] * scaleY;
+    const x2 = box[2] * scaleX;
+    const y2 = box[3] * scaleY;
+    ctx.strokeStyle = '#00ff6a';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  }
 }
 
 function tick() {
@@ -393,6 +416,34 @@ class QueryViewerHandler(BaseHTTPRequestHandler):
 
 
 def load_jsonl(path: Path):
+    def _normalize_target_members(obj):
+        members = obj.get("target_members") or []
+        normalized = []
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+            normalized.append(
+                {
+                    "object_id": str(member.get("object_id", "")).strip(),
+                    "target_index": int(member.get("target_index", len(normalized) + 1) or len(normalized) + 1),
+                    "start_frame": member.get("start_frame"),
+                    "end_frame": member.get("end_frame"),
+                    "boxes": member.get("boxes", {}) or {},
+                }
+            )
+        return normalized
+
+    def _target_label(obj, members):
+        legacy = str(obj.get("target_node_id", "")).strip()
+        if legacy:
+            return legacy
+        ids = [m["object_id"] for m in members if m.get("object_id")]
+        if ids:
+            return ", ".join(ids)
+        target = obj.get("target") or {}
+        target_id = str(target.get("candidate_id", "")).strip()
+        return target_id
+
     records = []
     with open(path, "r", encoding="utf-8") as f:
         for i, line in enumerate(f, 1):
@@ -405,14 +456,20 @@ def load_jsonl(path: Path):
                 continue
             if not isinstance(obj, dict):
                 continue
+            target_members = _normalize_target_members(obj)
+            boxes = obj.get("boxes", {}) or {}
+            if not boxes and target_members:
+                boxes = target_members[0].get("boxes", {}) or {}
             records.append(
                 {
                     "idx": i,
                     "video_path": obj.get("video_path", ""),
-                    "target_node_id": obj.get("target_node_id", ""),
+                    "target_node_id": _target_label(obj, target_members),
                     "query": obj.get("query", ""),
                     "difficulty_bucket": obj.get("difficulty_bucket", ""),
-                    "boxes": obj.get("boxes", {}) or {},
+                    "boxes": boxes,
+                    "target_members": target_members,
+                    "target_arity": obj.get("target_arity", len(target_members)),
                 }
             )
     return records

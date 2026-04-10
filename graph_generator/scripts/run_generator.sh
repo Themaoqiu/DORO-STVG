@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-export CUDA_VISIBLE_DEVICES=4
+export CUDA_VISIBLE_DEVICES=0
 export HF_ENDPOINT=https://hf-mirror.com
 
 # Load project env vars if available (API_KEYS / MM_API_BASE_URL / etc.).
@@ -86,8 +86,8 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 # cd /home/wangxingjian/DORO-STVG/graph_generator && \
 # python -m main \
 #   --full_pipeline True \
-#   --video /home/wangxingjian/data/vidstg/2451862173_2fps.mp4 \
-#   --max_videos 20 \
+#   --video_dir /home/wangxingjian/data/vidstg/video \
+#   --max_videos 100 \
 #   --output scene_graphs.jsonl \
 #   --yolo_model /home/wangxingjian/model/yolo26x/yolo26x.pt \
 #   --tracker_backend groundedsam2 \
@@ -115,9 +115,8 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 
 
 python -m modules.query_generator_cpsat \
-  --input_path /home/wangxingjian/DORO-STVG/graph_generator/output/scene_graphs.jsonl \
+  --input_path /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
   --output_path /home/wangxingjian/DORO-STVG/graph_generator/output/query.jsonl \
-  --queries_per_graph 12 \
   --time_limit_sec 3.0 \
   --seed 7 \
   --use_llm_polish True \

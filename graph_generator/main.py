@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+from itertools import combinations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -193,12 +194,10 @@ class SceneGraphGenerator:
         self._tracker: Optional[Any] = None
         self._action_detector: Optional[Any] = None
 
-    def _get_graph_filter(self) -> GraphFilter:
+    def _init_runtime(self) -> None:
         if self._graph_filter is None:
             self._graph_filter = GraphFilter(min_frames=self.filter_min_frames)
-        return self._graph_filter
 
-    def _get_keyframe_detector(self) -> YOLOKeyframeDetector:
         if self._keyframe_detector is None:
             self._keyframe_detector = YOLOKeyframeDetector(
                 model_path=self.yolo_model,
@@ -206,46 +205,37 @@ class SceneGraphGenerator:
                 iou=self.iou,
                 keyframe_interval=self.sam3_redetection_interval,
             )
-        return self._keyframe_detector
 
-    def _get_tracker(self):
-        if self._tracker is not None:
-            return self._tracker
+        if self._tracker is None:
+            if self.tracker_backend == "groundedsam2":
+                from modules.groundingedsam2_tracker import GroundedSAM2Tracker
 
-        if self.tracker_backend == "groundedsam2":
-            from modules.groundingedsam2_tracker import GroundedSAM2Tracker
+                self._tracker = GroundedSAM2Tracker(
+                    sam2_model_cfg=self.sam2_model_cfg,
+                    sam2_checkpoint=self.sam2_checkpoint,
+                    iou_threshold=self.sam3_iou_threshold,
+                    overlap_threshold=self.sam3_overlap_threshold,
+                    redetection_interval=self.sam3_redetection_interval,
+                    mask_output_dir=self.groundedsam2_mask_output_dir,
+                )
+            elif self.tracker_backend == "sam3":
+                from modules.sam3_tracker import SAM3Tracker
 
-            self._tracker = GroundedSAM2Tracker(
-                sam2_model_cfg=self.sam2_model_cfg,
-                sam2_checkpoint=self.sam2_checkpoint,
-                iou_threshold=self.sam3_iou_threshold,
-                overlap_threshold=self.sam3_overlap_threshold,
-                redetection_interval=self.sam3_redetection_interval,
-                mask_output_dir=self.groundedsam2_mask_output_dir,
-            )
-        elif self.tracker_backend == "sam3":
-            from modules.sam3_tracker import SAM3Tracker
+                self._tracker = SAM3Tracker(
+                    model_path=self.sam3_model,
+                    iou_threshold=self.sam3_iou_threshold,
+                    overlap_threshold=self.sam3_overlap_threshold,
+                    redetection_interval=self.sam3_redetection_interval,
+                    mask_output_dir=self.sam3_mask_output_dir,
+                    match_output_dir=self.sam3_match_output_dir,
+                    match_log_path=self.sam3_match_log_path,
+                )
+            elif self.tracker_backend != "yolo":
+                raise ValueError(
+                    "Invalid tracker_backend. Expected one of: sam3, groundedsam2, yolo"
+                )
 
-            self._tracker = SAM3Tracker(
-                model_path=self.sam3_model,
-                iou_threshold=self.sam3_iou_threshold,
-                overlap_threshold=self.sam3_overlap_threshold,
-                redetection_interval=self.sam3_redetection_interval,
-                mask_output_dir=self.sam3_mask_output_dir,
-                match_output_dir=self.sam3_match_output_dir,
-                match_log_path=self.sam3_match_log_path,
-            )
-        elif self.tracker_backend == "yolo":
-            self._tracker = None
-        else:
-            raise ValueError(
-                "Invalid tracker_backend. Expected one of: sam3, groundedsam2, yolo"
-            )
-
-        return self._tracker
-
-    def _get_action_detector(self):
-        if self._action_detector is None:
+        if self.use_action_detection and self._action_detector is None:
             from modules.action_detector import VideoMAEActionDetector
 
             if not self.action_config or not self.action_checkpoint:
@@ -256,9 +246,9 @@ class SceneGraphGenerator:
                 checkpoint_path=self.action_checkpoint,
                 label_map_path=self.action_label_map,
             )
-        return self._action_detector
     
     def process_video(self, video_path: str, output_path: str) -> SceneGraph:
+        self._init_runtime()
         video_name = Path(video_path).stem
         cap = cv2.VideoCapture(video_path)
         video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -271,7 +261,7 @@ class SceneGraphGenerator:
             video_height=video_height if video_height > 0 else None,
         )
 
-        print(f"[1/5] Detecting scenes...")
+        print("[scene_graph] detect scenes")
         scene_detector = SceneDetector(
             video_path,
             threshold=self.scene_threshold,
@@ -280,32 +270,32 @@ class SceneGraphGenerator:
         clips = scene_detector.detect()
 
         graph.temporal_nodes = [clip.to_dict() for clip in clips]
-        print(f"  Found {len(clips)} scenes")
+        print(f"[scene_graph] scenes: {len(clips)}")
 
-        print(f"[2/5] Detecting keyframes with YOLO...")
-        keyframe_detector = self._get_keyframe_detector()
+        print("[scene_graph] detect keyframes")
+        keyframe_detector = self._keyframe_detector
         all_detections = keyframe_detector.detect_keyframes(video_path, clips)
 
         if self.tracker_backend == "groundedsam2":
-            print(f"[3/5] Tracking with Grounded-SAM2...")
-            tracker = self._get_tracker()
+            print("[scene_graph] track objects: Grounded-SAM2")
+            tracker = self._tracker
             global_tracks = tracker.track_video(video_path, clips, all_detections)
-            print(f"  Tracked {len(global_tracks)} objects")
+            print(f"[scene_graph] tracks: {len(global_tracks)}")
         elif self.tracker_backend == "sam3":
-            print(f"[3/5] Tracking with SAM3...")
-            tracker = self._get_tracker()
+            print("[scene_graph] track objects: SAM3")
+            tracker = self._tracker
             global_tracks = tracker.track_video(video_path, clips, all_detections)
-            print(f"  Tracked {len(global_tracks)} objects")
+            print(f"[scene_graph] tracks: {len(global_tracks)}")
         elif self.tracker_backend == "yolo":
-            print(f"[3/5] Using YOLO detections only (no tracking)...")
+            print("[scene_graph] track objects: YOLO detections only")
             global_tracks = keyframe_detector.detections_to_tracks(all_detections)
-            print(f"  Detected {len(global_tracks)} objects")
+            print(f"[scene_graph] detections: {len(global_tracks)}")
         else:
             raise ValueError(
                 "Invalid tracker_backend. Expected one of: sam3, groundedsam2, yolo"
             )
 
-        print(f"[4/5] Building object nodes...")
+        print("[scene_graph] build object nodes")
         for g_track in global_tracks:
             bboxes = {}
             for local_track in g_track.local_tracks:
@@ -323,38 +313,37 @@ class SceneGraphGenerator:
             )
             graph.object_nodes.append(obj_node.to_dict())
 
-        print(f"  Created {len(graph.object_nodes)} object nodes")
-        graph_filter = self._get_graph_filter()
+        print(f"[scene_graph] object nodes: {len(graph.object_nodes)}")
+        graph_filter = self._graph_filter
 
         if self.skip_filter:
-            print(f"[5/5] Skipping graph filtering")
+            print("[scene_graph] skip graph filtering")
             normalized_graph = graph_filter.normalize_graph(graph.to_dict(), filter_objects=False)
             graph.object_nodes = normalized_graph['object_nodes']
             graph.edges = normalized_graph['edges']
-            print(f"  Final graph: {len(graph.object_nodes)} object nodes, {len(graph.edges)} edges")
+            print(f"[scene_graph] final: {len(graph.object_nodes)} objects, {len(graph.edges)} edges")
         else:
-            print(f"[5/5] Filtering graph...")
+            print("[scene_graph] filter graph")
 
             graph_dict = graph.to_dict()
             filtered_graph_dict = graph_filter.filter_graph(graph_dict)
 
             filtered_objects = len(filtered_graph_dict['object_nodes'])
             removed_objects = len(graph.object_nodes) - filtered_objects
-            print(f"  Kept {filtered_objects} objects, removed {removed_objects} objects")
+            print(f"[scene_graph] kept {filtered_objects}, removed {removed_objects}")
 
             graph.object_nodes = filtered_graph_dict['object_nodes']
             graph.edges = filtered_graph_dict['edges']
 
-            print(f"  Final graph: {len(graph.object_nodes)} object nodes, {len(graph.edges)} edges")
+            print(f"[scene_graph] final: {len(graph.object_nodes)} objects, {len(graph.edges)} edges")
 
         if self.use_action_detection:
             from modules.action_detector import add_actions_to_graph
 
-            action_detector = self._get_action_detector()
             graph_dict = add_actions_to_graph(
                 graph.to_dict(),
                 video_path,
-                detector=action_detector,
+                detector=self._action_detector,
                 fps=scene_detector._fps,
                 frame_interval=self.action_frame_interval,
                 score_thr=self.action_score_thr,
@@ -364,23 +353,29 @@ class SceneGraphGenerator:
             graph.action_nodes = graph_dict['action_nodes']
             graph.edges = graph_dict['edges']
 
-            print(f"  Added {len(graph.action_nodes)} action nodes")
+            print(f"[scene_graph] action nodes: {len(graph.action_nodes)}")
 
         graph.save_to_jsonl(output_path)
-        print(f"Saved scene graph to {output_path}")
+        print(f"[scene_graph] saved: {output_path}")
 
         return graph
     
     def process_videos(self, video_dir: str, output_path: str) -> List[SceneGraph]:
         video_dir = Path(video_dir)
         videos = list(video_dir.glob("*.mp4")) + list(video_dir.glob("*.avi"))
+        existing_videos = _load_existing_videos(output_path)
         
         graphs = []
         for i, video_path in enumerate(videos):
             print(f"\n[{i+1}/{len(videos)}] Processing {video_path.name}")
             try:
+                if str(video_path) in existing_videos or video_path.stem in existing_videos:
+                    print(f"  Skip existing: {video_path.name}")
+                    continue
                 graph = self.process_video(str(video_path), output_path)
                 graphs.append(graph)
+                existing_videos.add(str(video_path))
+                existing_videos.add(video_path.stem)
             except Exception as e:
                 print(f"  Error: {e}")
         
@@ -394,6 +389,34 @@ def _format_fire_value(value: Any) -> str:
     if isinstance(value, (list, tuple)):
         return ",".join(str(v) for v in value)
     return str(value)
+
+
+def _load_existing_videos(output_path: str) -> set[str]:
+    output_file = Path(output_path)
+    if not output_file.exists():
+        return set()
+
+    existing: set[str] = set()
+    with open(output_file, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            video_path = str(data.get("video_path", "")).strip()
+            if video_path:
+                existing.add(video_path)
+                existing.add(Path(video_path).stem)
+
+            video_name = str(data.get("video", "")).strip()
+            if video_name:
+                existing.add(video_name)
+
+    return existing
 
 
 def _run_fire_module(
@@ -414,7 +437,7 @@ def _run_fire_module(
     if env_updates:
         env.update({k: str(v) for k, v in env_updates.items() if v is not None})
 
-    print(f"[pipeline] Running: {' '.join(command)}")
+    print(f"[pipeline] -> {module.split('.')[-1]}")
     subprocess.run(command, cwd=str(cwd) if cwd else None, env=env, check=True)
 
 
@@ -447,8 +470,6 @@ def _run_full_pipeline_for_video(
     with_reference: bool,
     reference_model_name: str,
     reference_crop_output_dir: str,
-    reference_shot_a: int,
-    reference_shot_b: int,
     reference_frames_per_shot: int,
     reference_save_intermediate_frames: bool,
 ) -> None:
@@ -522,22 +543,50 @@ def _run_full_pipeline_for_video(
         )
 
     if with_reference:
-        _run_fire_module(
-            "modules.reference_edge_generator",
+        graph_data: Optional[Dict[str, Any]] = None
+        with open(output_jsonl, "r", encoding="utf-8") as f:
+            for line in f:
+                data = json.loads(line)
+                graph_video = data.get("video_path", "")
+                if graph_video == video_path or Path(graph_video).stem == Path(video_path).stem:
+                    graph_data = data
+                    break
+
+        if graph_data is None:
+            raise ValueError(f"Failed to locate graph for video in {output_jsonl}: {video_path}")
+
+        shot_ids = sorted(
             {
-                "jsonl": output_jsonl,
-                "video": video_path,
-                "model_name": reference_model_name,
-                "crop_output_dir": reference_crop_output_dir,
-                "save_intermediate_frames": reference_save_intermediate_frames,
-                "shot_a": reference_shot_a,
-                "shot_b": reference_shot_b,
-                "frames_per_shot": reference_frames_per_shot,
-            },
-            python_exec=pipeline_python,
-            cwd=project_root,
-            env_updates=common_env,
+                int(node["clip_id"])
+                for node in graph_data.get("temporal_nodes", [])
+                if "clip_id" in node
+            }
         )
+        if len(shot_ids) < 2:
+            print(f"[pipeline][reference] skip single-shot video: {Path(video_path).name}")
+        else:
+            print(f"[pipeline][reference] {len(shot_ids)} shots -> {len(shot_ids) * (len(shot_ids) - 1) // 2} pairs")
+            for shot_a, shot_b in combinations(shot_ids, 2):
+                crop_output_dir = reference_crop_output_dir
+                if reference_save_intermediate_frames:
+                    crop_output_dir = str(Path(reference_crop_output_dir) / f"shot_{shot_a}_{shot_b}")
+                print(f"[pipeline][reference] pair {shot_a} <-> {shot_b}")
+                _run_fire_module(
+                    "modules.reference_edge_generator",
+                    {
+                        "jsonl": output_jsonl,
+                        "video": video_path,
+                        "model_name": reference_model_name,
+                        "crop_output_dir": crop_output_dir,
+                        "save_intermediate_frames": reference_save_intermediate_frames,
+                        "shot_a": shot_a,
+                        "shot_b": shot_b,
+                        "frames_per_shot": reference_frames_per_shot,
+                    },
+                    python_exec=pipeline_python,
+                    cwd=project_root,
+                    env_updates=common_env,
+                )
 
 def run(
     video: str = None,
@@ -590,8 +639,6 @@ def run(
     with_reference: bool = False,
     reference_model_name: str = "gemini-3-flash-preview",
     reference_crop_output_dir: str = "output/reference_id_match_test",
-    reference_shot_a: int = 0,
-    reference_shot_b: int = 1,
     reference_frames_per_shot: int = 3,
     reference_save_intermediate_frames: bool = False,
 ):
@@ -650,11 +697,20 @@ def run(
     if not video_paths:
         raise ValueError("No videos found to process.")
 
-    print(f"[pipeline] Full pipeline started for {len(video_paths)} video(s)")
+    existing_videos = _load_existing_videos(output_path)
+    print(f"[pipeline] start: {len(video_paths)} video(s)")
     for idx, video_path_obj in enumerate(video_paths, start=1):
         video_path = str(video_path_obj)
-        print(f"[pipeline] [{idx}/{len(video_paths)}] Scene graph: {video_path_obj.name}")
+        print()
+        print(f"[pipeline] [{idx}/{len(video_paths)}] {video_path_obj.name}")
+        if video_path in existing_videos or video_path_obj.stem in existing_videos:
+            print("[pipeline] skip: already exists in output jsonl")
+            continue
+        print("[pipeline] stage: scene_graph")
         generator.process_video(video_path, output_path)
+        existing_videos.add(video_path)
+        existing_videos.add(video_path_obj.stem)
+        print("[pipeline] stage: enrich_graph")
         _run_full_pipeline_for_video(
             video_path=video_path,
             output_jsonl=output_path,
@@ -683,13 +739,12 @@ def run(
             with_reference=with_reference,
             reference_model_name=reference_model_name,
             reference_crop_output_dir=reference_crop_output_dir,
-            reference_shot_a=reference_shot_a,
-            reference_shot_b=reference_shot_b,
             reference_frames_per_shot=reference_frames_per_shot,
             reference_save_intermediate_frames=reference_save_intermediate_frames,
         )
 
-    print("[pipeline] Full pipeline finished.")
+    print()
+    print("[pipeline] finished")
 
 
 if __name__ == '__main__':
