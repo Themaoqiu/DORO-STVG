@@ -227,7 +227,7 @@ def transform_record(
         video_width, video_height = size_cache[video_path]
 
     return {
-        "videopath": Path(video_path).name,
+        "video_path": Path(video_path).name,
         "queryid": obj.get("query_id"),
         "query": obj.get("query"),
         "Difficulty": {
