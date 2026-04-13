@@ -2,15 +2,7 @@
 
 This document defines the research program for improving [`query_generator_cpsat.py`](/home/wangxingjian/DORO-STVG/graph_generator/modules/query_generator_cpsat.py).
 
-It is intentionally narrow. It describes:
-
-- what the module is supposed to do
-- what success means
-- what can be changed
-- what must not be changed
-- how to iterate
-
-The style here is deliberate: the program should be easy to execute repeatedly, not impressive to read.
+This is an algorithm that samples difficulty‑ranked subgraphs from video scene graphs and synthesizes STVG queries.
 
 ---
 
@@ -39,9 +31,18 @@ This is a difficulty modeling task. It is not mainly:
 
 ## Scope
 
-Only edit:
+The final production file is:
 
 - [`graph_generator/modules/query_generator_cpsat.py`](/home/wangxingjian/DORO-STVG/graph_generator/modules/query_generator_cpsat.py)
+
+The autoresearch workspace is:
+
+- `graph_generator/modules/autoresearch`
+
+Working rule:
+
+- exploratory code, notes, analysis artifacts, and iteration helpers live under `graph_generator/modules/autoresearch`
+- the final best implementation must be saved back into `graph_generator/modules/query_generator_cpsat.py`
 
 Do not solve this task by changing:
 
@@ -163,6 +164,72 @@ D_s = c * overlap + d * distractors
 ```
 
 The two branches should each correspond to one irreducible source of difficulty, and the only tunable tradeoff should be the temporal-spatial balance at the top level.
+
+---
+
+## Query Constraints
+
+The generated query itself must remain a valid grounding query, not just a carrier for a difficulty label.
+
+### Referential uniqueness
+
+The described target must still point clearly to:
+
+- one unique object, or
+- one explicitly intended set of multiple objects
+
+It must not become ambiguous in a way that allows the same query to plausibly ground to multiple different object choices.
+
+In particular:
+
+- do not weaken the description until multiple same-class objects become equally plausible
+- do not remove the discriminative clue that makes the referent unique
+- for multi-target queries, do not let the wording blur the intended assignment across targets
+
+### Temporal uniqueness
+
+The temporal segment must also be uniquely justified.
+
+It is not acceptable to localize a sub-interval of a track using only non-temporal evidence. If a query refers to a particular time span, then the query must contain evidence that actually distinguishes that span from the rest of the track.
+
+In particular:
+
+- do not use a purely static appearance clue to justify only one slice of time
+- if the interval is local rather than full-track, the query should contain temporal, event, relational-change, or phase-specific evidence that makes that interval identifiable
+- time-specific grounding must be supported by time-specific clues
+
+### Language richness
+
+The query language should be as natural and semantically rich as possible.
+
+It should not collapse into a repetitive style where all queries describe objects using the same clue family, such as appearance-only descriptions.
+
+Prefer diversity across clue sources:
+
+- appearance
+- action
+- spatial relation
+- interaction
+- temporal phase
+- environment context
+
+The query should still stay concise, but it should not be impoverished.
+
+### Reference style
+
+Use the query style in these datasets as reference for what good grounding language looks like:
+
+- `data/hc-stvg2/test_full.json`
+- `data/vidstg/data/vidstg/annos/test.json`
+
+Those references suggest the intended style:
+
+- natural referring expressions
+- concrete but not bloated wording
+- explicit relational and temporal information when needed
+- enough specificity to identify the referent, but not a keyword dump
+
+The goal is not to copy those datasets literally. The goal is to keep generated queries in the same family of grounded, human-like referring expressions.
 
 ---
 
@@ -411,25 +478,7 @@ So the immediate target is not perfectly balanced large buckets. It is enough su
   5 consecutive rounds show no improvement over the current best result
 - budget stop:
   20 optimization rounds have been used, excluding the baseline run
-
----
-
-## Diagnostic Questions
-
-When a low-`D` sample still performs badly, ask:
-
-- Was it actually poorly separable?
-- Did the score ignore the need for relational evidence?
-- Did the score treat a multi-target sample like independent single targets?
-- Did the selected clues create hidden ambiguity that the difficulty score never modeled?
-
-When a high-`D` sample still performs well, ask:
-
-- Is the score over-penalizing benign motion or harmless distractors?
-- Is the target actually obvious despite structural richness?
-- Did template structure inflate apparent difficulty without increasing grounding difficulty?
-
-These questions should drive the next change.
+- This task only requires one GPU to run, but it will terminate if all GPUs are fully occupied by other tasks.
 
 ---
 
@@ -443,7 +492,10 @@ In scope:
 - redefining `D_t` and `D_s`
 - changing how difficulty buckets are assigned
 - changing candidate ordering logic when it leaks non-difficulty effects into the emitted difficulty distribution
+- changing query construction logic to preserve referential and temporal uniqueness
+- changing clue selection logic to improve language richness and clue diversity
 - exposing better introspection statistics in local metadata
+- extracting stable reusable helpers inside the autoresearch workspace before promoting the best version into production
 
 Conditionally allowed:
 
@@ -465,6 +517,10 @@ Do not:
 - solve monotonicity by changing downstream evaluation
 - add many weak features just because they are available
 - make the code longer every round while only slightly moving the metric
+- generate queries whose target description is ambiguous across multiple candidate objects
+- generate local time-span queries without true time-localizing evidence
+- let the query distribution collapse into one dominant clue family such as appearance-only phrasing
+- rewrite large amounts of code from scratch every round when reusable logic already exists
 
 This program values parsimony. A smaller, more principled model is preferred over a larger, more brittle one.
 
@@ -506,6 +562,19 @@ Use Python clean-code guardrails as the implementation standard:
 - do not keep dead intermediate abstractions after a redesign
 - tests are required for any behavior change in the difficulty logic
 
+Token and implementation efficiency matter as well.
+
+Do not re-derive or rewrite all code every round. Preserve and reuse stable code whenever possible.
+
+Preferred behavior:
+
+- keep reusable helpers that survive across iterations
+- save intermediate reusable logic in `graph_generator/modules/autoresearch`
+- only rewrite the parts whose hypothesis actually changed
+- promote proven reusable pieces into the final production file
+
+This is both an engineering rule and a token-efficiency rule. Rebuilding everything from scratch each round wastes context, increases implementation noise, and makes the research loop harder to stabilize.
+
 If a change improves the score slightly but makes [`query_generator_cpsat.py`](/home/wangxingjian/DORO-STVG/graph_generator/modules/query_generator_cpsat.py) longer, harder to read, and more heuristic-driven, it should usually be rejected.
 
 Preferred direction:
@@ -529,6 +598,9 @@ This program is successful only if most of the following become true at the same
 5. Single-target grounding is generally easier than multi-target grounding.
 6. The difficulty code in [`query_generator_cpsat.py`](/home/wangxingjian/DORO-STVG/graph_generator/modules/query_generator_cpsat.py) becomes cleaner or at least not worse.
 7. The final formula still has the form `D = λ·D_t + (1-λ)·D_s`, with no additive decomposition inside `D_t` or `D_s`.
+8. Queries continue to point uniquely to the intended object or intended object set.
+9. Time-localized queries are supported by actual temporal evidence.
+10. Query language remains varied and grounded instead of collapsing into one repetitive description mode.
 
 If the metrics improve but the code becomes a patchwork, keep going.
 If the code becomes elegant but the score still does not track performance, keep going.

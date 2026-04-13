@@ -291,6 +291,69 @@ def _dedupe_query_nodes(query_nodes: List[Dict[str, Any]]) -> List[Dict[str, Any
     return deduped
 
 
+def _limit_query_nodes_per_video(
+    query_nodes: List[Dict[str, Any]],
+    *,
+    max_queries_per_video: Optional[int] = None,
+    max_queries_per_difficulty_bucket: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    if not query_nodes:
+        return []
+    if max_queries_per_video is None and max_queries_per_difficulty_bucket is None:
+        return query_nodes
+
+    difficulty_order = tuple(_DIFFICULTY_BUCKET_ORDER.keys())
+    bucket_counts: Dict[str, int] = defaultdict(int)
+    selected: List[Dict[str, Any]] = []
+
+    def can_take(node: Dict[str, Any]) -> bool:
+        if max_queries_per_video is not None and len(selected) >= max_queries_per_video:
+            return False
+        bucket = str(node.get("difficulty_bucket", "medium"))
+        if (
+            max_queries_per_difficulty_bucket is not None
+            and bucket_counts[bucket] >= max_queries_per_difficulty_bucket
+        ):
+            return False
+        return True
+
+    ordered_nodes = sorted(
+        query_nodes,
+        key=lambda node: (
+            _DIFFICULTY_BUCKET_ORDER.get(str(node.get("difficulty_bucket", "medium")), _DIFFICULTY_BUCKET_ORDER["medium"]),
+            _to_int(node.get("target", {}).get("members", []).__len__(), 0),
+            float(node.get("D", 0.0)),
+            str(node.get("query_id", "")),
+        ),
+    )
+
+    for bucket in difficulty_order:
+        for node in ordered_nodes:
+            if str(node.get("difficulty_bucket", "medium")) != bucket:
+                continue
+            if not can_take(node):
+                continue
+            selected.append(node)
+            bucket_counts[bucket] += 1
+            break
+
+    if max_queries_per_video is None or len(selected) >= max_queries_per_video:
+        return selected
+
+    for node in ordered_nodes:
+        if node in selected:
+            continue
+        if not can_take(node):
+            continue
+        bucket = str(node.get("difficulty_bucket", "medium"))
+        selected.append(node)
+        bucket_counts[bucket] += 1
+        if len(selected) >= max_queries_per_video:
+            break
+
+    return selected
+
+
 def _normalized_values(values: Iterable[Any], kind: str) -> List[str]:
     out: List[str] = []
     for v in _uniq(values):
@@ -619,13 +682,191 @@ class CandidateProfile:
     inter: List[Set[Tuple[str, str]]]
 
 
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _member_object_signature(candidate: CandidateTarget) -> Tuple[str, ...]:
+    return tuple(member.object_id for member in candidate.members)
+
+
+def _profile_temporal_tokens(profile: CandidateProfile) -> Set[str]:
+    tokens: Set[str] = set()
+    for idx in range(profile.arity):
+        for tag in profile.temporal_tags[idx]:
+            tokens.add(f"m{idx}:tag:{tag}")
+        for action in profile.actions[idx]:
+            tokens.add(f"m{idx}:act:{action}")
+        for chain in profile.sequences[idx]:
+            tokens.add(f"m{idx}:seq:{'|'.join(chain)}")
+    return tokens
+
+
+def _profile_spatial_tokens(profile: CandidateProfile) -> Set[str]:
+    tokens: Set[str] = set()
+    for idx in range(profile.arity):
+        tokens.add(f"m{idx}:cls:{profile.classes[idx]}")
+        for attr in profile.attrs[idx]:
+            tokens.add(f"m{idx}:attr:{attr}")
+        for env in profile.env[idx]:
+            tokens.add(f"m{idx}:env:{env}")
+        for pred, ref_cls in profile.spa[idx]:
+            tokens.add(f"m{idx}:spa:{pred}:{ref_cls}")
+        for pred, ref_cls in profile.inter[idx]:
+            tokens.add(f"m{idx}:int:{pred}:{ref_cls}")
+    return tokens
+
+
+def _jaccard_similarity(left: Set[str], right: Set[str]) -> float:
+    if not left and not right:
+        return 0.0
+    union = left | right
+    if not union:
+        return 0.0
+    return float(len(left & right)) / float(len(union))
+
+
+def _candidate_interval_similarity(left: CandidateTarget, right: CandidateTarget) -> float:
+    left_intervals = [(member.start, member.end) for member in left.members]
+    right_intervals = [(member.start, member.end) for member in right.members]
+    if len(left_intervals) != len(right_intervals) or not left_intervals:
+        return 0.0
+    scores = [_interval_tiou(a, b) for a, b in zip(left_intervals, right_intervals)]
+    return float(sum(scores) / len(scores))
+
+
+def _candidate_temporal_confusability(
+    candidate: CandidateTarget,
+    all_candidates: List[CandidateTarget],
+    profile_map: Dict[str, CandidateProfile],
+) -> Tuple[float, Dict[str, Any]]:
+    target_signature = _member_object_signature(candidate)
+    target_tokens = _profile_temporal_tokens(profile_map[candidate.candidate_id])
+    best_score = 0.0
+    best_candidate_id = ""
+    best_similarity = 0.0
+    best_overlap = 0.0
+    competitor_count = 0
+
+    for other in all_candidates:
+        if other.candidate_id == candidate.candidate_id:
+            continue
+        if _member_object_signature(other) != target_signature:
+            continue
+        competitor_count += 1
+        similarity = _jaccard_similarity(target_tokens, _profile_temporal_tokens(profile_map[other.candidate_id]))
+        overlap = _candidate_interval_similarity(candidate, other)
+        score = math.sqrt(similarity * overlap)
+        if score > best_score:
+            best_score = score
+            best_candidate_id = other.candidate_id
+            best_similarity = similarity
+            best_overlap = overlap
+
+    return _clamp01(best_score), {
+        "temporal_competitors": competitor_count,
+        "temporal_best_candidate_id": best_candidate_id,
+        "temporal_best_similarity": best_similarity,
+        "temporal_best_interval_overlap": best_overlap,
+        "temporal_token_count": len(target_tokens),
+    }
+
+
+def _candidate_spatial_confusability(
+    candidate: CandidateTarget,
+    all_candidates: List[CandidateTarget],
+    profile_map: Dict[str, CandidateProfile],
+) -> Tuple[float, Dict[str, Any]]:
+    target_signature = _member_object_signature(candidate)
+    target_tokens = _profile_spatial_tokens(profile_map[candidate.candidate_id])
+    best_score = 0.0
+    best_candidate_id = ""
+    best_similarity = 0.0
+    best_overlap = 0.0
+    competitor_count = 0
+
+    for other in all_candidates:
+        if other.candidate_id == candidate.candidate_id or other.arity != candidate.arity:
+            continue
+        if _member_object_signature(other) == target_signature:
+            continue
+        overlap = _interval_tiou(candidate.interval, other.interval)
+        if overlap <= 0.0:
+            continue
+        competitor_count += 1
+        similarity = _jaccard_similarity(target_tokens, _profile_spatial_tokens(profile_map[other.candidate_id]))
+        score = math.sqrt(similarity * overlap)
+        if score > best_score:
+            best_score = score
+            best_candidate_id = other.candidate_id
+            best_similarity = similarity
+            best_overlap = overlap
+
+    return _clamp01(best_score), {
+        "spatial_competitors": competitor_count,
+        "spatial_best_candidate_id": best_candidate_id,
+        "spatial_best_similarity": best_similarity,
+        "spatial_best_interval_overlap": best_overlap,
+        "spatial_token_count": len(target_tokens),
+    }
+
+
+def _best_exclusion_difficulty(
+    rows: List[List[int]],
+    clues: List[AtomicClue],
+    *,
+    allow_temporal: bool,
+) -> Tuple[float, Dict[str, Any]]:
+    if not rows:
+        return 0.0, {
+            "competitor_rows": 0,
+            "eligible_clues": 0,
+            "best_clue_id": "",
+            "best_clue_type": "",
+            "best_exclusion_rate": 1.0,
+        }
+
+    eligible = [
+        clue
+        for clue in clues
+        if clue.is_temporal_evidence == allow_temporal
+    ]
+    if not eligible:
+        return 1.0, {
+            "competitor_rows": len(rows),
+            "eligible_clues": 0,
+            "best_clue_id": "",
+            "best_clue_type": "",
+            "best_exclusion_rate": 0.0,
+        }
+
+    best_clue = None
+    best_rate = -1.0
+    for clue in eligible:
+        clue_idx = int(clue.clue_id[1:])
+        rate = float(sum(row[clue_idx] for row in rows)) / float(len(rows))
+        if rate > best_rate:
+            best_rate = rate
+            best_clue = clue
+
+    return _clamp01(1.0 - best_rate), {
+        "competitor_rows": len(rows),
+        "eligible_clues": len(eligible),
+        "best_clue_id": "" if best_clue is None else best_clue.clue_id,
+        "best_clue_type": "" if best_clue is None else best_clue.clue_type,
+        "best_exclusion_rate": _clamp01(best_rate),
+    }
+
+
 def _object_desc_for_action_target(
     index: GraphIndex,
     object_id: str,
-    target_index_by_object_id: Optional[Dict[str, int]] = None,
+    target_desc_by_object_id: Optional[Dict[str, str]] = None,
 ) -> str:
-    if target_index_by_object_id and object_id in target_index_by_object_id:
-        return f"target {target_index_by_object_id[object_id]}"
+    if target_desc_by_object_id:
+        target_desc = _norm(target_desc_by_object_id.get(object_id, ""))
+        if target_desc:
+            return target_desc
     obj = index.objects.get(object_id)
     if obj is None:
         return "object"
@@ -642,7 +883,7 @@ def _object_desc_for_action_target(
 def _action_target_desc_map(
     index: GraphIndex,
     member: CandidateMember,
-    target_index_by_object_id: Optional[Dict[str, int]] = None,
+    target_desc_by_object_id: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Set[str]]:
     out: Dict[str, Set[str]] = defaultdict(set)
     interval = (member.start, member.end)
@@ -655,14 +896,14 @@ def _action_target_desc_map(
         for tid in item.get("targets", []):
             if tid not in index.objects:
                 continue
-            out[action].add(_object_desc_for_action_target(index, tid, target_index_by_object_id))
+            out[action].add(_object_desc_for_action_target(index, tid, target_desc_by_object_id))
     return out
 
 
 def _relation_target_desc_maps(
     index: GraphIndex,
     member: CandidateMember,
-    target_index_by_object_id: Optional[Dict[str, int]] = None,
+    target_desc_by_object_id: Optional[Dict[str, str]] = None,
 ) -> Tuple[Dict[Tuple[str, str], Set[str]], Dict[Tuple[str, str], Set[str]]]:
     spatial: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
     interacting: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
@@ -674,7 +915,7 @@ def _relation_target_desc_maps(
         oid = str(rel.get("object_id", "")).strip()
         if not pred or not oid or oid not in index.objects:
             continue
-        desc = _object_desc_for_action_target(index, oid, target_index_by_object_id)
+        desc = _object_desc_for_action_target(index, oid, target_desc_by_object_id)
         if not desc:
             continue
         key = (pred, ref_cls)
@@ -683,6 +924,53 @@ def _relation_target_desc_maps(
         else:
             interacting[key].add(desc)
     return spatial, interacting
+
+
+def _candidate_member_reference_options(
+    index: GraphIndex,
+    profile: CandidateProfile,
+    member_index: int,
+    member: CandidateMember,
+) -> List[str]:
+    cls = _norm(profile.classes[member_index]) or _display_phrase(_sample_class(index.objects.get(member.object_id, {}), member.object_id))
+    options: List[str] = []
+
+    def append_option(text: str) -> None:
+        clean = _norm(text)
+        if clean and clean not in options:
+            options.append(clean)
+
+    for attr in sorted(profile.attrs[member_index]):
+        append_option(f"{cls} {attr}")
+    for env in sorted(profile.env[member_index]):
+        append_option(f"{cls} {env}")
+    for action in sorted(profile.actions[member_index]):
+        append_option(f"{cls} {action}")
+    append_option(cls or "object")
+    return options
+
+
+def _candidate_target_desc_map(
+    index: GraphIndex,
+    candidate: CandidateTarget,
+    profile: CandidateProfile,
+) -> Dict[str, str]:
+    options_by_object_id: Dict[str, List[str]] = {}
+    counts: Dict[str, int] = defaultdict(int)
+    for member_index, member in enumerate(candidate.members):
+        options = _candidate_member_reference_options(index, profile, member_index, member)
+        options_by_object_id[member.object_id] = options
+        for option in options:
+            counts[option] += 1
+
+    desc_by_object_id: Dict[str, str] = {}
+    for member in candidate.members:
+        options = options_by_object_id.get(member.object_id, [])
+        chosen = next((option for option in options if counts[option] == 1), "")
+        if not chosen and options:
+            chosen = options[0]
+        desc_by_object_id[member.object_id] = chosen or "object"
+    return desc_by_object_id
 
 
 def _member_full_track_interval(index: GraphIndex, member: CandidateMember) -> Tuple[int, int]:
@@ -1027,6 +1315,110 @@ def build_candidate_intervals(
     return candidates
 
 
+def _member_temporal_tags(index: GraphIndex, member: CandidateMember) -> Set[str]:
+    tags: Set[str] = set()
+    member_interval = (member.start, member.end)
+    for temporal_node in index.temporal_spans:
+        if _overlap(member_interval, (temporal_node["start"], temporal_node["end"])):
+            tags.add(f"clip_{temporal_node['clip_id']}")
+    return tags
+
+
+def _member_action_events(index: GraphIndex, member: CandidateMember) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    member_interval = (member.start, member.end)
+    for item in index.actions_by_obj.get(member.object_id, []):
+        if not _overlap(member_interval, (item["start"], item["end"])):
+            continue
+        label = _normalize_phrase(item["label"], "act")
+        if not label:
+            continue
+        events.append(
+            {
+                "label": label,
+                "start": item["start"],
+                "end": item["end"],
+                "targets": list(item.get("targets", [])),
+            }
+        )
+    events.sort(key=lambda x: (x["start"], x["end"], x["label"]))
+    return events
+
+
+def _member_relation_events(index: GraphIndex, member: CandidateMember) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    member_interval = (member.start, member.end)
+    for rel in index.relations_by_subj.get(member.object_id, []):
+        if not _overlap(member_interval, (rel["start"], rel["end"])):
+            continue
+        pred = _normalize_phrase(rel["predicate"], "rel")
+        ref_cls = _normalize_phrase(rel["ref_class"], "attr") or _normalize_phrase(rel["ref_class"], "rel")
+        if not pred or not ref_cls:
+            continue
+        events.append(
+            {
+                "predicate": pred,
+                "ref_class": ref_cls,
+                "edge_type": rel["edge_type"],
+                "start": rel["start"],
+                "end": rel["end"],
+            }
+        )
+    events.sort(key=lambda x: (x["start"], x["end"], x["predicate"], x["ref_class"]))
+    return events
+
+
+def _relation_pair_sets(
+    relation_events: List[Dict[str, Any]],
+) -> Tuple[Set[Tuple[str, str]], Set[Tuple[str, str]]]:
+    spatial_pairs: Set[Tuple[str, str]] = set()
+    interaction_pairs: Set[Tuple[str, str]] = set()
+    for rel in relation_events:
+        pair = (rel["predicate"], rel["ref_class"])
+        if rel["edge_type"] == "spatial":
+            spatial_pairs.add(pair)
+        else:
+            interaction_pairs.add(pair)
+    return spatial_pairs, interaction_pairs
+
+
+def _interaction_pairs_from_action_targets(
+    index: GraphIndex,
+    action_events: List[Dict[str, Any]],
+) -> Set[Tuple[str, str]]:
+    pairs: Set[Tuple[str, str]] = set()
+    for action in action_events:
+        for target_id in action["targets"]:
+            if target_id not in index.objects:
+                continue
+            target_class = _normalize_phrase(_sample_class(index.objects[target_id], target_id), "attr")
+            if target_class:
+                pairs.add((action["label"], target_class))
+    return pairs
+
+
+def _sequence_set_for_member(
+    action_events: List[Dict[str, Any]],
+    relation_events: List[Dict[str, Any]],
+    max_chain_len: int,
+) -> Set[Tuple[str, ...]]:
+    action_chain_events = [(a["start"], a["end"], f"act:{a['label']}") for a in action_events]
+    relation_chain_events = [
+        (rel["start"], rel["end"], f"rel:{rel['predicate']}:{rel['ref_class']}")
+        for rel in relation_events
+    ]
+    mixed_chains = {
+        chain
+        for chain in _enumerate_ordered_chains(action_chain_events + relation_chain_events, max_chain_len=max_chain_len)
+        if any(token.startswith("act:") for token in chain) and any(token.startswith("rel:") for token in chain)
+    }
+    return (
+        _enumerate_ordered_chains(action_chain_events, max_chain_len=max_chain_len)
+        | _enumerate_ordered_chains(relation_chain_events, max_chain_len=max_chain_len)
+        | mixed_chains
+    )
+
+
 def _profile_for_candidate(index: GraphIndex, candidate: CandidateTarget, max_chain_len: int = 4) -> CandidateProfile:
     classes: List[str] = []
     attrs: List[Set[str]] = []
@@ -1042,81 +1434,18 @@ def _profile_for_candidate(index: GraphIndex, candidate: CandidateTarget, max_ch
         classes.append(_sample_class(obj, member.object_id))
         attrs.append(set(_normalized_values(obj.get("attributes") or [], "attr")))
         env.append(set(_normalized_values(obj.get("environment") or [], "rel")))
+        temporal_tags.append(_member_temporal_tags(index, member))
 
-        tags: Set[str] = set()
-        for tn in index.temporal_spans:
-            if _overlap((member.start, member.end), (tn["start"], tn["end"])):
-                tags.add(f"clip_{tn['clip_id']}")
-        temporal_tags.append(tags)
-
-        act_events = []
-        for item in index.actions_by_obj.get(member.object_id, []):
-            if not _overlap((member.start, member.end), (item["start"], item["end"])):
-                continue
-            label = _normalize_phrase(item["label"], "act")
-            if not label:
-                continue
-            act_events.append(
-                {
-                    "label": label,
-                    "start": item["start"],
-                    "end": item["end"],
-                    "targets": list(item.get("targets", [])),
-                }
-            )
-        act_events.sort(key=lambda x: (x["start"], x["end"], x["label"]))
-
+        act_events = _member_action_events(index, member)
         act_labels = {a["label"] for a in act_events}
         actions.append(act_labels)
 
-        rel_events = []
-        for rel in index.relations_by_subj.get(member.object_id, []):
-            if not _overlap((member.start, member.end), (rel["start"], rel["end"])):
-                continue
-            pred = _normalize_phrase(rel["predicate"], "rel")
-            ref_cls = _normalize_phrase(rel["ref_class"], "attr") or _normalize_phrase(rel["ref_class"], "rel")
-            if not pred or not ref_cls:
-                continue
-            rel_events.append(
-                {
-                    "predicate": pred,
-                    "ref_class": ref_cls,
-                    "edge_type": rel["edge_type"],
-                    "start": rel["start"],
-                    "end": rel["end"],
-                }
-            )
-        rel_events.sort(key=lambda x: (x["start"], x["end"], x["predicate"], x["ref_class"]))
-
-        spa_set: Set[Tuple[str, str]] = set()
-        int_set: Set[Tuple[str, str]] = set()
-        for rel in rel_events:
-            pair = (rel["predicate"], rel["ref_class"])
-            if rel["edge_type"] == "spatial":
-                spa_set.add(pair)
-            else:
-                int_set.add(pair)
-        for a in act_events:
-            for tid in a["targets"]:
-                tcls = _normalize_phrase(_sample_class(index.objects[tid], tid), "attr")
-                if tcls:
-                    int_set.add((a["label"], tcls))
+        rel_events = _member_relation_events(index, member)
+        spa_set, int_set = _relation_pair_sets(rel_events)
         spa.append(spa_set)
-        inter.append(int_set)
+        inter.append(int_set | _interaction_pairs_from_action_targets(index, act_events))
 
-        action_events_for_chain = [(a["start"], a["end"], f"act:{a['label']}") for a in act_events]
-        relation_events_for_chain = [
-            (r["start"], r["end"], f"rel:{r['predicate']}:{r['ref_class']}")
-            for r in rel_events
-        ]
-        act_chains = _enumerate_ordered_chains(action_events_for_chain, max_chain_len=max_chain_len)
-        rel_chains = _enumerate_ordered_chains(relation_events_for_chain, max_chain_len=max_chain_len)
-        mixed_chains = {
-            chain
-            for chain in _enumerate_ordered_chains(action_events_for_chain + relation_events_for_chain, max_chain_len=max_chain_len)
-            if any(tok.startswith("act:") for tok in chain) and any(tok.startswith("rel:") for tok in chain)
-        }
-        sequences.append(act_chains | rel_chains | mixed_chains)
+        sequences.append(_sequence_set_for_member(act_events, rel_events, max_chain_len))
 
     return CandidateProfile(
         candidate_id=candidate.candidate_id,
@@ -1132,14 +1461,112 @@ def _profile_for_candidate(index: GraphIndex, candidate: CandidateTarget, max_ch
     )
 
 
+def _append_attribute_and_env_clues(
+    profile: CandidateProfile,
+    member_index: int,
+    member_indices: Tuple[int, ...],
+    add_clue: Callable[[str, str, Tuple[Any, ...], Tuple[int, ...], bool, int], None],
+) -> None:
+    for attr in sorted(profile.attrs[member_index]):
+        add_clue("app", attr, ("app", member_index, attr), member_indices, False, 0)
+    for phrase in sorted(profile.env[member_index]):
+        add_clue("env", phrase, ("env", "general", member_index, phrase), member_indices, False, 0)
+    for tag in sorted(profile.temporal_tags[member_index]):
+        add_clue("env", tag, ("env", "temporal", member_index, tag), member_indices, True, 0)
+
+
+def _append_action_clues(
+    index: GraphIndex,
+    profile: CandidateProfile,
+    member: CandidateMember,
+    member_index: int,
+    member_indices: Tuple[int, ...],
+    action_target_descs: Dict[str, Set[str]],
+    add_clue: Callable[[str, str, Tuple[Any, ...], Tuple[int, ...], bool, int], None],
+) -> None:
+    for action in sorted(profile.actions[member_index]):
+        target_descs = sorted(action_target_descs.get(action, set()))
+        has_local_targets = _action_has_local_targets(index, member, action)
+        if has_local_targets and not target_descs:
+            continue
+        action_text = action if not target_descs else f"{action} {target_descs[0]}"
+        add_clue("act", action_text, ("act", member_index, action), member_indices, True, 1)
+
+
+def _append_sequence_clues(
+    profile: CandidateProfile,
+    member_index: int,
+    member_indices: Tuple[int, ...],
+    add_clue: Callable[[str, str, Tuple[Any, ...], Tuple[int, ...], bool, int], None],
+) -> None:
+    for chain in sorted(profile.sequences[member_index]):
+        if len(chain) < 2:
+            continue
+        chain_text = " then ".join(_format_seq_part(token) for token in chain)
+        add_clue("seq", chain_text, ("seq", member_index, *chain), member_indices, True, len(chain))
+
+
+def _append_spatial_clues(
+    index: GraphIndex,
+    profile: CandidateProfile,
+    member: CandidateMember,
+    member_index: int,
+    member_indices: Tuple[int, ...],
+    spatial_target_descs: Dict[Tuple[str, str], Set[str]],
+    add_clue: Callable[[str, str, Tuple[Any, ...], Tuple[int, ...], bool, int], None],
+) -> None:
+    for pred, ref_cls in sorted(profile.spa[member_index]):
+        target_descs = sorted(spatial_target_descs.get((pred, ref_cls), set()))
+        if not target_descs:
+            continue
+        add_clue(
+            "spa",
+            f"{pred} {target_descs[0]}",
+            ("spa", member_index, pred, ref_cls),
+            member_indices,
+            _has_local_dynamic_relation_pair(index, member, pred, ref_cls, require_spatial=True),
+            0,
+        )
+
+
+def _append_interaction_clues(
+    index: GraphIndex,
+    profile: CandidateProfile,
+    member: CandidateMember,
+    member_index: int,
+    member_indices: Tuple[int, ...],
+    interaction_target_descs: Dict[Tuple[str, str], Set[str]],
+    action_target_descs: Dict[str, Set[str]],
+    add_clue: Callable[[str, str, Tuple[Any, ...], Tuple[int, ...], bool, int], None],
+) -> None:
+    for pred, ref_cls in sorted(profile.inter[member_index]):
+        target_descs = sorted(interaction_target_descs.get((pred, ref_cls), set()))
+        if not target_descs:
+            target_descs = sorted(action_target_descs.get(pred, set()))
+        if not target_descs:
+            continue
+        is_temporal = _has_local_dynamic_relation_pair(
+            index,
+            member,
+            pred,
+            ref_cls,
+            require_spatial=False,
+        ) or _has_local_dynamic_action_target_pair(index, member, pred, ref_cls)
+        add_clue(
+            "int",
+            f"{pred} {target_descs[0]}",
+            ("int", member_index, pred, ref_cls),
+            member_indices,
+            is_temporal,
+            1,
+        )
+
+
 def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_len: int = 4) -> List[AtomicClue]:
     profile = _profile_for_candidate(index, candidate, max_chain_len=max_chain_len)
     clues: List[AtomicClue] = []
     seen: Set[Tuple[Any, ...]] = set()
-    target_index_by_object_id = {
-        member.object_id: idx + 1
-        for idx, member in enumerate(candidate.members)
-    }
+    target_desc_by_object_id = _candidate_target_desc_map(index, candidate, profile)
 
     def add(
         clue_type: str,
@@ -1169,132 +1596,14 @@ def build_atomic_clues(index: GraphIndex, candidate: CandidateTarget, max_chain_
         cls = profile.classes[k]
         member = candidate.members[k]
         member_idx = (k,)
-        action_target_descs = _action_target_desc_map(index, member, target_index_by_object_id)
-        spa_target_descs, int_target_descs = _relation_target_desc_maps(index, member, target_index_by_object_id)
-        add(
-            "cls",
-            cls,
-            ("cls", k, cls),
-            member_idx,
-            False,
-            0,
-        )
-
-        for attr in sorted(profile.attrs[k]):
-            add(
-                "app",
-                attr,
-                ("app", k, attr),
-                member_idx,
-                False,
-                0,
-            )
-
-        for phrase in sorted(profile.env[k]):
-            add(
-                "env",
-                phrase,
-                ("env", "general", k, phrase),
-                member_idx,
-                False,
-                0,
-            )
-
-        for tag in sorted(profile.temporal_tags[k]):
-            add(
-                "env",
-                tag,
-                ("env", "temporal", k, tag),
-                member_idx,
-                True,
-                0,
-            )
-
-        for action in sorted(profile.actions[k]):
-            target_descs = sorted(action_target_descs.get(action, set()))
-            has_local_targets = _action_has_local_targets(index, member, action)
-            if has_local_targets:
-                # If an action has concrete target objects, the clue must mention target info.
-                if not target_descs:
-                    continue
-                action_text = f"{action} {target_descs[0]}"
-            elif target_descs:
-                action_text = f"{action} {target_descs[0]}"
-            else:
-                action_text = action
-            add(
-                "act",
-                action_text,
-                ("act", k, action),
-                member_idx,
-                True,
-                1,
-            )
-
-        for chain in sorted(profile.sequences[k]):
-            if len(chain) < 2:
-                continue
-            chain_text = " then ".join(_format_seq_part(tok) for tok in chain)
-            add(
-                "seq",
-                chain_text,
-                ("seq", k, *chain),
-                member_idx,
-                True,
-                len(chain),
-            )
-
-        for pred, ref_cls in sorted(profile.spa[k]):
-            target_descs = sorted(spa_target_descs.get((pred, ref_cls), set()))
-            # Spatial relations always come with an object_id in graph edges;
-            # require target information in text when such clues are used.
-            if not target_descs:
-                continue
-            spa_text = f"{pred} {target_descs[0]}"
-            spa_temporal = _has_local_dynamic_relation_pair(
-                index,
-                member,
-                pred,
-                ref_cls,
-                require_spatial=True,
-            )
-            add(
-                "spa",
-                spa_text,
-                ("spa", k, pred, ref_cls),
-                member_idx,
-                spa_temporal,
-                0,
-            )
-
-        for pred, ref_cls in sorted(profile.inter[k]):
-            target_descs = sorted(int_target_descs.get((pred, ref_cls), set()))
-            if not target_descs:
-                target_descs = sorted(action_target_descs.get(pred, set()))
-            # Interaction clues with target objects must expose target info in query text.
-            if not target_descs:
-                continue
-            int_text = f"{pred} {target_descs[0]}"
-            int_temporal = _has_local_dynamic_relation_pair(
-                index,
-                member,
-                pred,
-                ref_cls,
-                require_spatial=False,
-            ) or _has_local_dynamic_action_target_pair(
-                index,
-                member,
-                pred,
-                ref_cls,
-            )
-            add(
-                "int",
-                int_text,
-                ("int", k, pred, ref_cls),
-                member_idx,
-                int_temporal,
-                1,
-            )
+        action_target_descs = _action_target_desc_map(index, member, target_desc_by_object_id)
+        spa_target_descs, int_target_descs = _relation_target_desc_maps(index, member, target_desc_by_object_id)
+        add("cls", cls, ("cls", k, cls), member_idx, False, 0)
+        _append_attribute_and_env_clues(profile, k, member_idx, add)
+        _append_action_clues(index, profile, member, k, member_idx, action_target_descs, add)
+        _append_sequence_clues(profile, k, member_idx, add)
+        _append_spatial_clues(index, profile, member, k, member_idx, spa_target_descs, add)
+        _append_interaction_clues(index, profile, member, k, member_idx, int_target_descs, action_target_descs, add)
 
     return clues
 
@@ -1354,6 +1663,98 @@ def build_exclusion_matrix(
     return others, object_rows, time_rows
 
 
+def _add_exclusion_constraints(model: Any, x: List[Any], exclusion_matrix: List[List[int]]) -> None:
+    for row in exclusion_matrix:
+        model.Add(sum(row[j] * x[j] for j in range(len(x))) >= 1)
+
+
+def _member_clue_indices(clues: List[AtomicClue], member_index: int, *, exclude_cls: bool = False) -> List[int]:
+    return [
+        clue_index
+        for clue_index, clue in enumerate(clues)
+        if member_index in clue.member_indices and (not exclude_cls or clue.clue_type != "cls")
+    ]
+
+
+def _add_member_coverage_constraints(model: Any, x: List[Any], target: CandidateTarget, clues: List[AtomicClue]) -> bool:
+    for member_index in range(target.arity):
+        member_indices = _member_clue_indices(clues, member_index)
+        if not member_indices:
+            return False
+        model.Add(sum(x[j] for j in member_indices) >= 1)
+
+        if target.arity <= 1:
+            continue
+        grounded_indices = _member_clue_indices(clues, member_index, exclude_cls=True)
+        if not grounded_indices:
+            return False
+        model.Add(sum(x[j] for j in grounded_indices) >= 1)
+    return True
+
+
+def _add_clue_type_constraints(model: Any, x: List[Any], template: TemplateSpec, clues: List[AtomicClue]) -> bool:
+    for clue_type in CLUE_TYPES:
+        type_indices = [j for j, clue in enumerate(clues) if clue.clue_type == clue_type]
+        if not type_indices:
+            if template.type_min.get(clue_type, 0) > 0:
+                return False
+            continue
+        model.Add(sum(x[j] for j in type_indices) >= int(template.type_min.get(clue_type, 0)))
+        model.Add(sum(x[j] for j in type_indices) <= int(template.type_max.get(clue_type, template.k_max)))
+    return True
+
+
+def _sequence_indices(clues: List[AtomicClue]) -> List[int]:
+    return [j for j, clue in enumerate(clues) if clue.clue_type == "seq"]
+
+
+def _qualified_sequence_indices(template: TemplateSpec, clues: List[AtomicClue], seq_indices: List[int]) -> List[int]:
+    seq_min_len = int(template.seq_min_chain_len)
+    seq_max_len = int(template.seq_max_chain_len)
+    return [
+        j
+        for j in seq_indices
+        if (seq_min_len <= 0 or clues[j].chain_len >= seq_min_len)
+        and (seq_max_len <= 0 or clues[j].chain_len <= seq_max_len)
+    ]
+
+
+def _add_required_sequence_constraints(
+    model: Any,
+    x: List[Any],
+    template: TemplateSpec,
+    clues: List[AtomicClue],
+) -> bool:
+    seq_indices = _sequence_indices(clues)
+    qualified_indices = _qualified_sequence_indices(template, clues, seq_indices)
+
+    if template.require_seq:
+        if not qualified_indices:
+            return False
+        model.Add(sum(x[j] for j in qualified_indices) >= int(template.require_seq))
+
+    if template.min_long_seq_len <= 0 and template.min_seq_chain_sum <= 0:
+        return True
+    if not seq_indices:
+        return False
+
+    long_seq_indices = [j for j in seq_indices if clues[j].chain_len >= int(template.min_long_seq_len)]
+    seq_chain_sum = sum(clues[j].chain_len * x[j] for j in seq_indices)
+    if template.min_long_seq_len > 0 and template.min_seq_chain_sum > 0:
+        enough_seq_sum = model.NewBoolVar("enough_seq_chain_sum")
+        model.Add(seq_chain_sum >= int(template.min_seq_chain_sum)).OnlyEnforceIf(enough_seq_sum)
+        model.Add(seq_chain_sum < int(template.min_seq_chain_sum)).OnlyEnforceIf(enough_seq_sum.Not())
+        model.AddBoolOr([enough_seq_sum, *[x[j] for j in long_seq_indices]])
+        return True
+    if template.min_seq_chain_sum > 0:
+        model.Add(seq_chain_sum >= int(template.min_seq_chain_sum))
+        return True
+    if not long_seq_indices:
+        return False
+    model.Add(sum(x[j] for j in long_seq_indices) >= 1)
+    return True
+
+
 def solve_query_cpsat(
     target: CandidateTarget,
     template: TemplateSpec,
@@ -1369,80 +1770,23 @@ def solve_query_cpsat(
     model = cp_model.CpModel()
     x = [model.NewBoolVar(f"x_{j}") for j in range(len(clues))]
 
-    for row in object_exclusion_matrix:
-        model.Add(sum(row[j] * x[j] for j in range(len(clues))) >= 1)
+    _add_exclusion_constraints(model, x, object_exclusion_matrix)
 
     if template.require_time_uniqueness and enforce_time_uniqueness:
-        for row in time_exclusion_matrix:
-            model.Add(sum(row[j] * x[j] for j in range(len(clues))) >= 1)
+        _add_exclusion_constraints(model, x, time_exclusion_matrix)
 
-    # Keep member coverage constraints: each target member must be grounded by >=1 selected clue.
-    # For multi-target this is essential to avoid "partially described" pair/triplet targets.
-    for k in range(target.arity):
-        idx = [j for j, clue in enumerate(clues) if k in clue.member_indices]
-        if not idx:
-            return None
-        model.Add(sum(x[j] for j in idx) >= 1)
-        if target.arity > 1:
-            non_cls_idx = [
-                j
-                for j, clue in enumerate(clues)
-                if clue.clue_type != "cls" and k in clue.member_indices
-            ]
-            if not non_cls_idx:
-                return None
-            model.Add(sum(x[j] for j in non_cls_idx) >= 1)
-
-    for c in CLUE_TYPES:
-        idx = [j for j, clue in enumerate(clues) if clue.clue_type == c]
-        if idx:
-            model.Add(sum(x[j] for j in idx) >= int(template.type_min.get(c, 0)))
-            model.Add(sum(x[j] for j in idx) <= int(template.type_max.get(c, template.k_max)))
-        elif template.type_min.get(c, 0) > 0:
-            return None
+    if not _add_member_coverage_constraints(model, x, target, clues):
+        return None
+    if not _add_clue_type_constraints(model, x, template, clues):
+        return None
 
     model.Add(sum(x) >= int(template.k_min))
     model.Add(sum(x) <= int(template.k_max))
 
     model.Add(sum(clue.chain_len * x[j] for j, clue in enumerate(clues)) >= int(template.q_min))
 
-    seq_idx = [j for j, clue in enumerate(clues) if clue.clue_type == "seq"]
-    seq_min_len = int(template.seq_min_chain_len)
-    seq_max_len = int(template.seq_max_chain_len)
-    seq_required_idx = [
-        j
-        for j in seq_idx
-        if (seq_min_len <= 0 or clues[j].chain_len >= seq_min_len)
-        and (seq_max_len <= 0 or clues[j].chain_len <= seq_max_len)
-    ]
-
-    if template.require_seq:
-        if not seq_required_idx:
-            return None
-        model.Add(sum(x[j] for j in seq_required_idx) >= int(template.require_seq))
-
-    if template.min_long_seq_len > 0 or template.min_seq_chain_sum > 0:
-        if not seq_idx:
-            return None
-        long_seq_idx = [
-            j
-            for j in seq_idx
-            if clues[j].chain_len >= int(template.min_long_seq_len)
-        ]
-        seq_chain_sum = sum(clues[j].chain_len * x[j] for j in seq_idx)
-        if template.min_long_seq_len > 0 and template.min_seq_chain_sum > 0:
-            enough_seq_sum = model.NewBoolVar("enough_seq_chain_sum")
-            model.Add(seq_chain_sum >= int(template.min_seq_chain_sum)).OnlyEnforceIf(enough_seq_sum)
-            model.Add(seq_chain_sum < int(template.min_seq_chain_sum)).OnlyEnforceIf(enough_seq_sum.Not())
-            disjuncts = [enough_seq_sum]
-            disjuncts.extend(x[j] for j in long_seq_idx)
-            model.AddBoolOr(disjuncts)
-        elif template.min_seq_chain_sum > 0:
-            model.Add(seq_chain_sum >= int(template.min_seq_chain_sum))
-        elif template.min_long_seq_len > 0:
-            if not long_seq_idx:
-                return None
-            model.Add(sum(x[j] for j in long_seq_idx) >= 1)
+    if not _add_required_sequence_constraints(model, x, template, clues):
+        return None
 
     # Keep objective as min sum(x_j) for both single- and multi-target.
     model.Minimize(sum(x))
@@ -1560,34 +1904,28 @@ def _build_default_templates() -> List[TemplateSpec]:
             arity_max=1,
         ),
         TemplateSpec(
-            name="hard_long_seq_int",
+            name="hard_act_int",
             bucket="hard",
-            type_min={"seq": 1, "int": 1},
-            type_max={"cls": 1, "app": 2, "act": 3, "seq": 3, "spa": 2, "env": inf, "int": 2},
-            k_min=4,
-            k_max=7,
-            q_min=5,
-            require_seq=1,
-            seq_min_chain_len=3,
-            min_long_seq_len=3,
-            min_seq_chain_sum=7,
+            type_min={"act": 1, "int": 1},
+            type_max={"cls": 1, "app": 2, "act": 2, "seq": 0, "spa": 1, "env": inf, "int": 2},
+            k_min=3,
+            k_max=5,
+            q_min=3,
+            require_seq=0,
             require_time_uniqueness=1,
             weight=1.0,
             arity_min=1,
             arity_max=1,
         ),
         TemplateSpec(
-            name="hard_long_seq_spa",
+            name="hard_act_spa",
             bucket="hard",
-            type_min={"act": 1, "seq": 1, "spa": 1},
-            type_max={"cls": 1, "app": 2, "act": 3, "seq": 3, "spa": 2, "env": inf, "int": 1},
-            k_min=5,
-            k_max=8,
-            q_min=6,
-            require_seq=1,
-            seq_min_chain_len=3,
-            min_long_seq_len=3,
-            min_seq_chain_sum=8,
+            type_min={"act": 1, "spa": 1},
+            type_max={"cls": 1, "app": 2, "act": 2, "seq": 0, "spa": 2, "env": inf, "int": 1},
+            k_min=3,
+            k_max=5,
+            q_min=3,
+            require_seq=0,
             require_time_uniqueness=1,
             weight=1.0,
             arity_min=1,
@@ -1623,10 +1961,10 @@ def _build_default_templates() -> List[TemplateSpec]:
             arity_max=3,
         ),
         TemplateSpec(
-            name="medium_pair_dual_act",
+            name="medium_pair_act_spa",
             bucket="medium",
-            type_min={"act": 2},
-            type_max={"cls": 2, "app": 2, "act": 2, "seq": 0, "spa": 1, "env": 1, "int": 1},
+            type_min={"act": 1, "spa": 1},
+            type_max={"cls": 2, "app": 2, "act": 2, "seq": 0, "spa": 2, "env": 1, "int": 1},
             k_min=3,
             k_max=5,
             q_min=2,
@@ -1637,16 +1975,44 @@ def _build_default_templates() -> List[TemplateSpec]:
             arity_max=2,
         ),
         TemplateSpec(
-            name="medium_triplet_simple",
+            name="medium_triplet_relational",
             bucket="medium",
-            type_min={"app": 1},
+            type_min={"app": 1, "spa": 1},
             type_max={"cls": 3, "app": 3, "act": 1, "seq": 0, "spa": 2, "env": 2, "int": 1},
-            k_min=3,
+            k_min=4,
             k_max=6,
-            q_min=0,
+            q_min=2,
             require_seq=0,
             require_time_uniqueness=0,
             weight=0.5,
+            arity_min=3,
+            arity_max=3,
+        ),
+        TemplateSpec(
+            name="hard_pair_act_spa",
+            bucket="hard",
+            type_min={"act": 1, "spa": 1},
+            type_max={"cls": 3, "app": 2, "act": 2, "seq": 0, "spa": 2, "env": 2, "int": 1},
+            k_min=4,
+            k_max=6,
+            q_min=3,
+            require_seq=0,
+            require_time_uniqueness=0,
+            weight=0.8,
+            arity_min=2,
+            arity_max=3,
+        ),
+        TemplateSpec(
+            name="hard_triplet_attr_spa_env",
+            bucket="hard",
+            type_min={"app": 1, "spa": 1, "env": 1},
+            type_max={"cls": 3, "app": 3, "act": 1, "seq": 0, "spa": 2, "env": 2, "int": 1},
+            k_min=4,
+            k_max=6,
+            q_min=2,
+            require_seq=0,
+            require_time_uniqueness=0,
+            weight=0.6,
             arity_min=3,
             arity_max=3,
         ),
@@ -1656,79 +2022,26 @@ def _build_default_templates() -> List[TemplateSpec]:
 def _compute_candidate_difficulty(
     candidate: CandidateTarget,
     index: GraphIndex,
+    all_candidates: List[CandidateTarget],
+    profile_map: Dict[str, CandidateProfile],
     weights: DifficultyWeights,
 ) -> Tuple[float, float, float, Dict[str, Any]]:
-    n_change = 0.0
-    n_time = 0.0
-    n_same = 0.0
-    tiou_vals: List[float] = []
-
-    for member in candidate.members:
-        obj_id = member.object_id
-        obj = index.objects[obj_id]
-        cls = _sample_class(obj, obj_id)
-        cur = (member.start, member.end)
-
-        act_labels = {
-            item["label"]
-            for item in index.actions_by_obj.get(obj_id, [])
-            if _overlap(cur, (item["start"], item["end"]))
-        }
-        rel_labels = {
-            item["predicate"]
-            for item in index.relations_by_subj.get(obj_id, [])
-            if _overlap(cur, (item["start"], item["end"]))
-        }
-        n_change += max(0, len(act_labels) - 1)
-        n_change += max(0, len(rel_labels) - 1)
-
-        n_time += sum(1 for tn in index.temporal_spans if _overlap(cur, (tn["start"], tn["end"])))
-
-        for other_id, other_obj in index.objects.items():
-            if other_id == obj_id:
-                continue
-            if _sample_class(other_obj, other_id) != cls:
-                continue
-            other_range = (min(index.frames[other_id]), max(index.frames[other_id]))
-            ov = _overlap(cur, other_range)
-            if not ov:
-                continue
-            n_same += 1
-            tiou_vals.append(_interval_tiou(cur, other_range))
-
-    avg_tiou = (sum(tiou_vals) / len(tiou_vals)) if tiou_vals else 0.0
-    # Simple arity normalization for multi-target candidates.
-    arity_norm = float(max(1, candidate.arity))
-    n_change_norm = n_change / arity_norm
-    n_time_norm = n_time / arity_norm
-    n_same_norm = n_same / arity_norm
-
-    eps = max(0.0, float(weights.eps))
     lambda_weight = min(max(float(weights.lambda_weight), 0.0), 1.0)
+    clues = build_atomic_clues(index, candidate)
+    _, object_rows, time_rows = build_exclusion_matrix(candidate, all_candidates, clues, profile_map)
+    D_t, temporal_meta = _best_exclusion_difficulty(time_rows, clues, allow_temporal=True)
+    D_s, spatial_meta = _best_exclusion_difficulty(object_rows, clues, allow_temporal=False)
+    D = _clamp01(lambda_weight * D_t + (1.0 - lambda_weight) * D_s)
 
-    # Use geometric means to emphasize co-occurring difficulty factors rather than
-    # letting a single large term dominate the score. A small epsilon prevents
-    # one zero-valued factor from collapsing the whole component to zero.
-    change_score = n_change_norm / (1.0 + n_change_norm)
-    time_score = n_time_norm / (1.0 + n_time_norm)
-    same_score = n_same_norm / (1.0 + n_same_norm)
-
-    D_t = math.sqrt((eps + change_score) * (eps + time_score))
-    D_s = math.sqrt((eps + same_score) * (eps + avg_tiou))
-    D = lambda_weight * D_t + (1.0 - lambda_weight) * D_s
-
-    return D_t, D_s, D, {
-        "n_change": n_change,
-        "n_time": n_time,
-        "n_same": n_same,
-        "n_change_norm": n_change_norm,
-        "n_time_norm": n_time_norm,
-        "n_same_norm": n_same_norm,
-        "arity_norm": arity_norm,
-        "avg_tiou": avg_tiou,
-        "eps": eps,
+    meta = {
         "lambda_weight": lambda_weight,
+        "arity": candidate.arity,
+        "difficulty_model": "exclusion_rate_v2",
+        "atomic_clue_count": len(clues),
     }
+    meta.update(temporal_meta)
+    meta.update(spatial_meta)
+    return D_t, D_s, D, meta
 
 
 def _assign_sampling_buckets(candidates: List[CandidateTarget]) -> None:
@@ -1778,18 +2091,68 @@ def _assign_sampling_buckets(candidates: List[CandidateTarget]) -> None:
 def _assign_difficulty_buckets_5(candidates: List[CandidateTarget]) -> None:
     if not candidates:
         return
-    for cand in candidates:
-        score = float(cand.difficulty)
-        if score < 0.2:
-            cand.difficulty_bucket = "very_easy"
-        elif score < 0.4:
-            cand.difficulty_bucket = "easy"
-        elif score < 0.6:
-            cand.difficulty_bucket = "medium"
-        elif score < 0.8:
-            cand.difficulty_bucket = "hard"
-        else:
-            cand.difficulty_bucket = "very_hard"
+    labels = ["very_easy", "easy", "medium", "hard", "very_hard"]
+    ordered = sorted(candidates, key=lambda cand: (cand.difficulty, cand.interval[1] - cand.interval[0] + 1))
+    n = len(ordered)
+    base = n // len(labels)
+    remainder = n % len(labels)
+    counts = [base + (1 if idx < remainder else 0) for idx in range(len(labels))]
+
+    start = 0
+    for label, count in zip(labels, counts):
+        end = start + count
+        for cand in ordered[start:end]:
+            cand.difficulty_bucket = label
+        start = end
+
+
+_DIFFICULTY_BUCKET_ORDER = {
+    "very_easy": 0,
+    "easy": 1,
+    "medium": 2,
+    "hard": 3,
+    "very_hard": 4,
+}
+
+_TEMPLATE_BUCKET_DIFFICULTY_LABELS = {
+    "easy": ("very_easy", "easy"),
+    "medium": ("medium",),
+    "hard": ("hard", "very_hard"),
+}
+
+
+def _template_candidate_labels(template_bucket: str) -> Tuple[str, ...]:
+    return _TEMPLATE_BUCKET_DIFFICULTY_LABELS.get(template_bucket, ("medium",))
+
+
+def _template_target_labels(template: TemplateSpec) -> Tuple[str, ...]:
+    labels = _template_candidate_labels(template.bucket)
+    only_app_min = template.type_min == {"app": 1}
+    no_temporal_or_relational_min = (
+        template.type_min.get("act", 0) == 0
+        and template.type_min.get("seq", 0) == 0
+        and template.type_min.get("spa", 0) == 0
+        and template.type_min.get("int", 0) == 0
+    )
+    if template.arity_max == 1 and template.bucket == "easy" and only_app_min and no_temporal_or_relational_min:
+        return ("very_easy",)
+    return labels
+
+
+def _template_difficulty_rank(candidate: CandidateTarget, template: TemplateSpec) -> Tuple[int, float]:
+    preferred_labels = _template_target_labels(template)
+    if candidate.difficulty_bucket in preferred_labels:
+        bucket_distance = 0
+    else:
+        candidate_rank = _DIFFICULTY_BUCKET_ORDER.get(candidate.difficulty_bucket, _DIFFICULTY_BUCKET_ORDER["medium"])
+        preferred_ranks = [_DIFFICULTY_BUCKET_ORDER[label] for label in preferred_labels]
+        bucket_distance = min(abs(candidate_rank - rank) for rank in preferred_ranks)
+
+    if template.bucket == "hard":
+        difficulty_order = -candidate.difficulty
+    else:
+        difficulty_order = candidate.difficulty
+    return bucket_distance, difficulty_order
 
 
 def _render_query(profile: CandidateProfile, clues: List[AtomicClue]) -> str:
@@ -1818,31 +2181,7 @@ def _render_query(profile: CandidateProfile, clues: List[AtomicClue]) -> str:
 
 
 def decorate_query(core_clues: List[AtomicClue], profile: CandidateProfile) -> Tuple[str, List[str]]:
-    if profile.arity > 1 and len(core_clues) <= 2:
-        return "", []
-    clue_types = {c.clue_type for c in core_clues}
-    bucket_keys: List[str] = []
-    if "seq" in clue_types:
-        bucket_keys.extend(["temporal", "action"])
-    if "spa" in clue_types or "int" in clue_types:
-        bucket_keys.append("spatial")
-    if "app" in clue_types:
-        bucket_keys.append("appearance")
-    if not bucket_keys:
-        bucket_keys.append("neutral")
-
-    decorations: List[str] = []
-    for key in bucket_keys:
-        for phrase in DECORATION_POOL.get(key, ()):
-            if phrase not in decorations:
-                decorations.append(phrase)
-                break
-        if len(decorations) >= 2:
-            break
-
-    if not decorations:
-        return "", []
-    return _norm(", " + "; ".join(decorations)), decorations
+    return "", []
 
 
 def _query_core_from_clues(core_clues: List[AtomicClue], profile: CandidateProfile) -> str:
@@ -1935,10 +2274,17 @@ class CPSATQuerySampler:
         pool = [
             c
             for c in candidates
-            if c.sampling_bucket == template.bucket and template.arity_min <= c.arity <= template.arity_max
+            if template.arity_min <= c.arity <= template.arity_max
+            and c.difficulty_bucket in _template_target_labels(template)
         ]
+        if not pool:
+            pool = [
+                c
+                for c in candidates
+                if c.sampling_bucket == template.bucket and template.arity_min <= c.arity <= template.arity_max
+            ]
 
-        def rank(c: CandidateTarget) -> Tuple[int, int, float, int]:
+        def rank(c: CandidateTarget) -> Tuple[int, int, int, float, int]:
             sig = tuple(m.object_id for m in c.members)
             interval = c.interval
             sampled_for_sig = sampled_intervals_by_sig.get(sig, set())
@@ -1948,10 +2294,12 @@ class CPSATQuerySampler:
                 mode = 1
             else:
                 mode = 2
+            bucket_distance, difficulty_order = _template_difficulty_rank(c, template)
             return (
                 mode,
                 candidate_use_count.get(c.candidate_id, 0),
-                c.difficulty,
+                bucket_distance,
+                difficulty_order,
                 interval[1] - interval[0] + 1,
             )
 
@@ -2090,7 +2438,7 @@ class CPSATQuerySampler:
 
         while True:
             best_pick: Optional[Dict[str, Any]] = None
-            best_rank: Optional[Tuple[int, float, int, int, int]] = None
+            best_rank: Optional[Tuple[int, int, float, int, int, int]] = None
 
             for template_index, template in enumerate(templates):
                 picked = None
@@ -2120,7 +2468,7 @@ class CPSATQuerySampler:
                 interval = cand.interval
                 rank = (
                     candidate_use_count.get(cand.candidate_id, 0),
-                    cand.difficulty,
+                    *_template_difficulty_rank(cand, template),
                     interval[1] - interval[0] + 1,
                     -int(round(template.weight * 1000)),
                     template_index,
@@ -2156,8 +2504,13 @@ class CPSATQuerySampler:
         if not candidates:
             return []
 
+        profile_map = {
+            c.candidate_id: _profile_for_candidate(self._index, c, max_chain_len=self.max_chain_len)
+            for c in candidates
+        }
+
         for c in candidates:
-            D_t, D_s, D, meta = _compute_candidate_difficulty(c, self._index, self.weights)
+            D_t, D_s, D, meta = _compute_candidate_difficulty(c, self._index, candidates, profile_map, self.weights)
             c.D_t = D_t
             c.D_s = D_s
             c.difficulty = D
@@ -2171,10 +2524,6 @@ class CPSATQuerySampler:
         if multi_candidates:
             _assign_sampling_buckets(multi_candidates)
             _assign_difficulty_buckets_5(multi_candidates)
-        profile_map = {
-            c.candidate_id: _profile_for_candidate(self._index, c, max_chain_len=self.max_chain_len)
-            for c in candidates
-        }
 
         single_templates = self._templates_for_arity(multi=False)
         results = self._sample_with_templates(
@@ -2487,6 +2836,8 @@ class CPSATQuerySampler:
         api_keys: Optional[Union[str, Iterable[str]]] = None,
         max_concurrent_per_key: int = 100,
         max_retries: int = 5,
+        max_queries_per_video: Optional[int] = None,
+        max_queries_per_difficulty_bucket: Optional[int] = None,
     ) -> None:
         global RELATION_SYNONYMS, ATTRIBUTE_SYNONYMS
         in_path = Path(input_path)
@@ -2520,6 +2871,21 @@ class CPSATQuerySampler:
                     print(
                         f"[query_cpsat] dedupe_drop: video={Path(str(graph.get('video_path', ''))).name} "
                         f"dropped={dropped_duplicates}",
+                        flush=True,
+                    )
+                limited_nodes = _limit_query_nodes_per_video(
+                    query_nodes,
+                    max_queries_per_video=max_queries_per_video,
+                    max_queries_per_difficulty_bucket=max_queries_per_difficulty_bucket,
+                )
+                dropped_by_limit = len(query_nodes) - len(limited_nodes)
+                query_nodes = limited_nodes
+                if dropped_by_limit > 0:
+                    print(
+                        f"[query_cpsat] per_video_limit: video={Path(str(graph.get('video_path', ''))).name} "
+                        f"kept={len(query_nodes)} dropped={dropped_by_limit} "
+                        f"max_queries_per_video={max_queries_per_video} "
+                        f"max_queries_per_difficulty_bucket={max_queries_per_difficulty_bucket}",
                         flush=True,
                     )
                 if use_llm_polish and query_nodes:
@@ -2577,6 +2943,8 @@ def main(
     api_keys: Optional[Union[str, Iterable[str]]] = None,
     max_concurrent_per_key: int = 100,
     max_retries: int = 5,
+    max_queries_per_video: Optional[int] = None,
+    max_queries_per_difficulty_bucket: Optional[int] = None,
 ) -> None:
     sampler = CPSATQuerySampler(
         min_interval_len=min_interval_len,
@@ -2602,6 +2970,8 @@ def main(
         api_keys=api_keys,
         max_concurrent_per_key=max_concurrent_per_key,
         max_retries=max_retries,
+        max_queries_per_video=max_queries_per_video,
+        max_queries_per_difficulty_bucket=max_queries_per_difficulty_bucket,
     )
 
 

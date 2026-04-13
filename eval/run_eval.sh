@@ -1,12 +1,12 @@
 #!/bin/bash
 export FORCE_QWENVL_VIDEO_READER=decord
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=3
 
 # Default parameters
 MODEL_NAME="qwen3.5"
 MODEL_PATH="/home/wangxingjian/model/qwen3.5-9b"
 DATA_NAME="doro-stvg"
-ANNOTATION_PATH="/home/wangxingjian/DORO-STVG/graph_generator/output/query.jsonl"
+ANNOTATION_PATH="/home/wangxingjian/DORO-STVG/graph_generator/output/query2.jsonl"
 VIDEO_DIR="/home/wangxingjian/data/hc-stvg2/v2_video"
 OUTPUT_DIR="./res"
 BATCH_SIZE=8

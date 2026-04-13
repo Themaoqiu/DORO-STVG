@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=3
 export HF_ENDPOINT=https://hf-mirror.com
 
 # Load project env vars if available (API_KEYS / MM_API_BASE_URL / etc.).
@@ -86,7 +86,7 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 # cd /home/wangxingjian/DORO-STVG/graph_generator && \
 # python -m main \
 #   --full_pipeline True \
-#   --video_dir /home/wangxingjian/data/vidstg/video \
+#   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
 #   --max_videos 100 \
 #   --output scene_graphs.jsonl \
 #   --yolo_model /home/wangxingjian/model/yolo26x/yolo26x.pt \
@@ -115,10 +115,12 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 
 
 python -m modules.query_generator_cpsat \
-  --input_path /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
-  --output_path /home/wangxingjian/DORO-STVG/graph_generator/output/query.jsonl \
+  --input_path /home/wangxingjian/DORO-STVG/graph_generator/output/scene_graphs.jsonl \
+  --output_path /home/wangxingjian/DORO-STVG/graph_generator/output/query2.jsonl \
   --time_limit_sec 3.0 \
   --seed 7 \
+  --max_queries_per_video 5 \
+  --max_queries_per_difficulty_bucket 1 \
   --use_llm_polish True \
   --polish_model_name gemini-3-flash-preview \
   --max_concurrent_per_key 100 \
