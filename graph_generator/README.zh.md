@@ -27,7 +27,7 @@ English version: [README.md](README.md)
 ### 2.2 主环境（scene/object/relation/query 模块）
 
 ```bash
-cd /home/wangxingjian/DORO-STVG/venv/graph_generator/main
+cd /envs/graph_generator/main
 
 uv sync
 ```
@@ -43,7 +43,7 @@ uv sync
 ### 2.3 动作检测环境（MMAction2/VideoMAE）
 
 ```bash
-cd /home/wangxingjian/DORO-STVG/graph_generator/venv/graph_generator/action_detector
+cd /envs/graph_generator/action_detector
 
 uv sync
 ```
