@@ -129,7 +129,7 @@ class SceneDetector:
         video_name = self.video_path.stem
         record = {
             'video': video_name,
-            'video_path': str(self.video_path),
+            'video_path': self.video_path.name,
             'clips': [clip.to_dict() for clip in clips],
         }
         

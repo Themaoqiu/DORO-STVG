@@ -39,7 +39,6 @@ class QwenVLBase:
         self.llm = None
         self.processor = None
         self.last_user_prompts = []
-        self.last_rendered_prompts = []
         self.last_raw_responses = []
         self.load_model()
     
@@ -131,8 +130,6 @@ class Qwen2_5VL(QwenVLBase):
             )
             for msg in batch_messages
         ]
-        self.last_rendered_prompts = list(prompts)
-        
         image_inputs, video_inputs, video_kwargs = process_vision_info(
             batch_messages,
             return_video_kwargs=True
@@ -190,7 +187,6 @@ class Qwen3VL(QwenVLBase):
         from qwen_vl_utils import process_vision_info
         
         llm_inputs = []
-        rendered_prompts = []
         self.last_user_prompts = list(queries)
         for query, video_path in zip(queries, video_paths):
             messages = self.prepare_messages(query, video_path, system_prompt)
@@ -201,7 +197,6 @@ class Qwen3VL(QwenVLBase):
                 add_generation_prompt=True,
                 enable_thinking=False,
             )
-            rendered_prompts.append(text)
             
             image_inputs, video_inputs, video_kwargs = process_vision_info(
                 messages,
@@ -222,8 +217,6 @@ class Qwen3VL(QwenVLBase):
                 'mm_processor_kwargs': video_kwargs
             })
 
-        self.last_rendered_prompts = rendered_prompts
-        
         outputs = self.llm.generate(llm_inputs, sampling_params=self.sampling_params)
 
         raw_responses = [output.outputs[0].text for output in outputs]

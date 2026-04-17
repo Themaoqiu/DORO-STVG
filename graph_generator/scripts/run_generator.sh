@@ -84,7 +84,7 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 
 # full command (graph generation only)
 # cd /home/wangxingjian/DORO-STVG/graph_generator && \
-# python -m main \
+# python -m graph_generator \
 #   --full_pipeline True \
 #   --video /home/wangxingjian/data/hc-stvg2/v2_video/50_TM5MPJIq1Is_2fps.mp4 \
 #   --max_videos 100 \
@@ -114,7 +114,7 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #   --with_reference True
 
 
-python -m modules.query_generator_cpsat \
+python -m query_generator \
   --input_path /home/wangxingjian/DORO-STVG/graph_generator/output/scene_graphs.jsonl \
   --output_path /home/wangxingjian/DORO-STVG/graph_generator/output/query2.jsonl \
   --time_limit_sec 3.0 \

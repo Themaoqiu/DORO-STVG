@@ -90,6 +90,16 @@ class BasePipeline(ABC):
             )
         return tracks
 
+    def _serialize_tracks(self, tracks: List[Track]) -> List[Dict[str, Any]]:
+        return [
+            {
+                'description': track.description,
+                'temporal_span': track.temporal_span,
+                'spatial_bboxes': track.spatial_bboxes,
+            }
+            for track in tracks
+        ]
+
     def run_evaluation(self):
         logger.info(f"Starting {self.get_dataset_name()} Evaluation")
         
@@ -125,7 +135,6 @@ class BasePipeline(ABC):
             video_paths=video_paths,
             system_prompt=SYSTEM_PROMPT
         )
-        rendered_prompts = getattr(self.model, "last_rendered_prompts", [])
         raw_responses = getattr(self.model, "last_raw_responses", full_responses)
         
         batch_results = []
@@ -140,7 +149,6 @@ class BasePipeline(ABC):
                     pred_span=pred_tracks_sampled[0].temporal_span,
                     gt_bboxes=gt_tracks_sampled[0].spatial_bboxes,
                     pred_bboxes=pred_tracks_sampled[0].spatial_bboxes,
-                    num_frames=len(gt_tracks_sampled[0].spatial_bboxes),
                 )
             else:
                 metrics = compute_multi_target_metrics(gt_tracks_sampled, pred_tracks_sampled)
@@ -148,21 +156,9 @@ class BasePipeline(ABC):
             result = {
                 'video_name': sample['video_name'],
                 'query_en': sample['query'],
-                'rendered_prompt': rendered_prompts[idx] if idx < len(rendered_prompts) else None,
                 'raw_response': raw_response,
-                'parsed': parsed,
-                
-                'gt_tracks': [
-                    {
-                        'description': track.description,
-                        'temporal_span': track.temporal_span,
-                        'spatial_bboxes': track.spatial_bboxes,
-                    }
-                    for track in gt_tracks_sampled
-                ],
-
+                'prediction': self._serialize_tracks(pred_tracks_sampled),
                 'metrics': metrics,
-                
                 'metadata': sample['metadata'],
             }
             
@@ -170,7 +166,7 @@ class BasePipeline(ABC):
             
         return batch_results
     
-    def _compute_average_metrics(self, results: List[Dict[str, Any]]) -> Dict[str, float]:
+    def _compute_basic_average_metrics(self, results: List[Dict[str, Any]]) -> Dict[str, float]:
         if not results:
             return {
                 'm_tIoU': 0.0,
@@ -184,6 +180,30 @@ class BasePipeline(ABC):
             'vIoU@0.3': float(sum(r['metrics']['vIoU@0.3'] for r in results) / len(results)),
             'vIoU@0.5': float(sum(r['metrics']['vIoU@0.5'] for r in results) / len(results)),
         }
+
+    def _compute_average_metrics(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        metrics = self._compute_basic_average_metrics(results)
+
+        bucket_order = ['very_easy', 'easy', 'medium', 'hard', 'very_hard']
+        bucket_groups: Dict[str, List[Dict[str, Any]]] = {}
+        for bucket in bucket_order:
+            bucket_results = [
+                result for result in results
+                if (result.get('metadata') or {}).get('difficulty_bucket') == bucket
+            ]
+            if bucket_results:
+                bucket_groups[bucket] = bucket_results
+
+        if bucket_groups:
+            metrics['by_difficulty_bucket'] = {
+                bucket: {
+                    'num_samples': len(bucket_results),
+                    **self._compute_basic_average_metrics(bucket_results),
+                }
+                for bucket, bucket_results in bucket_groups.items()
+            }
+
+        return metrics
     
     def _save_results(self, results: List[Dict[str, Any]], avg_metrics: Dict[str, float]):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

@@ -521,7 +521,6 @@ def run(
     max_retries: int = 5,
     verbose: bool = False,
     overwrite_reference_edges: bool = True,
-    # Kept for CLI compatibility with older calls; currently unused.
     max_views_per_object: Optional[int] = None,
     views_per_shot: int = 3,
     max_pairs_per_object: int = 3,

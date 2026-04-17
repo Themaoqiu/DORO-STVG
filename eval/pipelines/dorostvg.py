@@ -102,6 +102,12 @@ class DOROSTVGPipeline(BasePipeline):
                     'metadata': {
                         'queryid': item.get('queryid') or item.get('query_id', f'line_{line_idx}'),
                         'difficulty': item.get('Difficulty', {}),
+                        'difficulty_bucket': item.get('difficulty_bucket'),
+                        'difficulty_score': item.get('D'),
+                        'difficulty_temporal': item.get('D_t'),
+                        'difficulty_spatial': item.get('D_s'),
+                        'template': item.get('template'),
+                        'target_arity': item.get('target_arity'),
                         'width': item.get('Width') or item.get('video_width'),
                         'height': item.get('Height') or item.get('video_height'),
                         'source_line': line_idx,

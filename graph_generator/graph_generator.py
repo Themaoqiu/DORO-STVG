@@ -14,6 +14,10 @@ from modules.yolo_detector import YOLOKeyframeDetector
 from modules.graph_filter import GraphFilter
 
 
+def _video_record_path(video_path: str) -> str:
+    return Path(video_path).name
+
+
 @dataclass
 class ObjectNode:
     node_id: str
@@ -256,7 +260,7 @@ class SceneGraphGenerator:
         cap.release()
         graph = SceneGraph(
             video=video_name,
-            video_path=video_path,
+            video_path=_video_record_path(video_path),
             video_width=video_width if video_width > 0 else None,
             video_height=video_height if video_height > 0 else None,
         )
@@ -481,9 +485,11 @@ def _run_full_pipeline_for_video(
 
     if with_attribute:
         masks_json = attribute_masks_json
+        cleanup_attribute_masks = False
         if not masks_json:
             default_mask_dir = project_root / "output" / "sam2_masks"
             masks_json = str(default_mask_dir / f"{Path(video_path).stem}_sam2_masks_indexed.json")
+            cleanup_attribute_masks = True
         _run_fire_module(
             "modules.attribute_generator",
             {
@@ -498,6 +504,11 @@ def _run_full_pipeline_for_video(
             cwd=project_root,
             env_updates=common_env,
         )
+        if cleanup_attribute_masks and masks_json:
+            mask_path = Path(masks_json)
+            if mask_path.exists():
+                mask_path.unlink()
+                print(f"[pipeline] cleaned temporary SAM2 masks: {mask_path}")
 
     if with_action:
         if not action_config or not action_checkpoint or not action_label_map:

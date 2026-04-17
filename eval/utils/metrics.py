@@ -81,23 +81,6 @@ def compute_track_metrics(gt_track: Track, pred_track: Track) -> Dict[str, float
     }
 
 
-def _build_tracks(
-    temporal_spans: Sequence[TemporalSpan],
-    spatial_boxes: Sequence[FrameBoxes],
-    descriptions: Optional[Sequence[str]] = None,
-) -> List[Track]:
-    tracks: List[Track] = []
-    for idx, (span, boxes) in enumerate(zip(temporal_spans, spatial_boxes)):
-        tracks.append(
-            Track(
-                temporal_span=span,
-                spatial_bboxes=dict(boxes),
-                description=descriptions[idx] if descriptions and idx < len(descriptions) else "",
-            )
-        )
-    return tracks
-
-
 def _mean(values: Sequence[float]) -> float:
     return float(sum(values) / len(values)) if values else 0.0
 
@@ -166,10 +149,10 @@ def compute_multi_target_metrics(gt_tracks: Sequence[Track], pred_tracks: Sequen
     divisor = max(num_gt, num_pred, 1)
 
     tiou_scores: List[float] = []
-    viou_scores: List[float] = []
     match_records: List[Dict[str, object]] = []
     matched_gt = set()
     matched_pred = set()
+    viou_scores: List[float] = []
     for gt_idx, pred_idx in matches:
         matched_gt.add(gt_idx)
         matched_pred.add(pred_idx)
@@ -187,10 +170,19 @@ def compute_multi_target_metrics(gt_tracks: Sequence[Track], pred_tracks: Sequen
             }
         )
 
-    unmatched_count = divisor - len(match_records)
-    if unmatched_count > 0:
-        tiou_scores.extend([0.0] * unmatched_count)
-        viou_scores.extend([0.0] * unmatched_count)
+    unmatched_gt_indices = [idx for idx in range(num_gt) if idx not in matched_gt]
+    unmatched_pred_indices = [idx for idx in range(num_pred) if idx not in matched_pred]
+    for gt_idx in unmatched_gt_indices:
+        tiou_scores.append(0.0)
+        viou_scores.append(0.0)
+    for pred_idx in unmatched_pred_indices:
+        tiou_scores.append(0.0)
+        viou_scores.append(0.0)
+
+    if len(tiou_scores) < divisor:
+        tiou_scores.extend([0.0] * (divisor - len(tiou_scores)))
+    if len(viou_scores) < divisor:
+        viou_scores.extend([0.0] * (divisor - len(viou_scores)))
 
     m_tiou = _mean(tiou_scores)
     m_viou = _mean(viou_scores)
@@ -198,14 +190,14 @@ def compute_multi_target_metrics(gt_tracks: Sequence[Track], pred_tracks: Sequen
     return {
         "m_tIoU": m_tiou,
         "m_vIoU": m_viou,
-        "vIoU@0.3": float(sum(score >= 0.3 for score in viou_scores) / divisor),
-        "vIoU@0.5": float(sum(score >= 0.5 for score in viou_scores) / divisor),
+        "vIoU@0.3": float(m_viou >= 0.3),
+        "vIoU@0.5": float(m_viou >= 0.5),
         "matches": match_records,
         "match_count": len(match_records),
         "gt_count": num_gt,
         "pred_count": num_pred,
-        "unmatched_gt_indices": [idx for idx in range(num_gt) if idx not in matched_gt],
-        "unmatched_pred_indices": [idx for idx in range(num_pred) if idx not in matched_pred],
+        "unmatched_gt_indices": unmatched_gt_indices,
+        "unmatched_pred_indices": unmatched_pred_indices,
     }
 
 
@@ -214,13 +206,11 @@ def compute_metrics(
     pred_span: TemporalSpan,
     gt_bboxes: FrameBoxes,
     pred_bboxes: FrameBoxes,
-    num_frames: int = 100,
 ) -> Dict[str, object]:
-    del num_frames
-    gt_tracks = _build_tracks([gt_span], [gt_bboxes])
-    pred_tracks = _build_tracks([pred_span], [pred_bboxes])
-    multi_metrics = compute_multi_target_metrics(gt_tracks, pred_tracks)
-    single_metrics = compute_track_metrics(gt_tracks[0], pred_tracks[0])
+    gt_track = Track(temporal_span=gt_span, spatial_bboxes=dict(gt_bboxes))
+    pred_track = Track(temporal_span=pred_span, spatial_bboxes=dict(pred_bboxes))
+    multi_metrics = compute_multi_target_metrics([gt_track], [pred_track])
+    single_metrics = compute_track_metrics(gt_track, pred_track)
     return {
         **single_metrics,
         **multi_metrics,

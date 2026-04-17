@@ -17,6 +17,6 @@
 #     --ann-id 56677
 
 python3 utils/query_web_viewer.py \
-    --jsonl /home/wangxingjian/DORO-STVG/graph_generator/output/query1.jsonl \
+    --jsonl /home/wangxingjian/DORO-STVG/graph_generator/output/query2.jsonl \
     --host 127.0.0.1\
     --port 8765

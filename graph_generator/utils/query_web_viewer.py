@@ -220,6 +220,30 @@ function resizeCanvas() {
   els.overlay.style.height = rect.height + 'px';
 }
 
+function getIntrinsicVideoSize() {
+  if (!current) return null;
+  const width = current.video_width || els.video.videoWidth;
+  const height = current.video_height || els.video.videoHeight;
+  if (!width || !height) return null;
+  return { width, height };
+}
+
+function getRenderedVideoRect() {
+  const intrinsic = getIntrinsicVideoSize();
+  if (!intrinsic) return null;
+
+  const outerWidth = els.overlay.width;
+  const outerHeight = els.overlay.height;
+  if (!outerWidth || !outerHeight) return null;
+
+  const scale = Math.min(outerWidth / intrinsic.width, outerHeight / intrinsic.height);
+  const width = intrinsic.width * scale;
+  const height = intrinsic.height * scale;
+  const offsetX = (outerWidth - width) / 2;
+  const offsetY = (outerHeight - height) / 2;
+  return { width, height, offsetX, offsetY, intrinsicWidth: intrinsic.width, intrinsicHeight: intrinsic.height };
+}
+
 function pickBox(boxes, frame) {
   if (!boxes) return null;
   const key = String(frame);
@@ -231,12 +255,15 @@ function pickBox(boxes, frame) {
 function drawOverlay() {
   const ctx = els.overlay.getContext('2d');
   ctx.clearRect(0, 0, els.overlay.width, els.overlay.height);
-  if (!current || !els.video.videoWidth || !els.video.videoHeight) return;
+  if (!current) return;
+
+  const rendered = getRenderedVideoRect();
+  if (!rendered) return;
 
   const fps = parseFloat(els.fpsInput.value || '2') || 2;
   const frame = Math.round(els.video.currentTime * fps);
-  const scaleX = els.overlay.width / els.video.videoWidth;
-  const scaleY = els.overlay.height / els.video.videoHeight;
+  const scaleX = rendered.width / rendered.intrinsicWidth;
+  const scaleY = rendered.height / rendered.intrinsicHeight;
   const members = (current.target_members && current.target_members.length)
     ? current.target_members
     : [{ target_index: 1, object_id: current.target_node_id || 'target', boxes: current.boxes || {} }];
@@ -247,10 +274,10 @@ function drawOverlay() {
     const box = pickBox(member.boxes || {}, frame);
     if (!box || box.length < 4) return;
     drew = true;
-    const x1 = box[0] * scaleX;
-    const y1 = box[1] * scaleY;
-    const x2 = box[2] * scaleX;
-    const y2 = box[3] * scaleY;
+    const x1 = rendered.offsetX + box[0] * scaleX;
+    const y1 = rendered.offsetY + box[1] * scaleY;
+    const x2 = rendered.offsetX + box[2] * scaleX;
+    const y2 = rendered.offsetY + box[3] * scaleY;
     const color = colors[idx % colors.length];
 
     ctx.strokeStyle = color;
@@ -270,10 +297,10 @@ function drawOverlay() {
   if (!drew && current.boxes) {
     const box = pickBox(current.boxes, frame);
     if (!box || box.length < 4) return;
-    const x1 = box[0] * scaleX;
-    const y1 = box[1] * scaleY;
-    const x2 = box[2] * scaleX;
-    const y2 = box[3] * scaleY;
+    const x1 = rendered.offsetX + box[0] * scaleX;
+    const y1 = rendered.offsetY + box[1] * scaleY;
+    const x2 = rendered.offsetX + box[2] * scaleX;
+    const y2 = rendered.offsetY + box[3] * scaleY;
     ctx.strokeStyle = '#00ff6a';
     ctx.lineWidth = 2;
     ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
@@ -464,6 +491,8 @@ def load_jsonl(path: Path):
                 {
                     "idx": i,
                     "video_path": obj.get("video_path", ""),
+                    "video_width": obj.get("video_width"),
+                    "video_height": obj.get("video_height"),
                     "target_node_id": _target_label(obj, target_members),
                     "query": obj.get("query", ""),
                     "difficulty_bucket": obj.get("difficulty_bucket", ""),
