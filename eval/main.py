@@ -61,6 +61,28 @@ class STVGEvaluator:
                 tensor_parallel_size=tensor_parallel_size,
                 gpu_memory_utilization=gpu_memory_utilization,
             )
+        elif model_name.lower() in ['llava-st-qwen2', 'llava_st_qwen2', 'llavast', 'llava-st']:
+            from models.llava_st import LlavaSTQwen2
+            model = LlavaSTQwen2(
+                model_path=model_path,
+                batch_size=batch_size,
+                max_tokens=max_tokens,
+                max_model_len=max_model_len,
+                temperature=temperature,
+                tensor_parallel_size=tensor_parallel_size,
+                gpu_memory_utilization=gpu_memory_utilization,
+            )
+        elif 'llava-st-qwen2' in model_path.lower():
+            from models.llava_st import LlavaSTQwen2
+            model = LlavaSTQwen2(
+                model_path=model_path,
+                batch_size=batch_size,
+                max_tokens=max_tokens,
+                max_model_len=max_model_len,
+                temperature=temperature,
+                tensor_parallel_size=tensor_parallel_size,
+                gpu_memory_utilization=gpu_memory_utilization,
+            )
         else:
             raise ValueError(f"Unknown model: {model_name}")
 
