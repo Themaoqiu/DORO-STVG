@@ -4,11 +4,17 @@
 
 `eval/main.py` is the unified entry point. The current code supports:
 
-- Models: `qwen2.5vl` / `qwen3vl`
+- Models: `qwen2.5vl` / `qwen3vl` / `llava-st-qwen2`
 - Datasets: `hcstvg`, `vidstg`, `doro-stvg`
 
 
 The default script is [`eval/run_eval.sh`](/home/wangxingjian/DORO-STVG/eval/run_eval.sh). You can edit it directly to change model paths, annotation paths, video paths, and output paths.
+
+For `llava-st-qwen2`, make sure `PYTHONPATH` includes your local LLaVA-ST repository:
+
+```bash
+export PYTHONPATH="/mnt/sdc/xingjianwang/yibowang/LLaVA-ST:${PYTHONPATH:-}"
+```
 
 Typical outputs:
 
@@ -126,9 +132,9 @@ If you prefer not to use the shell script, you can call the entry point directly
 ```bash
 cd /home/wangxingjian/DORO-STVG/eval
 python main.py run \
-  --model_name=qwen3vl \
+  --model_name=llava-st-qwen2 \
   --model_path=/path/to/model \
-  --data_name=hcstvg2 \
+  --data_name=doro-stvg \
   --annotation_path=/path/to/test.json \
   --video_dir=/path/to/videos \
   --output_dir=./res

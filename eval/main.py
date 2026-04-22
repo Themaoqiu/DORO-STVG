@@ -14,6 +14,57 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _build_model(
+    model_name: str,
+    model_path: str,
+    batch_size: int,
+    max_tokens: int,
+    max_model_len: int,
+    temperature: float,
+    tensor_parallel_size: int,
+    gpu_memory_utilization: float,
+):
+    name = model_name.lower()
+
+    if name in ['qwen2.5vl', 'qwen2.5-vl']:
+        from models.qwen_family import Qwen2_5VL
+        return Qwen2_5VL(
+            model_path=model_path,
+            batch_size=batch_size,
+            max_tokens=max_tokens,
+            max_model_len=max_model_len,
+            temperature=temperature,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+        )
+
+    if name in ['qwen3vl', 'qwen3-vl', 'qwen3.5', 'qwen3.5vl', 'qwen3.5-vl']:
+        from models.qwen_family import Qwen3VL
+        return Qwen3VL(
+            model_path=model_path,
+            batch_size=batch_size,
+            max_tokens=max_tokens,
+            max_model_len=max_model_len,
+            temperature=temperature,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+        )
+
+    if name in ['llava-st-qwen2', 'llava_st_qwen2', 'llavast', 'llava-st'] or 'llava-st-qwen2' in model_path.lower():
+        from models.llava_st import LlavaSTQwen2
+        return LlavaSTQwen2(
+            model_path=model_path,
+            batch_size=batch_size,
+            max_tokens=max_tokens,
+            max_model_len=max_model_len,
+            temperature=temperature,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+        )
+
+    raise ValueError(f"Unknown model: {model_name}")
+
+
 class STVGEvaluator:
     
     def run(
@@ -38,31 +89,17 @@ class STVGEvaluator:
         logger.info(f"Video Dir: {video_dir}")
         logger.info(f"Output Dir: {output_dir}")
         logger.info(f"Batch Size: {batch_size}")
-        
-        if model_name.lower() in ['qwen2.5vl', 'qwen2.5-vl']:
-            from models.qwen_family import Qwen2_5VL
-            model = Qwen2_5VL(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
-        elif model_name.lower() in ['qwen3vl', 'qwen3-vl', 'qwen3.5', 'qwen3.5vl', 'qwen3.5-vl']:
-            from models.qwen_family import Qwen3VL
-            model = Qwen3VL(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
-        else:
-            raise ValueError(f"Unknown model: {model_name}")
+
+        model = _build_model(
+            model_name=model_name,
+            model_path=model_path,
+            batch_size=batch_size,
+            max_tokens=max_tokens,
+            max_model_len=max_model_len,
+            temperature=temperature,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+        )
 
         if data_name.lower() in ['hcstvg', 'hc-stvg', 'hcstvg2', 'hc-stvg2', 'hcstvg1']:
             from pipelines.hcstvg import HCSTVGPipeline
@@ -77,7 +114,7 @@ class STVGEvaluator:
                 batch_size=batch_size,
             )
             
-            results, avg_metrics = pipeline.run_evaluation()
+            return pipeline.run_evaluation()
         
         elif data_name.lower() in ['vidstg', 'vid-stg']:
             from pipelines.vidstg import VidSTGPipeline
@@ -92,7 +129,7 @@ class STVGEvaluator:
                 batch_size=batch_size,
             )
             
-            results, avg_metrics = pipeline.run_evaluation()
+            return pipeline.run_evaluation()
         
         elif data_name.lower() in ['dorostvg', 'doro-stvg']:
             from pipelines.dorostvg import DOROSTVGPipeline
@@ -107,7 +144,9 @@ class STVGEvaluator:
                 batch_size=batch_size,
             )
             
-            results, avg_metrics = pipeline.run_evaluation()
+            return pipeline.run_evaluation()
+
+        raise ValueError(f"Unknown dataset: {data_name}")
 
 
 def main():
