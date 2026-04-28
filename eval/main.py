@@ -6,10 +6,8 @@ import fire
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
 
@@ -78,7 +76,6 @@ def _build_model(
 
 
 class STVGEvaluator:
-    
     def run(
         self,
         model_name: str,
@@ -113,9 +110,10 @@ class STVGEvaluator:
             gpu_memory_utilization=gpu_memory_utilization,
         )
 
-        if data_name.lower() in ['hcstvg', 'hc-stvg', 'hcstvg2', 'hc-stvg2', 'hcstvg1']:
+        name = data_name.lower()
+        if name in {"hcstvg", "hc-stvg", "hcstvg2", "hc-stvg2", "hcstvg1"}:
             from pipelines.hcstvg import HCSTVGPipeline
-            
+
             pipeline = HCSTVGPipeline(
                 model=model,
                 model_name=model_name,
@@ -130,7 +128,7 @@ class STVGEvaluator:
         
         elif data_name.lower() in ['vidstg', 'vid-stg']:
             from pipelines.vidstg import VidSTGPipeline
-            
+
             pipeline = VidSTGPipeline(
                 model=model,
                 model_name=model_name,
@@ -145,7 +143,7 @@ class STVGEvaluator:
         
         elif data_name.lower() in ['dorostvg', 'doro-stvg']:
             from pipelines.dorostvg import DOROSTVGPipeline
-            
+
             pipeline = DOROSTVGPipeline(
                 model=model,
                 model_name=model_name,
