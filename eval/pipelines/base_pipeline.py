@@ -125,7 +125,7 @@ class BasePipeline(ABC):
         video_paths = []
         for sample in batch:
             video_path = sample['video_path']
-            video_paths.append(video_path)
+            video_paths.append(sample.get('video_input_path', video_path))
             logger.info(f"Using original video: {video_path}")
         
         queries = [format_prompt(sample['query']) for sample in batch]

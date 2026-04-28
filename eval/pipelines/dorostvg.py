@@ -1,13 +1,70 @@
 import json
 import logging
+import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from pipelines.base_pipeline import BasePipeline
 from prompts import parse_response
 
 
 logger = logging.getLogger(__name__)
+
+
+def _discover_st_align_benchmark_path() -> Optional[Path]:
+    env_path = os.getenv("ST_ALIGN_BENCHMARK_PATH")
+    if env_path:
+        path = Path(env_path)
+        if path.exists():
+            return path
+
+    llava_st_source = os.getenv("LLAVA_ST_SOURCE_DIR")
+    if llava_st_source:
+        path = Path(llava_st_source) / "data" / "benchmarks" / "st-align" / "stvg.json"
+        if path.exists():
+            return path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates = [
+        repo_root.parent / "LLaVA-ST" / "data" / "benchmarks" / "st-align" / "stvg.json",
+        repo_root.parent / "models" / "LLaVA-ST" / "data" / "benchmarks" / "st-align" / "stvg.json",
+        repo_root / "models" / "LLaVA-ST" / "data" / "benchmarks" / "st-align" / "stvg.json",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _load_st_align_split_index() -> Dict[Tuple[str, int, int], Tuple[int, int]]:
+    benchmark_path = _discover_st_align_benchmark_path()
+    if benchmark_path is None:
+        logger.warning("ST-Align benchmark metadata not found; falling back to full-video inference.")
+        return {}
+
+    with open(benchmark_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    index: Dict[Tuple[str, int, int], Tuple[int, int]] = {}
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        video_name = item.get("video_path")
+        meta = item.get("meta") or {}
+        time_token = meta.get("time_token") or {}
+        split = meta.get("split") or []
+        if not video_name or "<s>" not in time_token or "<e>" not in time_token or len(split) != 2:
+            continue
+        try:
+            start = int(time_token["<s>"])
+            end = int(time_token["<e>"])
+            split_pair = (int(split[0]), int(split[1]))
+        except (TypeError, ValueError):
+            continue
+        index[(str(video_name), start, end)] = split_pair
+
+    logger.info("Loaded ST-Align split metadata from %s (%d entries)", benchmark_path, len(index))
+    return index
 
 
 def _normalize_boxes(boxes: Dict[str, Any], width: float, height: float) -> Dict[int, List[float]]:
@@ -69,6 +126,7 @@ class DOROSTVGPipeline(BasePipeline):
 
     def load_data(self) -> List[Dict[str, Any]]:
         samples: List[Dict[str, Any]] = []
+        split_index = _load_st_align_split_index()
 
         with open(self.annotation_path, 'r', encoding='utf-8') as f:
             for line_idx, raw_line in enumerate(f, start=1):
@@ -92,9 +150,10 @@ class DOROSTVGPipeline(BasePipeline):
                         'spatial_bboxes': parsed_gt.get('spatial_bboxes', {}),
                     }]
 
-                samples.append({
+                sample = {
                     'video_name': video_name,
                     'video_path': str(video_path),
+                    'video_input_path': str(video_path),
                     'query': item.get('query', ''),
                     'gt_temporal_sampled': gt_tracks_sampled[0].get('temporal_span'),
                     'gt_bboxes_sampled': gt_tracks_sampled[0].get('spatial_bboxes', {}),
@@ -112,7 +171,16 @@ class DOROSTVGPipeline(BasePipeline):
                         'height': item.get('Height') or item.get('video_height'),
                         'source_line': line_idx,
                     }
-                })
+                }
+
+                gt_span = gt_tracks_sampled[0].get('temporal_span')
+                if isinstance(gt_span, tuple) and len(gt_span) == 2:
+                    split = split_index.get((video_name, int(gt_span[0]), int(gt_span[1])))
+                    if split is not None:
+                        sample['video_input_path'] = f"{video_path}::split={split[0]}:{split[1]}"
+                        sample['metadata']['clip_split'] = [split[0], split[1]]
+
+                samples.append(sample)
 
         logger.info(f"Loaded {len(samples)} samples")
         return samples

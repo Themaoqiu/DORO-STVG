@@ -1,14 +1,15 @@
 #!/bin/bash
-export FORCE_QWENVL_VIDEO_READER=decord
-export CUDA_VISIBLE_DEVICES=3
+set -euo pipefail
 
-# Default parameters
+export FORCE_QWENVL_VIDEO_READER=decord
+export CUDA_VISIBLE_DEVICES=7
+
 MODEL_NAME="qwen3.5"
 MODEL_PATH="/home/wangxingjian/model/qwen3.5-9b"
 DATA_NAME="doro-stvg"
-ANNOTATION_PATH="/home/wangxingjian/DORO-STVG/graph_generator/output/query2.jsonl"
+ANNOTATION_PATH="/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_17/query_eval.jsonl"
 VIDEO_DIR="/home/wangxingjian/data/vidstg/video"
-OUTPUT_DIR="./res"
+OUTPUT_DIR="/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_17/eval"
 BATCH_SIZE=8
 MAX_TOKENS=4096
 MAX_MODEL_LEN=64000
@@ -26,6 +27,7 @@ echo "Model Path:              $MODEL_PATH"
 echo "Annotation Path:         $ANNOTATION_PATH"
 echo "Video Directory:         $VIDEO_DIR"
 echo "Output Directory:        $OUTPUT_DIR"
+echo "CUDA Visible Devices:    $CUDA_VISIBLE_DEVICES"
 echo "Batch Size:              $BATCH_SIZE"
 echo "Max Tokens:              $MAX_TOKENS"
 echo "Max Model Length:        $MAX_MODEL_LEN"
