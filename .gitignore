@@ -24,6 +24,8 @@ anno_videos/
 BREEDS-Benchmarks/
 CLIP/
 .gitmodules
+.codex
+autoresearch/
 
 # C extensions
 *.so

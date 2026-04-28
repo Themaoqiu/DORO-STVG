@@ -16,6 +16,7 @@ MAX_MODEL_LEN=64000
 TEMPERATURE=0.1
 TENSOR_PARALLEL_SIZE=1
 GPU_MEMORY_UTILIZATION=0.9
+PYTHON_BIN="python"
 
 
 # Print configuration
@@ -34,11 +35,12 @@ echo "Max Model Length:        $MAX_MODEL_LEN"
 echo "Temperature:             $TEMPERATURE"
 echo "Tensor Parallel Size:    $TENSOR_PARALLEL_SIZE"
 echo "GPU Memory Utilization:  $GPU_MEMORY_UTILIZATION"
+echo "Python:                  $PYTHON_BIN"
 echo "=========================================="
 echo ""
 
 # Run evaluation
-python main.py run \
+"$PYTHON_BIN" main.py run \
   --model_name="$MODEL_NAME" \
   --model_path="$MODEL_PATH" \
   --data_name="$DATA_NAME" \

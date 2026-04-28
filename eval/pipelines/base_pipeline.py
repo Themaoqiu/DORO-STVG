@@ -128,7 +128,8 @@ class BasePipeline(ABC):
             video_paths.append(sample.get('video_input_path', video_path))
             logger.info(f"Using original video: {video_path}")
         
-        queries = [format_prompt(sample['query']) for sample in batch]
+        prompt_style = getattr(self.model, "prompt_style", "json")
+        queries = [format_prompt(sample['query'], prompt_style=prompt_style) for sample in batch]
 
         full_responses = self.model.predict_batch(
             queries=queries,
@@ -138,9 +139,16 @@ class BasePipeline(ABC):
         raw_responses = getattr(self.model, "last_raw_responses", full_responses)
         
         batch_results = []
+        sampled_frame_indices = getattr(self.model, "last_video_frame_indices", [])
         for idx, (sample, full_response) in enumerate(zip(batch, full_responses)):
             raw_response = raw_responses[idx] if idx < len(raw_responses) else full_response
-            parsed = parse_response(full_response)
+            sample_indices = sampled_frame_indices[idx] if idx < len(sampled_frame_indices) else None
+            parsed = parse_response(
+                full_response,
+                query=sample.get('query'),
+                sampled_indices=sample_indices,
+                prompt_style=prompt_style,
+            )
             gt_tracks_sampled = self._build_gt_tracks(sample)
             pred_tracks_sampled = self._build_pred_tracks(parsed)
             if len(gt_tracks_sampled) == 1 and len(pred_tracks_sampled) == 1:

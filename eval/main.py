@@ -60,7 +60,7 @@ def _build_model(
             gpu_memory_utilization=gpu_memory_utilization,
         )
 
-    if name in ['videomolmo', 'video-molmo', 'video_molmo']:
+    if name in ['videomolmo', 'video-molmo', 'video_molmo', 'videomlomo']:
         from models.videomolmo import VideoMolmoModel
         return VideoMolmoModel(
             model_path=model_path,

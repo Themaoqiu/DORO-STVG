@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=0
 export HF_ENDPOINT=https://hf-mirror.com
 
 # Load project env vars if available (API_KEYS / MM_API_BASE_URL / etc.).
@@ -115,8 +115,8 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 
 
 python -m query_generator \
-  --input_path /home/wangxingjian/DORO-STVG/graph_generator/output/scene_graphs.jsonl \
-  --output_path /home/wangxingjian/DORO-STVG/graph_generator/output/query2.jsonl \
+  --input_path /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
+  --output_path /home/wangxingjian/DORO-STVG/graph_generator/output/query3.jsonl \
   --time_limit_sec 3.0 \
   --seed 7 \
   --max_queries_per_video 5 \

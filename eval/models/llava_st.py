@@ -1,7 +1,10 @@
 import copy
+import importlib.util
 import logging
 import os
-from typing import List
+import re
+from pathlib import Path
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -9,52 +12,95 @@ from decord import VideoReader, cpu
 
 os.environ["DECORD_EOF_RETRY_MAX"] = "20480"
 logger = logging.getLogger(__name__)
+LLAVA_ST_DEPENDENCIES_LOADED = False
 
 
-def _discover_llava_st_source() -> Path:
-    env_path = os.getenv("LLAVA_ST_SOURCE_DIR")
-    if env_path:
-        path = Path(env_path).expanduser().resolve()
-        if path.exists():
-            return path
-
-    repo_root = Path(__file__).resolve().parents[2]
-    candidates = [
-        repo_root.parent / "LLaVA-ST",
-        repo_root.parent / "models" / "LLaVA-ST",
-        repo_root / "models" / "LLaVA-ST",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate.resolve()
-
-    raise FileNotFoundError(
-        "Unable to locate LLaVA-ST source. Set LLAVA_ST_SOURCE_DIR to the "
-        "repository root that contains the `llava/` and `inference/` packages."
-    )
+def _bundled_llava_st_root() -> Path:
+    return Path(__file__).resolve().parents[1] / "dependences" / "LLaVA-ST"
 
 
-LLAVA_ST_SOURCE = _discover_llava_st_source()
-if str(LLAVA_ST_SOURCE) not in sys.path:
-    sys.path.insert(0, str(LLAVA_ST_SOURCE))
+def _load_bundled_get_variables():
+    source_root = _bundled_llava_st_root()
+    utils_path = source_root / "inference" / "src" / "utils.py"
+    if not utils_path.exists():
+        raise ImportError(f"Bundled LLaVA-ST inference utilities not found at {utils_path}")
 
-from inference.src.utils import get_variables, replace_and_normalize  # noqa: E402
-from llava import conversation as conversation_lib  # noqa: E402
-from llava.constants import (  # noqa: E402
-    DEFAULT_IM_END_TOKEN,
-    DEFAULT_IM_START_TOKEN,
-    DEFAULT_IMAGE_PATCH_TOKEN,
-    DEFAULT_IMAGE_TOKEN,
-    DEFAULT_SLOW_VID_END_TOKEN,
-    DEFAULT_SLOW_VID_START_TOKEN,
-    DEFAULT_VID_END_TOKEN,
-    DEFAULT_VID_START_TOKEN,
-    DEFAULT_VIDEO_PATCH_TOKEN,
-    DEFAULT_VIDEO_TOKEN,
-    IGNORE_INDEX,
-    IMAGE_TOKEN_INDEX,
-)
-from llava.model.builder import load_lora_model  # noqa: E402
+    spec = importlib.util.spec_from_file_location("_llava_st_inference_utils", utils_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Failed to load module spec for {utils_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.get_variables
+
+
+def _ensure_llava_st_dependencies() -> None:
+    global LLAVA_ST_DEPENDENCIES_LOADED
+    global conversation_lib
+    global get_variables
+    global load_lora_model
+    global DEFAULT_IM_END_TOKEN
+    global DEFAULT_IM_START_TOKEN
+    global DEFAULT_IMAGE_PATCH_TOKEN
+    global DEFAULT_IMAGE_TOKEN
+    global DEFAULT_SLOW_VID_END_TOKEN
+    global DEFAULT_SLOW_VID_START_TOKEN
+    global DEFAULT_VID_END_TOKEN
+    global DEFAULT_VID_START_TOKEN
+    global DEFAULT_VIDEO_PATCH_TOKEN
+    global DEFAULT_VIDEO_TOKEN
+    global IGNORE_INDEX
+    global IMAGE_TOKEN_INDEX
+
+    if LLAVA_ST_DEPENDENCIES_LOADED:
+        return
+
+    try:
+        from llava import conversation as imported_conversation_lib
+        from llava.constants import (
+            DEFAULT_IM_END_TOKEN as imported_default_im_end_token,
+            DEFAULT_IM_START_TOKEN as imported_default_im_start_token,
+            DEFAULT_IMAGE_PATCH_TOKEN as imported_default_image_patch_token,
+            DEFAULT_IMAGE_TOKEN as imported_default_image_token,
+            DEFAULT_SLOW_VID_END_TOKEN as imported_default_slow_vid_end_token,
+            DEFAULT_SLOW_VID_START_TOKEN as imported_default_slow_vid_start_token,
+            DEFAULT_VID_END_TOKEN as imported_default_vid_end_token,
+            DEFAULT_VID_START_TOKEN as imported_default_vid_start_token,
+            DEFAULT_VIDEO_PATCH_TOKEN as imported_default_video_patch_token,
+            DEFAULT_VIDEO_TOKEN as imported_default_video_token,
+            IGNORE_INDEX as imported_ignore_index,
+            IMAGE_TOKEN_INDEX as imported_image_token_index,
+        )
+        from llava.model.builder import load_lora_model as imported_load_lora_model
+    except ImportError as exc:
+        raise ImportError(
+            "Failed to import LLaVA-ST dependencies. Activate envs/eval/llavast and install "
+            "the bundled dependency with `uv pip install -e .` from envs/eval/llavast."
+        ) from exc
+
+    try:
+        from inference.src.utils import get_variables as imported_get_variables
+    except ModuleNotFoundError as exc:
+        if exc.name != "inference":
+            raise
+        imported_get_variables = _load_bundled_get_variables()
+
+    conversation_lib = imported_conversation_lib
+    get_variables = imported_get_variables
+    load_lora_model = imported_load_lora_model
+    DEFAULT_IM_END_TOKEN = imported_default_im_end_token
+    DEFAULT_IM_START_TOKEN = imported_default_im_start_token
+    DEFAULT_IMAGE_PATCH_TOKEN = imported_default_image_patch_token
+    DEFAULT_IMAGE_TOKEN = imported_default_image_token
+    DEFAULT_SLOW_VID_END_TOKEN = imported_default_slow_vid_end_token
+    DEFAULT_SLOW_VID_START_TOKEN = imported_default_slow_vid_start_token
+    DEFAULT_VID_END_TOKEN = imported_default_vid_end_token
+    DEFAULT_VID_START_TOKEN = imported_default_vid_start_token
+    DEFAULT_VIDEO_PATCH_TOKEN = imported_default_video_patch_token
+    DEFAULT_VIDEO_TOKEN = imported_default_video_token
+    IGNORE_INDEX = imported_ignore_index
+    IMAGE_TOKEN_INDEX = imported_image_token_index
+    LLAVA_ST_DEPENDENCIES_LOADED = True
 
 
 def preprocess_qwen(
@@ -195,118 +241,9 @@ def _load_video_frames(video_path: str, max_frames: int, split: Optional[Tuple[i
     return frames, indices
 
 
-def _parse_box_values(coords_text: str) -> Optional[List[float]]:
-    try:
-        coords = [float(part.strip()) for part in coords_text.split(",")]
-    except ValueError:
-        return None
-    if len(coords) != 4:
-        return None
-    return [max(0.0, min(1.0, value)) for value in coords]
-
-
-def _frame_from_token(frame_token: str, sampled_indices: List[int]) -> Optional[int]:
-    token = frame_token.strip().strip("\"' ")
-    try:
-        numeric = float(token)
-    except ValueError:
-        return None
-
-    if sampled_indices and int(round(numeric)) in sampled_indices:
-        return int(round(numeric))
-
-    if len(sampled_indices) == 0:
-        return None
-
-    if 0.0 <= numeric <= 1.0:
-        position = int(round(numeric * (len(sampled_indices) - 1)))
-        position = max(0, min(len(sampled_indices) - 1, position))
-        return int(sampled_indices[position])
-
-    position = int(round(numeric))
-    if 0 <= position < len(sampled_indices):
-        return int(sampled_indices[position])
-
-    if 0 <= numeric <= 99:
-        position = int(round((numeric / 99.0) * (len(sampled_indices) - 1)))
-        position = max(0, min(len(sampled_indices) - 1, position))
-        return int(sampled_indices[position])
-
-    return None
-
-
-def _brace_block_after(text: str, anchor: str) -> Optional[str]:
-    start_anchor = text.find(anchor)
-    if start_anchor == -1:
-        return None
-    start = text.find("{", start_anchor)
-    if start == -1:
-        return None
-
-    depth = 0
-    for idx in range(start, len(text)):
-        char = text[idx]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : idx + 1]
-    return None
-
-
-def _convert_official_output(raw_text: str, sampled_indices: List[int], query: str) -> Optional[str]:
-    if not raw_text.strip():
-        return None
-
-    frame_map: Dict[str, List[float]] = {}
-    raw_matches = re.findall(
-        r"<TEMP-(\d{3})>\s*:\s*\[<WIDTH-(\d{3})><HEIGHT-(\d{3})><WIDTH-(\d{3})><HEIGHT-(\d{3})>\]",
-        raw_text,
-    )
-    if raw_matches:
-        for temp_idx, x1, y1, x2, y2 in raw_matches:
-            frame_position = int(temp_idx)
-            if not (0 <= frame_position < len(sampled_indices)):
-                continue
-            frame_idx = int(sampled_indices[frame_position])
-            frame_map[str(frame_idx)] = [
-                int(x1) / 99.0,
-                int(y1) / 99.0,
-                int(x2) / 99.0,
-                int(y2) / 99.0,
-            ]
-
-    if not frame_map:
-        normalized_text = replace_and_normalize(raw_text).replace("<|im_end|>", "").strip()
-        bbox_block = _brace_block_after(normalized_text, "Object bounding box")
-        if not bbox_block:
-            return None
-
-        matches = re.findall(
-            r'["\']?([0-9]*\.?[0-9]+),?["\']?\s*:?\s*\[\s*([^\]]+?)\s*\]',
-            bbox_block,
-        )
-        for frame_token, coords_text in matches:
-            frame_token = frame_token.rstrip(",")
-            frame_idx = _frame_from_token(frame_token, sampled_indices)
-            coords = _parse_box_values(coords_text)
-            if frame_idx is None or coords is None:
-                continue
-            frame_map[str(frame_idx)] = coords
-
-    if not frame_map:
-        return None
-
-    description = query.strip()
-    suffix = " Please find the corresponding time period in the video."
-    if suffix in description:
-        description = description.split(suffix, 1)[0].strip()
-    description = description or "target"
-    return json.dumps({description: frame_map}, ensure_ascii=False)
-
-
 class LlavaSTQwen2:
+    prompt_style = "llava_st"
+
     def __init__(
         self,
         model_path: str,
@@ -331,6 +268,9 @@ class LlavaSTQwen2:
 
         self.last_user_prompts: List[str] = []
         self.last_raw_responses: List[str] = []
+        self.last_video_frame_indices: List[List[int]] = []
+
+        _ensure_llava_st_dependencies()
 
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is required for llava-st-qwen2.")
@@ -376,14 +316,14 @@ class LlavaSTQwen2:
 
         logger.info(
             "Initialized llava-st-qwen2 | source=%s device=%s dtype=%s max_frames=%s vt_chunk=%s",
-            LLAVA_ST_SOURCE,
+            _bundled_llava_st_root(),
             self.device,
             self.dtype,
             self.max_frames,
             self.vt_chunk,
         )
 
-    def _predict_one(self, query: str, video_input: str, system_prompt: str) -> Tuple[str, str]:
+    def _predict_one(self, query: str, video_input: str, system_prompt: str) -> Tuple[str, List[int]]:
         del system_prompt
 
         video_path, split = _extract_video_spec(video_input)
@@ -427,21 +367,18 @@ class LlavaSTQwen2:
 
         raw_output = self.tokenizer.batch_decode(output_ids, skip_special_tokens=False)[0]
         raw_output = raw_output.replace("<|im_end|>", "").strip()
-
-        converted = _convert_official_output(raw_output, sampled_indices, query)
-        if converted is None:
-            converted = raw_output
-        return raw_output, converted
+        return raw_output, sampled_indices
 
     def predict_batch(self, queries: List[str], video_paths: List[str], system_prompt: str) -> List[str]:
         self.last_user_prompts = list(queries)
 
-        converted_outputs: List[str] = []
         raw_outputs: List[str] = []
+        frame_indices: List[List[int]] = []
         for query, video_path in zip(queries, video_paths):
-            raw_output, converted_output = self._predict_one(query, video_path, system_prompt)
+            raw_output, sampled_indices = self._predict_one(query, video_path, system_prompt)
             raw_outputs.append(raw_output)
-            converted_outputs.append(converted_output)
+            frame_indices.append(sampled_indices)
 
         self.last_raw_responses = raw_outputs
-        return converted_outputs
+        self.last_video_frame_indices = frame_indices
+        return raw_outputs

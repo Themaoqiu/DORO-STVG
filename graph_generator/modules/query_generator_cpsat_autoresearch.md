@@ -20,6 +20,7 @@ Concretely, we want:
 - lower `D` → higher `m_tIoU`, `m_vIoU`, `vIoU@0.3`, `vIoU@0.5`
 - higher `D` → lower metrics
 - 5-way difficulty buckets that are approximately monotone in model performance
+- 5-way difficulty buckets that are defined by absolute `D`, not by equal-count rank splitting
 
 This is a difficulty modeling task. It is not mainly:
 
@@ -33,7 +34,7 @@ This is a difficulty modeling task. It is not mainly:
 
 The final production file is:
 
-- [`graph_generator/modules/query_generator_cpsat.py`](/home/wangxingjian/DORO-STVG/graph_generator/modules/query_generator_cpsat.py)
+- [`graph_generator/modules/autoresearch/query_generator_cpsat.py`](/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/query_generator_cpsat.py)
 
 The autoresearch workspace is:
 
@@ -42,7 +43,7 @@ The autoresearch workspace is:
 Working rule:
 
 - exploratory code, notes, analysis artifacts, and iteration helpers live under `graph_generator/modules/autoresearch`
-- the final best implementation must be saved back into `graph_generator/modules/query_generator_cpsat.py`
+- every round need to make a new folder `round_x`
 
 Do not solve this task by changing:
 
@@ -132,6 +133,8 @@ Hard constraints:
 - neither `D_t` nor `D_s` may internally be defined as a sum of multiple sub-terms
 - additive composition is allowed only once, at the top level in `D`
 - `D_t`, `D_s`, and `D` must each lie in `[0, 1]`
+- difficulty buckets must be mapped directly from absolute `D`
+- bucket boundaries must not depend on candidate count in a run
 
 This means:
 
@@ -164,6 +167,12 @@ D_s = c * overlap + d * distractors
 ```
 
 The two branches should each correspond to one irreducible source of difficulty, and the only tunable tradeoff should be the temporal-spatial balance at the top level.
+
+Bucket assignment must stay a direct consequence of the formula above:
+
+- compute `D` first, then map absolute `D` into `very_easy`, `easy`, `medium`, `hard`, `very_hard`
+- do not sort candidates and split them by count
+- do not define a second sampling-only bucket system with different semantics
 
 ---
 
@@ -215,6 +224,12 @@ Prefer diversity across clue sources:
 
 The query should still stay concise, but it should not be impoverished.
 
+The final query must read like a final grounding instruction, not an intermediate code artifact:
+
+- do not emit placeholders such as `target 1`, `target 2`, `target1`, `target2`
+- do not leak internal indexing, temporary variable names, or solver-facing labels
+- make it immediately clear what object or object set should be localized
+
 ### Reference style
 
 Use the query style in these datasets as reference for what good grounding language looks like:
@@ -235,17 +250,9 @@ The goal is not to copy those datasets literally. The goal is to keep generated 
 
 ## Current Situation
 
-The current implementation computes:
+The current implementation computes `D_t` from action/relation change counts and temporal span overlap counts, `D_s` from same-class distractor counts and interval tIoU, and `D = lambda * D_t + (1 - lambda) * D_s`.
 
-- `D_t` from action/relation change counts and temporal span overlap counts
-- `D_s` from same-class distractor counts and interval tIoU
-- `D = lambda * D_t + (1 - lambda) * D_s`
-
-This has good properties:
-
-- compact
-- deterministic
-- cheap to compute
+This is compact, deterministic, and cheap to compute.
 
 But it is currently insufficient because:
 
@@ -253,7 +260,7 @@ But it is currently insufficient because:
 - it does not guarantee that each branch is one clean irreducible factor
 - it does not explicitly model target separability under shared clue sets
 - it entangles difficulty estimation with template and sampling effects
-- fixed bucket thresholds are not calibrated against performance
+- bucket assignment can drift with candidate set size when it is rank-based
 
 ---
 
@@ -265,7 +272,7 @@ A good solution has all of the following properties:
    `corr(D, metric)` is stably negative for key metrics.
 
 2. Buckets behave sensibly
-   5-way buckets are approximately monotone in model performance.
+   5-way buckets are approximately monotone in model performance and stable under dataset size changes.
 
 3. Single-target and multi-target behavior are both reasonable
    The score should not work only for one arity regime.
@@ -276,20 +283,7 @@ A good solution has all of the following properties:
 5. The module exports interpretable metadata
    Intermediate components are visible in `cand.meta` or equivalent local structure.
 
----
-
-## What Not To Do
-
-Do not:
-
-- add case-by-case heuristics for specific templates
-- patch bucket thresholds repeatedly without fixing the underlying score
-- encode template names as latent difficulty truth
-- solve monotonicity by changing downstream evaluation
-- add many weak features just because they are available
-- make the code longer every round while only slightly moving the metric
-
-This program values parsimony. A smaller, more principled model is preferred over a larger, more brittle one.
+6. Balanced number of samples across difficulty buckets.
 
 ---
 
@@ -322,11 +316,13 @@ cd graph_generator
 Generate queries by following the path used in [`run_generator.sh`](/home/wangxingjian/DORO-STVG/graph_generator/scripts/run_generator.sh):
 
 ```bash
-python -m modules.query_generator_cpsat \
-  --input_path scene_graphs.jsonl \
-  --output_path output/query.jsonl \
+python -m query_generator \
+  --input_path /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
+  --output_path /home/wangxingjian/DORO-STVG/graph_generator/output/query2.jsonl \
   --time_limit_sec 3.0 \
   --seed 7 \
+  --max_queries_per_video 5 \
+  --max_queries_per_difficulty_bucket 1 \
   --use_llm_polish True \
   --polish_model_name gemini-3-flash-preview \
   --max_concurrent_per_key 100 \
@@ -390,16 +386,7 @@ The first option is cleaner because it preserves both raw and formatted outputs.
 cd DORO-STVG
 source envs/graph_generator/main/.venv/bin/activate
 cd graph_generator
-python -m modules.query_generator_cpsat \
-  --input_path scene_graphs.jsonl \
-  --output_path output/query.jsonl \
-  --time_limit_sec 3.0 \
-  --seed 7 \
-  --use_llm_polish True \
-  --polish_model_name gemini-3-flash-preview \
-  --max_concurrent_per_key 100 \
-  --max_retries 5
-bash scripts/run_formatted.sh
+bash scripts/run_generator.sh
 deactivate || true
 cd ..
 source envs/eval/.venv/bin/activate
@@ -446,8 +433,12 @@ LOOP:
    - high D but high score
 7. Form one hypothesis.
 8. Make one coherent change in query_generator_cpsat.py.
-9. Check stopping conditions.
-10. Repeat unless one stopping condition is met.
+9. Compare against the current best result:
+   - if this round is better, mark it as the new best version
+   - if this round is not better, keep counting consecutive non-improving rounds
+   - if 3 consecutive rounds do not improve over the current best result, roll back to the latest best-improving version before making further changes
+10. Check stopping conditions.
+11. Repeat unless one stopping condition is met.
 
 END:
 1. Output a summary report.
@@ -468,17 +459,23 @@ For quick research judgment:
 - if a bucket has fewer than ~20 samples, treat its mean as weak evidence
 - if all 5 buckets have at least ~20 to 30 samples and the ordering is still not visible, the difficulty design is probably wrong
 
-So the immediate target is not perfectly balanced large buckets. It is enough support in each level to reveal whether the ranking law is working.
+So the immediate target is not perfectly balanced large buckets. It is enough support in each level to reveal whether the ranking law is working, and bucket definitions must not be changed just to equalize counts.
 
 ### Stopping conditions
 
 - success stop:
   there is a clear and stable correlation between difficulty and model performance, and the target is achieved
 - convergence stop:
-  5 consecutive rounds show no improvement over the current best result
+  after rolling back to the latest best-improving version, 3 consecutive rounds still show no improvement over the current best result
 - budget stop:
   20 optimization rounds have been used, excluding the baseline run
 - This task only requires one GPU to run, but it will terminate if all GPUs are fully occupied by other tasks.
+
+### Rollback rule
+
+- always keep track of the latest version that produced a real improvement over the previous best result
+- if 3 consecutive rounds fail to beat the current best result, revert the working version to that latest best-improving version
+- do not continue iterating from a degraded branch once the 3-round no-improvement condition is met
 
 ---
 
@@ -491,7 +488,7 @@ In scope:
 - redesigning candidate difficulty decomposition
 - redefining `D_t` and `D_s`
 - changing how difficulty buckets are assigned
-- changing candidate ordering logic when it leaks non-difficulty effects into the emitted difficulty distribution
+- changing candidate ordering logic when it changes which absolute difficulty levels are sampled
 - changing query construction logic to preserve referential and temporal uniqueness
 - changing clue selection logic to improve language richness and clue diversity
 - exposing better introspection statistics in local metadata
@@ -513,6 +510,8 @@ Do not:
 
 - add case-by-case heuristics for specific templates
 - patch bucket thresholds repeatedly without fixing the underlying score
+- define difficulty buckets by rank or percentile within each run
+- sample one bucket system and then relabel into another bucket system
 - encode template names as latent difficulty truth
 - solve monotonicity by changing downstream evaluation
 - add many weak features just because they are available
@@ -520,6 +519,7 @@ Do not:
 - generate queries whose target description is ambiguous across multiple candidate objects
 - generate local time-span queries without true time-localizing evidence
 - let the query distribution collapse into one dominant clue family such as appearance-only phrasing
+- emit query text that contains internal labels such as `target 1` or `target 2`
 - rewrite large amounts of code from scratch every round when reusable logic already exists
 
 This program values parsimony. A smaller, more principled model is preferred over a larger, more brittle one.
@@ -527,7 +527,6 @@ This program values parsimony. A smaller, more principled model is preferred ove
 ### Metadata requirement
 
 Every meaningful difficulty component should be inspectable. The module should make it easy to analyze why a candidate got its score.
-
 
 ### Simplicity criterion
 
@@ -592,13 +591,13 @@ Preferred direction:
 This program is successful only if most of the following become true at the same time:
 
 1. `D` has stable negative association with key grounding metrics.
-2. 5-way buckets are substantially more monotone than they are now.
+2. 5-way buckets are substantially more monotone than they are now and remain stable when dataset size changes.
 3. Bucket behavior is not explained away by template distribution alone.
 4. Single-target and multi-target settings both remain coherent.
 5. Single-target grounding is generally easier than multi-target grounding.
 6. The difficulty code in [`query_generator_cpsat.py`](/home/wangxingjian/DORO-STVG/graph_generator/modules/query_generator_cpsat.py) becomes cleaner or at least not worse.
 7. The final formula still has the form `D = λ·D_t + (1-λ)·D_s`, with no additive decomposition inside `D_t` or `D_s`.
-8. Queries continue to point uniquely to the intended object or intended object set.
+8. Queries continue to point uniquely to the intended object or intended object set and do not expose internal labels such as `target 1`.
 9. Time-localized queries are supported by actual temporal evidence.
 10. Query language remains varied and grounded instead of collapsing into one repetitive description mode.
 
