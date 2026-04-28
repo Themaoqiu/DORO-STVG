@@ -24,9 +24,8 @@ def _build_model(
 ):
     name = model_name.lower()
 
-    if name in {"qwen2.5vl", "qwen2.5-vl"}:
+    if name in ['qwen2.5vl', 'qwen2.5-vl']:
         from models.qwen_family import Qwen2_5VL
-
         return Qwen2_5VL(
             model_path=model_path,
             batch_size=batch_size,
@@ -37,9 +36,8 @@ def _build_model(
             gpu_memory_utilization=gpu_memory_utilization,
         )
 
-    if name in {"qwen3vl", "qwen3-vl", "qwen3.5", "qwen3.5vl", "qwen3.5-vl"}:
+    if name in ['qwen3vl', 'qwen3-vl', 'qwen3.5', 'qwen3.5vl', 'qwen3.5-vl']:
         from models.qwen_family import Qwen3VL
-
         return Qwen3VL(
             model_path=model_path,
             batch_size=batch_size,
@@ -50,10 +48,21 @@ def _build_model(
             gpu_memory_utilization=gpu_memory_utilization,
         )
 
-    if name in {"llava-st-qwen2", "llava_st_qwen2", "llava-st", "llavast"} or "llava-st-qwen2" in model_path.lower():
+    if name in ['llava-st-qwen2', 'llava_st_qwen2', 'llavast', 'llava-st'] or 'llava-st-qwen2' in model_path.lower():
         from models.llava_st import LlavaSTQwen2
-
         return LlavaSTQwen2(
+            model_path=model_path,
+            batch_size=batch_size,
+            max_tokens=max_tokens,
+            max_model_len=max_model_len,
+            temperature=temperature,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+        )
+
+    if name in ['videomolmo', 'video-molmo', 'video_molmo']:
+        from models.videomolmo import VideoMolmoModel
+        return VideoMolmoModel(
             model_path=model_path,
             batch_size=batch_size,
             max_tokens=max_tokens,
@@ -114,7 +123,10 @@ class STVGEvaluator:
                 output_dir=output_dir,
                 batch_size=batch_size,
             )
-        elif name in {"vidstg", "vid-stg"}:
+            
+            return pipeline.run_evaluation()
+        
+        elif data_name.lower() in ['vidstg', 'vid-stg']:
             from pipelines.vidstg import VidSTGPipeline
 
             pipeline = VidSTGPipeline(
@@ -126,7 +138,10 @@ class STVGEvaluator:
                 output_dir=output_dir,
                 batch_size=batch_size,
             )
-        elif name in {"dorostvg", "doro-stvg"}:
+            
+            return pipeline.run_evaluation()
+        
+        elif data_name.lower() in ['dorostvg', 'doro-stvg']:
             from pipelines.dorostvg import DOROSTVGPipeline
 
             pipeline = DOROSTVGPipeline(
@@ -138,10 +153,10 @@ class STVGEvaluator:
                 output_dir=output_dir,
                 batch_size=batch_size,
             )
-        else:
-            raise ValueError(f"Unknown dataset: {data_name}")
+            
+            return pipeline.run_evaluation()
 
-        return pipeline.run_evaluation()
+        raise ValueError(f"Unknown dataset: {data_name}")
 
 
 def main():
