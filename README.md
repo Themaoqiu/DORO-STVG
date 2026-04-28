@@ -4,11 +4,11 @@
 
 `eval/main.py` is the unified entry point. The current code supports:
 
-- Models: `qwen2.5vl` / `qwen3vl`
+- Models: `qwen2.5vl` / `qwen3vl` / `llava-st-qwen2`
 - Datasets: `hcstvg`, `vidstg`, `doro-stvg`
 
 
-The default script is [`eval/run_eval.sh`](/home/wangxingjian/DORO-STVG/eval/run_eval.sh). You can edit it directly to change model paths, annotation paths, video paths, and output paths.
+The default script is `eval/run_eval.sh`. You can edit it directly to change model paths, annotation paths, video paths, and output paths.
 
 Typical outputs:
 
@@ -51,21 +51,21 @@ source ~/.bashrc
 ### 3.2 Virtual Environment
 
 ```bash
-cd /home/wangxingjian/DORO-STVG/envs/eval
+cd /path/to/DORO-STVG/envs/eval
 uv sync
 ```
 
 If `uv sync` times out on `files.pythonhosted.org` in this environment, refresh the lock and sync against the configured mirror:
 
 ```bash
-cd /home/wangxingjian/DORO-STVG/envs/eval
+cd /path/to/DORO-STVG/envs/eval
 uv lock --refresh
 uv sync --refresh
 ```
 
 
 ```bash
-cd /home/wangxingjian/DORO-STVG/envs/graph_generator/main
+cd /path/to/DORO-STVG/envs/graph_generator/main
 uv sync
 ```
 
@@ -76,7 +76,7 @@ This environment is used for:
 
 
 ```bash
-cd /home/wangxingjian/DORO-STVG/envs/graph_generator/action_detector
+cd /path/to/DORO-STVG/envs/graph_generator/action_detector
 uv sync
 ```
 
@@ -94,7 +94,7 @@ You can switch to `torchvision` or `torchcodec` if needed.
 
 ### 3.6 Extra Configuration for `graph_generator`
 
-`graph_generator` depends on both model checkpoints and API-related environment variables. The repository already contains [`graph_generator/.env`](/home/wangxingjian/DORO-STVG/graph_generator/.env), and the scripts load it automatically.
+`graph_generator` depends on both model checkpoints and API-related environment variables. The repository already contains `graph_generator/.env`, and the scripts load it automatically.
 
 The most important variables are:
 
@@ -110,28 +110,55 @@ You also need to prepare:
 - VideoMAE action detection checkpoints
 - DAM or other attribute-description models
 
-For those details, refer to [`graph_generator/README.md`](/home/wangxingjian/DORO-STVG/graph_generator/README.md).
+For those details, refer to `graph_generator/README.md`.
 
 ## 4. Usage
 
 ### 4.1 Run Evaluation
 
 ```bash
-cd /home/wangxingjian/DORO-STVG/eval
+cd /path/to/DORO-STVG/eval
 bash run_eval.sh
+```
+
+For `llava-st-qwen2`, the evaluation environment also expects:
+
+- a local `LLaVA-ST` source checkout
+- local `LLaVA-ST-Qwen2-7B` model weights
+
+The default runner reads these environment variables:
+
+- `LLAVA_ST_SOURCE_DIR`
+- `MODEL_PATH`
+- `ANNOTATION_PATH`
+- `VIDEO_DIR`
+- `OUTPUT_DIR`
+- `CUDA_VISIBLE_DEVICES`
+
+A typical smoke-test command is:
+
+```bash
+cd /path/to/DORO-STVG
+CUDA_VISIBLE_DEVICES=3 \
+LLAVA_ST_SOURCE_DIR=/path/to/LLaVA-ST \
+MODEL_PATH=/path/to/LLaVA-ST-Qwen2-7B \
+ANNOTATION_PATH=/path/to/query_train_for_eval_smoke1.jsonl \
+VIDEO_DIR=/path/to/video_test1_smoke \
+OUTPUT_DIR=eval/res_llava_st_smoke \
+bash eval/run_eval.sh
 ```
 
 If you prefer not to use the shell script, you can call the entry point directly:
 
 ```bash
-cd /home/wangxingjian/DORO-STVG/eval
-python main.py run \
+cd /path/to/DORO-STVG
+uv run --project envs/eval python eval/main.py run \
   --model_name=qwen3vl \
   --model_path=/path/to/model \
   --data_name=hcstvg2 \
   --annotation_path=/path/to/test.json \
   --video_dir=/path/to/videos \
-  --output_dir=./res
+  --output_dir=./eval/res
 ```
 
 ### 4.2 Run the Data Engine

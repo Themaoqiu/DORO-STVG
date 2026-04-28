@@ -3,24 +3,10 @@ import re
 from typing import Dict, Any, Optional
 
 
-SYSTEM_PROMPT = """You are an expert in spatiotemporal video grounding tasked with precisely locating objects/subjects in videos. You should output the space-time tube for each object the user intends to find."""
+SYSTEM_PROMPT = """You are a helpful assistant."""
 
 
-USER_PROMPT = """Where does {query} occur in the video? Please find the location of the corresponding subject/object in this video. Give the corresponding bounding boxes for the object(s) in each corresponding frame.\n\n
-
-Guidelines:\n
-- Videos are sampled at 2 fps.\n
-- Use normalized box coordinates in [0, 1].\n
-- Do not output explanations.\n
-- You must follow the exact output format below, and only output the format without any additional text or explanation.\n
-- Output a strict JSON object whose keys are target descriptions.\n
-- Each target description maps to a JSON object whose keys are frame indices as strings and whose values are normalized boxes [x1, y1, x2, y2].\n
-- Put frame indices first. Do not output timestamps.\n
-- Example for one target:\n
-  {{"chair": {{"12": [0.10, 0.20, 0.30, 0.40], "13": [0.11, 0.20, 0.31, 0.40]}}}}\n
-- Example for multiple targets:\n
-  {{"chair": {{"12": [0.10, 0.20, 0.30, 0.40]}}, "table": {{"12": [0.40, 0.50, 0.70, 0.90]}}}}\n
-"""
+USER_PROMPT = """{query} Please find the corresponding time period in the video. Please describe the location of the corresponding subject/object in this video. Please firstly give the timestamps, and then give the spatial bounding box corresponding to each timestamp in the time period."""
 
 def format_prompt(query: str) -> str:
     return USER_PROMPT.format(query=query)
