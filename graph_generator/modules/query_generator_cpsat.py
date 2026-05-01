@@ -490,7 +490,7 @@ def _clue_role_text(clue_type: str) -> str:
 
 
 def _sample_class(obj: Dict[str, Any], node_id: str) -> str:
-    cls = _norm(obj.get("object_class") or obj.get("dam_category") or "object").lower()
+    cls = _norm(obj.get("dam_category") or obj.get("object_class") or "object").lower()
     if cls == "person" and str(node_id).lower().startswith("man"):
         return "person"
     return cls or "object"
@@ -735,43 +735,6 @@ def _candidate_interval_similarity(left: CandidateTarget, right: CandidateTarget
     return float(sum(scores) / len(scores))
 
 
-def _candidate_temporal_confusability(
-    candidate: CandidateTarget,
-    all_candidates: List[CandidateTarget],
-    profile_map: Dict[str, CandidateProfile],
-) -> Tuple[float, Dict[str, Any]]:
-    target_signature = _member_object_signature(candidate)
-    target_tokens = _profile_temporal_tokens(profile_map[candidate.candidate_id])
-    best_score = 0.0
-    best_candidate_id = ""
-    best_similarity = 0.0
-    best_overlap = 0.0
-    competitor_count = 0
-
-    for other in all_candidates:
-        if other.candidate_id == candidate.candidate_id:
-            continue
-        if _member_object_signature(other) != target_signature:
-            continue
-        competitor_count += 1
-        similarity = _jaccard_similarity(target_tokens, _profile_temporal_tokens(profile_map[other.candidate_id]))
-        overlap = _candidate_interval_similarity(candidate, other)
-        score = math.sqrt(similarity * overlap)
-        if score > best_score or (not best_candidate_id and similarity > best_similarity):
-            best_score = score
-            best_candidate_id = other.candidate_id
-            best_similarity = similarity
-            best_overlap = overlap
-
-    return _clamp01(best_score), {
-        "temporal_competitors": competitor_count,
-        "temporal_best_candidate_id": best_candidate_id,
-        "temporal_best_similarity": best_similarity,
-        "temporal_best_interval_overlap": best_overlap,
-        "temporal_token_count": len(target_tokens),
-    }
-
-
 def _candidate_spatial_confusability(
     candidate: CandidateTarget,
     all_candidates: List[CandidateTarget],
@@ -795,7 +758,7 @@ def _candidate_spatial_confusability(
             continue
         competitor_count += 1
         similarity = _jaccard_similarity(target_tokens, _profile_spatial_tokens(profile_map[other.candidate_id]))
-        score = similarity * overlap
+        score = math.sqrt(similarity * overlap)
         if score > best_score:
             best_score = score
             best_candidate_id = other.candidate_id
@@ -982,6 +945,7 @@ def _member_full_track_interval(index: GraphIndex, member: CandidateMember) -> T
 
 def _is_local_interval(span: Tuple[int, int], full_track: Tuple[int, int]) -> bool:
     return span[0] > full_track[0] or span[1] < full_track[1]
+
 
 def _has_local_dynamic_relation_pair(
     index: GraphIndex,
@@ -2027,15 +1991,15 @@ def _compute_candidate_difficulty(
 ) -> Tuple[float, float, float, Dict[str, Any]]:
     lambda_weight = min(max(float(weights.lambda_weight), 0.0), 1.0)
     clues = build_atomic_clues(index, candidate)
-    _, object_rows, time_rows = build_exclusion_matrix(candidate, all_candidates, clues, profile_map)
-    D_t, temporal_meta = _candidate_temporal_confusability(candidate, all_candidates, profile_map)
+    _, _, time_rows = build_exclusion_matrix(candidate, all_candidates, clues, profile_map)
+    D_t, temporal_meta = _best_exclusion_difficulty(time_rows, clues, allow_temporal=True)
     D_s, spatial_meta = _candidate_spatial_confusability(candidate, all_candidates, profile_map)
     D = _clamp01(lambda_weight * D_t + (1.0 - lambda_weight) * D_s)
 
     meta = {
         "lambda_weight": lambda_weight,
         "arity": candidate.arity,
-        "difficulty_model": "hybrid_confusability_v3",
+        "difficulty_model": "hybrid_confusability_v2",
         "atomic_clue_count": len(clues),
     }
     meta.update(temporal_meta)
