@@ -87,9 +87,17 @@ hf download nvidia/DAM-3B-Video --local-dir /model/DAM-3B-Video
 
 Create `/DORO-STVG/graph_generator/.env`:
 
+Common Openai API .env content:
 ```bash
 API_KEYS=your_key_1,your_key_2
 MM_API_BASE_URL=https://xxx
+```
+
+Internal dedicated API .env content:
+```bash
+API_BACKEND=gemini
+GEMINI_API_BASE_URL="https://runway.devops.rednote.life/openai/google/v1:generateContent"
+GEMINI_API_KEYS="<runway api-key>"
 ```
 
 Notes:

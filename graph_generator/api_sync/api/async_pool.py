@@ -1,4 +1,5 @@
 import asyncio
+import os
 import random
 from typing import List, Dict, Any, TypeVar
 import logging
@@ -6,6 +7,23 @@ from .wrapper import QAWrapper
 
 T = TypeVar('T')
 logger = logging.getLogger(__name__)
+
+
+def _select_wrapper_cls(model_name: str):
+    """Choose an API wrapper for ``model_name``.
+
+    Default: OpenAI-compatible :class:`QAWrapper` — preserves existing behaviour
+    for gateways that expose ``chat/completions`` (including the current
+    ``gemini-3-flash-preview`` traffic).
+
+    Set ``API_BACKEND=gemini`` to opt into the Gemini-native
+    ``:generateContent`` wrapper (see ``gemini_wrapper.py``).
+    """
+    backend = (os.getenv("API_BACKEND") or "").strip().lower()
+    if backend == "gemini":
+        from .gemini_wrapper import GeminiWrapper
+        return GeminiWrapper
+    return QAWrapper
 
 
 class APIPool:
@@ -32,7 +50,7 @@ class APIPool:
             raise ValueError("At least one API key is required")
 
         self.api_instances = [
-            QAWrapper(model_name, api_key)
+            _select_wrapper_cls(model_name)(model_name, api_key)
             for api_key in api_keys
         ]
 
