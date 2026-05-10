@@ -1,38 +1,46 @@
 #!/bin/bash
 export CUDA_VISIBLE_DEVICES=3
-export LLAVA_ST_SOURCE_DIR="${LLAVA_ST_SOURCE_DIR:-/mnt/sdc/xingjianwang/yibowang/LLaVA-ST}"
+export CGSTVG_DIR=/mnt/sdc/xingjianwang/yibowang/CGSTVG
+export CGSTVG_PYTHON=/mnt/sdc/xingjianwang/yibowang/CGSTVG/.venv/bin/python
+export CGSTVG_INFER_PY=/mnt/sdc/xingjianwang/yibowang/DORO-STVG-3e9aedc/eval/utils/cgstvg_infer_helper.py
+export CGSTVG_MODEL_WEIGHT=/mnt/sdc/xingjianwang/yibowang/CGSTVG/model_zoo/vidstg.pth
+export CGSTVG_CUDA_VISIBLE_DEVICES=3
+export CGSTVG_INPUT_RESOLUTION=224
+export CGSTVG_NUM_CLIP_FRAMES=16
+export CGSTVG_NUM_WORKERS=0
 
 # Default parameters
-MODEL_NAME="llava-st-qwen2"
-MODEL_PATH="/mnt/sdc/xingjianwang/yibowang/models/LLaVA-ST-Qwen2-7B"
+MODEL_NAME="cgstvg"
+MODEL_PATH="/mnt/sdc/xingjianwang/yibowang/CGSTVG/model_zoo/vidstg.pth"
 DATA_NAME="doro-stvg"
 ANNOTATION_PATH="/mnt/sdc/xingjianwang/yibowang/datasets/ST-Align-Benchmark/query_train_for_eval_3uniq.jsonl"
 VIDEO_DIR="/mnt/sdc/xingjianwang/yibowang/datasets/ST-Align-Benchmark/video_test1_smoke"
-OUTPUT_DIR="./res_llavast"
+OUTPUT_DIR="./res_cgstvg"
 BATCH_SIZE=1
 MAX_TOKENS=512
 MAX_MODEL_LEN=8192
-TEMPERATURE=0.1
+TEMPERATURE=0.0
 TENSOR_PARALLEL_SIZE=1
 GPU_MEMORY_UTILIZATION=0.9
 
 
 # Print configuration
 echo "=========================================="
-echo "LLaVA-ST Evaluation Configuration"
+echo "CG-STVG Evaluation Configuration"
 echo "=========================================="
 echo "Model Name:              $MODEL_NAME"
 echo "Model Path:              $MODEL_PATH"
+echo "CGSTVG Dir:              /mnt/sdc/xingjianwang/yibowang/CGSTVG"
+echo "CGSTVG Python:           /mnt/sdc/xingjianwang/yibowang/CGSTVG/.venv/bin/python"
+echo "CGSTVG Infer Helper:     /mnt/sdc/xingjianwang/yibowang/DORO-STVG-3e9aedc/eval/utils/cgstvg_infer_helper.py"
 echo "Annotation Path:         $ANNOTATION_PATH"
 echo "Video Directory:         $VIDEO_DIR"
 echo "Output Directory:        $OUTPUT_DIR"
 echo "Batch Size:              $BATCH_SIZE"
-echo "Max Tokens:              $MAX_TOKENS"
-echo "Max Model Length:        $MAX_MODEL_LEN"
-echo "Temperature:             $TEMPERATURE"
-echo "Tensor Parallel Size:    $TENSOR_PARALLEL_SIZE"
-echo "GPU Memory Utilization:  $GPU_MEMORY_UTILIZATION"
-echo "LLaVA-ST Source Dir:     $LLAVA_ST_SOURCE_DIR"
+echo "Input Resolution:        224"
+echo "Num Clip Frames:         16"
+echo "Num Workers:             0"
+echo "Visible GPUs:            3"
 echo "=========================================="
 echo ""
 

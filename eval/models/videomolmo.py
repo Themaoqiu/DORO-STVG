@@ -8,8 +8,6 @@ import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np
-from decord import VideoReader, cpu
 from PIL import Image
 
 
@@ -253,36 +251,6 @@ def _extract_response_json_from_logs(text: str) -> str:
     return "{}"
 
 
-def _compact_query(query: str) -> str:
-    if not query:
-        return "Point to the main target object."
-
-    q = " ".join(str(query).replace("\n", " ").split())
-    q = q.split("Guidelines:", 1)[0]
-    q = q.split("Please find", 1)[0]
-    q = q.strip()
-
-    q = re.sub(r"(?i)^where does\s+", "", q)
-    q = re.sub(r"(?i)^when does\s+", "", q)
-    q = re.sub(r"(?i)\s+occur in the video\?\s*$", "", q)
-    q = q.strip().strip('"').strip("'").rstrip(" .")
-
-    if not q:
-        return "Point to the main target object."
-
-    m = re.match(r"(?i)^who\s+(.+?)[\?\.]?$", q)
-    if m:
-        tail = m.group(1).strip().rstrip("?. ")
-        return f"Point to the person who {tail}."
-
-    m = re.match(r"(?i)^what does\s+(.+?)\s+hold[\?\.]?$", q)
-    if m:
-        subj = m.group(1).strip().rstrip("?. ")
-        return f"Point to the object held by {subj}."
-
-    return f"Point to {q.rstrip('?.')}."
-
-
 class VideoMolmoModel:
     """
     Adapter to run VideoMolmo inference and convert point outputs to bbox JSON.
@@ -348,8 +316,7 @@ class VideoMolmoModel:
 
         try:
             width, height = _extract_frames(video_path, frames_dir, self.max_frames, self.sample_fps)
-            use_compact = os.getenv("VIDEOMOLMO_COMPACT_QUERY", "1").lower() in {"1", "true", "yes"}
-            prompt_for_infer = _compact_query(query) if use_compact else (query.strip() if query else query)
+            prompt_for_infer = query.strip() if query else query
 
             cmd = [
                 self.python_bin,

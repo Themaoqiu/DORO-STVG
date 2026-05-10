@@ -166,7 +166,6 @@ dependencies = [
     { name = "einops-exts" },
     { name = "fire" },
     { name = "flake8" },
-    { name = "llava" },
     { name = "numpy" },
     { name = "open-clip-torch" },
     { name = "peft" },
@@ -189,7 +188,6 @@ requires-dist = [
     { name = "einops-exts", specifier = "==0.0.4" },
     { name = "fire", specifier = ">=0.7.1" },
     { name = "flake8", specifier = ">=7.0.0" },
-    { name = "llava", editable = "../../../eval/dependences/LLaVAST" },
     { name = "numpy", specifier = "==1.26.4" },
     { name = "open-clip-torch", specifier = "==2.24.0" },
     { name = "peft", specifier = "==0.4.0" },
@@ -313,55 +311,6 @@ sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/df/bf/f7da0350254c0e
 wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl", hash = "sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67", size = 134899, upload-time = "2025-03-05T20:05:00.369Z" },
 ]
-
-[[package]]
-name = "llava"
-version = "1.0.0"
-source = { editable = "../../../eval/dependences/LLaVAST" }
-
-[package.metadata]
-requires-dist = [
-    { name = "accelerate", marker = "extra == 'train'", specifier = ">=0.29.1" },
-    { name = "av", marker = "extra == 'train'" },
-    { name = "bitsandbytes", marker = "extra == 'train'", specifier = "==0.41.0" },
-    { name = "datasets", marker = "extra == 'train'", specifier = "==2.16.1" },
-    { name = "decord", marker = "extra == 'train'" },
-    { name = "decord", marker = "extra == 'train'", specifier = "==0.6.0" },
-    { name = "deepspeed", marker = "extra == 'train'", specifier = "==0.14.2" },
-    { name = "einops", marker = "extra == 'standalone'" },
-    { name = "einops", marker = "extra == 'train'", specifier = "==0.6.1" },
-    { name = "einops-exts", marker = "extra == 'train'", specifier = "==0.0.4" },
-    { name = "fastapi", marker = "extra == 'train'" },
-    { name = "ftfy", marker = "extra == 'standalone'" },
-    { name = "gradio-client", marker = "extra == 'train'", specifier = "==0.2.9" },
-    { name = "hf-transfer", marker = "extra == 'train'" },
-    { name = "httpx", marker = "extra == 'standalone'", specifier = "==0.24.0" },
-    { name = "llava", extras = ["standalone"], marker = "extra == 'train'" },
-    { name = "markdown2", extras = ["all"], marker = "extra == 'train'" },
-    { name = "numpy", marker = "extra == 'train'" },
-    { name = "numpy", marker = "extra == 'train'", specifier = "==1.26.1" },
-    { name = "open-clip-torch", marker = "extra == 'train'" },
-    { name = "opencv-python", marker = "extra == 'train'" },
-    { name = "peft", marker = "extra == 'train'", specifier = "==0.4.0" },
-    { name = "pycocoevalcap", marker = "extra == 'train'", specifier = "==1.2" },
-    { name = "pydantic", marker = "extra == 'train'", specifier = "==1.10.8" },
-    { name = "requests", marker = "extra == 'train'" },
-    { name = "scikit-learn", marker = "extra == 'train'", specifier = "==1.2.2" },
-    { name = "scipy", marker = "extra == 'train'" },
-    { name = "sentencepiece", marker = "extra == 'train'" },
-    { name = "sentencepiece", marker = "extra == 'train'", specifier = "~=0.1.99" },
-    { name = "shortuuid", marker = "extra == 'standalone'" },
-    { name = "timm", marker = "extra == 'train'" },
-    { name = "tokenizers", marker = "extra == 'train'", specifier = "~=0.15.2" },
-    { name = "torch", marker = "extra == 'train'", specifier = "==2.1.2" },
-    { name = "torchvision", marker = "extra == 'train'", specifier = "==0.16.2" },
-    { name = "transformers", marker = "extra == 'train'", git = "https://github.com/huggingface/transformers.git?rev=1c39974a4c4036fd641bc1191cc32799f85715a4" },
-    { name = "tyro", marker = "extra == 'train'" },
-    { name = "urllib3", marker = "extra == 'train'", specifier = "<=2.0.0" },
-    { name = "uvicorn", marker = "extra == 'train'" },
-    { name = "wandb", marker = "extra == 'train'" },
-]
-provides-extras = ["standalone", "train"]
 
 [[package]]
 name = "markupsafe"
