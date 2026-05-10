@@ -1,0 +1,14 @@
+[project]
+name = "eval-tubedetr"
+version = "0.1.0"
+description = "Lightweight evaluation wrapper environment for TubeDETR"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fire>=0.7.1",
+]
+
+[[tool.uv.index]]
+name = "tsinghua-pypi"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true

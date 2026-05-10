@@ -1,10 +1,11 @@
 import copy
 import importlib.util
+import json
 import logging
 import os
 import re
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -16,14 +17,21 @@ LLAVA_ST_DEPENDENCIES_LOADED = False
 
 
 def _bundled_llava_st_root() -> Path:
-    return Path(__file__).resolve().parents[1] / "dependences" / "LLaVA-ST"
+    env_root = os.getenv("LLAVA_ST_SOURCE_DIR")
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+
+    raise ImportError(
+        "LLAVA_ST_SOURCE_DIR is not set. Install the external LLaVA-ST repository "
+        "into envs/eval/llavast or set LLAVA_ST_SOURCE_DIR=/path/to/LLaVA-ST."
+    )
 
 
 def _load_bundled_get_variables():
     source_root = _bundled_llava_st_root()
     utils_path = source_root / "inference" / "src" / "utils.py"
     if not utils_path.exists():
-        raise ImportError(f"Bundled LLaVA-ST inference utilities not found at {utils_path}")
+        raise ImportError(f"LLaVA-ST inference utilities not found at {utils_path}")
 
     spec = importlib.util.spec_from_file_location("_llava_st_inference_utils", utils_path)
     if spec is None or spec.loader is None:
@@ -74,8 +82,9 @@ def _ensure_llava_st_dependencies() -> None:
         from llava.model.builder import load_lora_model as imported_load_lora_model
     except ImportError as exc:
         raise ImportError(
-            "Failed to import LLaVA-ST dependencies. Activate envs/eval/llavast and install "
-            "the bundled dependency with `uv pip install -e .` from envs/eval/llavast."
+            "Failed to import LLaVA-ST dependencies. Run with envs/eval/llavast "
+            "and install the external LLaVA-ST repository, for example: "
+            "uv pip install -e /path/to/LLaVA-ST"
         ) from exc
 
     try:
@@ -202,47 +211,58 @@ def preprocess_multimodal(sources, vision_config):
     return sources
 
 
-def _extract_video_spec(video_input: str) -> Tuple[str, Optional[Tuple[int, int]]]:
-    marker = "::split="
-    if marker not in video_input:
-        return video_input, None
-
-    video_path, split_text = video_input.split(marker, 1)
-    try:
-        start_text, end_text = split_text.split(":", 1)
-        split = (int(start_text), int(end_text))
-    except ValueError:
-        logger.warning("Failed to parse split from video input %s", video_input)
-        return video_path, None
-    return video_path, split
-
-
-def _load_video_frames(video_path: str, max_frames: int, split: Optional[Tuple[int, int]] = None) -> Tuple[np.ndarray, List[int]]:
+def _load_video_frames(video_path: str, max_frames: int) -> Tuple[np.ndarray, List[int]]:
     vr = VideoReader(video_path, ctx=cpu(0))
     total = len(vr)
     if total <= 0:
         raise ValueError(f"Empty video: {video_path}")
 
-    if split is None:
-        split = (0, total - 1)
-    start, end = split
-    start = max(0, min(total - 1, start))
-    end = max(start, min(total - 1, end))
-
     if max_frames <= 1:
-        indices = [start]
+        indices = [0]
     else:
-        duration = end - start + 1
-        indices = [
-            start + round((i / (max_frames - 1)) * (duration - 1))
-            for i in range(max_frames)
-        ]
+        indices = [round((i / (max_frames - 1)) * (total - 1)) for i in range(max_frames)]
     frames = vr.get_batch(indices).asnumpy()
     return frames, indices
 
 
+def _llava_st_tokens_to_json(response_text: str, sampled_indices: List[int]) -> str:
+    frame_map: Dict[str, List[float]] = {}
+
+    temp_matches = re.findall(
+        r"<TEMP-(\d{3})>\s*:\s*\[<WIDTH-(\d{3})><HEIGHT-(\d{3})><WIDTH-(\d{3})><HEIGHT-(\d{3})>\]",
+        response_text,
+    )
+    for temp_idx, x1, y1, x2, y2 in temp_matches:
+        sample_pos = int(temp_idx)
+        if sample_pos < 0 or sample_pos >= len(sampled_indices):
+            continue
+        frame_idx = int(sampled_indices[sample_pos])
+        frame_map[str(frame_idx)] = [
+            max(0.0, min(1.0, int(x1) / 99.0)),
+            max(0.0, min(1.0, int(y1) / 99.0)),
+            max(0.0, min(1.0, int(x2) / 99.0)),
+            max(0.0, min(1.0, int(y2) / 99.0)),
+        ]
+
+    frame_matches = re.findall(
+        r"(?m)^\s*(?:[-*]\s*)?(\d{1,8})\s*:\s*\[<WIDTH-(\d{3})><HEIGHT-(\d{3})><WIDTH-(\d{3})><HEIGHT-(\d{3})>\]",
+        response_text,
+    )
+    for frame_idx, x1, y1, x2, y2 in frame_matches:
+        frame_map[str(int(frame_idx))] = [
+            max(0.0, min(1.0, int(x1) / 99.0)),
+            max(0.0, min(1.0, int(y1) / 99.0)),
+            max(0.0, min(1.0, int(x2) / 99.0)),
+            max(0.0, min(1.0, int(y2) / 99.0)),
+        ]
+
+    if not frame_map:
+        return response_text
+    return json.dumps({"target": frame_map}, ensure_ascii=False)
+
+
 class LlavaSTQwen2:
-    prompt_style = "llava_st"
+    """LLaVA-ST-Qwen2 wrapper for the existing STVG evaluation pipeline."""
 
     def __init__(
         self,
@@ -260,7 +280,6 @@ class LlavaSTQwen2:
         self.batch_size = batch_size
         self.max_tokens = max_tokens
         self.temperature = temperature
-
         self.max_frames = int(os.getenv("LLAVA_ST_MAX_FRAMES", "100"))
         self.vt_chunk = int(os.getenv("LLAVA_ST_VT_CHUNK", "1"))
         self.use_cache = os.getenv("LLAVA_ST_USE_CACHE", "1").lower() in {"1", "true", "yes"}
@@ -323,11 +342,10 @@ class LlavaSTQwen2:
             self.vt_chunk,
         )
 
-    def _predict_one(self, query: str, video_input: str, system_prompt: str) -> Tuple[str, List[int]]:
+    def _predict_one(self, query: str, video_path: str, system_prompt: str) -> Tuple[str, List[int]]:
         del system_prompt
 
-        video_path, split = _extract_video_spec(video_input)
-        frames, sampled_indices = _load_video_frames(video_path, max_frames=self.max_frames, split=split)
+        frames, sampled_indices = _load_video_frames(video_path, max_frames=self.max_frames)
         video_tensor = self.image_processor.preprocess(frames, return_tensors="pt")["pixel_values"]
         video_tensor = video_tensor.to(device=self.device, dtype=self.dtype, non_blocking=True)
 
@@ -373,12 +391,14 @@ class LlavaSTQwen2:
         self.last_user_prompts = list(queries)
 
         raw_outputs: List[str] = []
+        converted_outputs: List[str] = []
         frame_indices: List[List[int]] = []
         for query, video_path in zip(queries, video_paths):
             raw_output, sampled_indices = self._predict_one(query, video_path, system_prompt)
             raw_outputs.append(raw_output)
+            converted_outputs.append(_llava_st_tokens_to_json(raw_output, sampled_indices))
             frame_indices.append(sampled_indices)
 
         self.last_raw_responses = raw_outputs
         self.last_video_frame_indices = frame_indices
-        return raw_outputs
+        return converted_outputs
