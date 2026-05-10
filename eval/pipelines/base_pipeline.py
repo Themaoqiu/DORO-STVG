@@ -1,5 +1,6 @@
 import json
 import logging
+import inspect
 from pathlib import Path
 from typing import List, Dict, Any
 from datetime import datetime
@@ -123,18 +124,24 @@ class BasePipeline(ABC):
     
     def _process_batch(self, batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         video_paths = []
+        video_metas = []
         for sample in batch:
             video_path = sample['video_path']
             video_paths.append(video_path)
+            video_metas.append(sample.get('metadata') or {})
             logger.info(f"Using original video: {video_path}")
         
         queries = [format_prompt(sample['query']) for sample in batch]
 
-        full_responses = self.model.predict_batch(
-            queries=queries,
-            video_paths=video_paths,
-            system_prompt=SYSTEM_PROMPT
-        )
+        predict_kwargs = {
+            "queries": queries,
+            "video_paths": video_paths,
+            "system_prompt": SYSTEM_PROMPT,
+        }
+        if "video_metas" in inspect.signature(self.model.predict_batch).parameters:
+            predict_kwargs["video_metas"] = video_metas
+
+        full_responses = self.model.predict_batch(**predict_kwargs)
         raw_responses = getattr(self.model, "last_raw_responses", full_responses)
         
         batch_results = []
