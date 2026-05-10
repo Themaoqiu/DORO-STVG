@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, Any, Optional
 
 
 SYSTEM_PROMPT = """You are an expert in spatiotemporal video grounding tasked with precisely locating objects/subjects in videos. You should output the space-time tube for each object the user intends to find."""
@@ -22,17 +22,7 @@ Guidelines:\n
   {{"chair": {{"12": [0.10, 0.20, 0.30, 0.40]}}, "table": {{"12": [0.40, 0.50, 0.70, 0.90]}}}}\n
 """
 
-LLAVA_ST_USER_PROMPT = """Where does {query} occur in the video? Please find the location of the corresponding subject/object in this video. Give the corresponding bounding boxes for the object(s) in each corresponding frame.\n\n
-
-Guidelines:\n
-- You must follow the exact output format below, and only output the format without any additional text or explanation.\n
-- Please firstly give the timestamps, and then give the spatial bounding box corresponding to each timestamp in the time period.\n
-"""
-
-
-def format_prompt(query: str, prompt_style: str = "json") -> str:
-    if prompt_style == "llava_st":
-        return LLAVA_ST_USER_PROMPT.format(query=query)
+def format_prompt(query: str) -> str:
     return USER_PROMPT.format(query=query)
 
 
@@ -111,91 +101,7 @@ def _parse_objects_from_json(response_text: str) -> Optional[Dict[str, Any]]:
     return result
 
 
-def _empty_parse_result() -> Dict[str, Any]:
-    return {
-        'temporal_span': None,
-        'spatial_bboxes': {},
-        'objects': [],
-    }
-
-
-def _sample_position_to_frame(position: int, sampled_indices: Optional[List[int]]) -> Optional[int]:
-    if sampled_indices is None:
-        return position
-    if not sampled_indices:
-        return None
-    if position < 0 or position >= len(sampled_indices):
-        return None
-    return int(sampled_indices[position])
-
-
-def _parse_llava_st_box_tokens(response_text: str, sampled_indices: Optional[List[int]]) -> Dict[int, List[float]]:
-    frame_map: Dict[int, List[float]] = {}
-    matches = re.findall(
-        r"<TEMP-(\d{3})>\s*:\s*\[<WIDTH-(\d{3})><HEIGHT-(\d{3})><WIDTH-(\d{3})><HEIGHT-(\d{3})>\]",
-        response_text,
-    )
-    for temp_idx, x1, y1, x2, y2 in matches:
-        frame_idx = _sample_position_to_frame(int(temp_idx), sampled_indices)
-        if frame_idx is None:
-            continue
-        frame_map[frame_idx] = [
-            int(x1) / 99.0,
-            int(y1) / 99.0,
-            int(x2) / 99.0,
-            int(y2) / 99.0,
-        ]
-    return frame_map
-
-
-def _parse_llava_st_temporal_span(response_text: str, sampled_indices: Optional[List[int]]) -> Optional[Tuple[int, int]]:
-    match = re.search(r"\{\s*<TEMP-(\d{3})>\s*<TEMP-(\d{3})>\s*\}", response_text)
-    if not match:
-        return None
-    start = _sample_position_to_frame(int(match.group(1)), sampled_indices)
-    end = _sample_position_to_frame(int(match.group(2)), sampled_indices)
-    if start is None or end is None:
-        return None
-    return (start, end)
-
-
-def _parse_llava_st_response(
-    response_text: str,
-    query: Optional[str],
-    sampled_indices: Optional[List[int]],
-) -> Dict[str, Any]:
-    result = _empty_parse_result()
-    spatial_bboxes = _parse_llava_st_box_tokens(response_text, sampled_indices)
-    if not spatial_bboxes:
-        return result
-
-    temporal_span = _parse_llava_st_temporal_span(response_text, sampled_indices)
-    if temporal_span is None:
-        frames = sorted(spatial_bboxes.keys())
-        temporal_span = (frames[0], frames[-1])
-
-    obj = {
-        'description': str(query or "target").strip() or "target",
-        'temporal_span': temporal_span,
-        'spatial_bboxes': spatial_bboxes,
-    }
-    result['temporal_span'] = temporal_span
-    result['spatial_bboxes'] = spatial_bboxes
-    result['objects'] = [obj]
-    return result
-
-
-def parse_response(
-    response_text: str,
-    query: Optional[str] = None,
-    sampled_indices: Optional[List[int]] = None,
-    prompt_style: str = "json",
-) -> Dict[str, Any]:
-    if prompt_style == "llava_st":
-        llava_result = _parse_llava_st_response(response_text, query, sampled_indices)
-        if llava_result.get("objects"):
-            return llava_result
-
+def parse_response(response_text: str) -> Dict[str, Any]:
     result = {
         'temporal_span': None,
         'spatial_bboxes': {},

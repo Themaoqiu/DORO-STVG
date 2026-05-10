@@ -135,7 +135,7 @@ name = "certifi"
 version = "2022.12.7"
 source = { registry = "https://download.pytorch.org/whl/cu117" }
 wheels = [
-    { url = "https://download.pytorch.org/whl/certifi-2022.12.7-py3-none-any.whl", hash = "sha256:4ad3232f5e926d6718ec31cfc1fcadfde020920e278684144551c91769c7bc18", upload-time = "2023-10-03T17:33:19Z" },
+    { url = "https://download.pytorch.org/whl/certifi-2022.12.7-py3-none-any.whl", hash = "sha256:4ad3232f5e926d6718ec31cfc1fcadfde020920e278684144551c91769c7bc18" },
 ]
 
 [[package]]
@@ -143,7 +143,7 @@ name = "charset-normalizer"
 version = "2.1.1"
 source = { registry = "https://download.pytorch.org/whl/cu117" }
 wheels = [
-    { url = "https://download.pytorch.org/whl/charset_normalizer-2.1.1-py3-none-any.whl", hash = "sha256:83e9a75d1911279afd89352c68b45348559d1fc0506b054b346651b5e7fee29f", upload-time = "2023-10-03T17:33:19Z" },
+    { url = "https://download.pytorch.org/whl/charset_normalizer-2.1.1-py3-none-any.whl", hash = "sha256:83e9a75d1911279afd89352c68b45348559d1fc0506b054b346651b5e7fee29f" },
 ]
 
 [[package]]
@@ -151,9 +151,9 @@ name = "cmake"
 version = "3.25.0"
 source = { registry = "https://download.pytorch.org/whl/cu117" }
 wheels = [
-    { url = "https://download.pytorch.org/whl/cmake-3.25.0-py2.py3-none-macosx_10_10_universal2.macosx_10_10_x86_64.macosx_11_0_arm64.macosx_11_0_universal2.whl", hash = "sha256:e90a7a68384b25a05aab0f013cea76b69f00add2592393b0ff71e99c773db017", upload-time = "2023-10-05T23:50:28Z" },
-    { url = "https://download.pytorch.org/whl/cmake-3.25.0-py2.py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:9b7fd744a90e4d804ff77ac50d3570009911fbfdad29c59fc93d2a82faaeb371", upload-time = "2023-10-05T23:50:31Z" },
-    { url = "https://download.pytorch.org/whl/cmake-3.25.0-py2.py3-none-win_amd64.whl", hash = "sha256:849f3760576810aee84108b3110a7e083c9fdc72fde26401c4ff4c340a2232c7", upload-time = "2023-10-05T23:50:32Z" },
+    { url = "https://download.pytorch.org/whl/cmake-3.25.0-py2.py3-none-macosx_10_10_universal2.macosx_10_10_x86_64.macosx_11_0_arm64.macosx_11_0_universal2.whl", hash = "sha256:e90a7a68384b25a05aab0f013cea76b69f00add2592393b0ff71e99c773db017" },
+    { url = "https://download.pytorch.org/whl/cmake-3.25.0-py2.py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:9b7fd744a90e4d804ff77ac50d3570009911fbfdad29c59fc93d2a82faaeb371" },
+    { url = "https://download.pytorch.org/whl/cmake-3.25.0-py2.py3-none-win_amd64.whl", hash = "sha256:849f3760576810aee84108b3110a7e083c9fdc72fde26401c4ff4c340a2232c7" },
 ]
 
 [[package]]
@@ -161,7 +161,7 @@ name = "colorama"
 version = "0.4.6"
 source = { registry = "https://download.pytorch.org/whl/cu117" }
 wheels = [
-    { url = "https://download.pytorch.org/whl/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", upload-time = "2023-10-05T23:50:34Z" },
+    { url = "https://download.pytorch.org/whl/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6" },
 ]
 
 [[package]]
@@ -261,7 +261,7 @@ name = "idna"
 version = "3.4"
 source = { registry = "https://download.pytorch.org/whl/cu117" }
 wheels = [
-    { url = "https://download.pytorch.org/whl/idna-3.4-py3-none-any.whl", hash = "sha256:90b77e79eaa3eba6de819a0c442c0b4ceefc341a7a2ab77d7562bf49f425c5c2", upload-time = "2023-10-06T21:35:40Z" },
+    { url = "https://download.pytorch.org/whl/idna-3.4-py3-none-any.whl", hash = "sha256:90b77e79eaa3eba6de819a0c442c0b4ceefc341a7a2ab77d7562bf49f425c5c2" },
 ]
 
 [[package]]
@@ -284,7 +284,7 @@ dependencies = [
     { name = "markupsafe" },
 ]
 wheels = [
-    { url = "https://download.pytorch.org/whl/jinja2-3.1.6-py3-none-any.whl", upload-time = "2025-10-14T18:38:59Z" },
+    { url = "https://download.pytorch.org/whl/jinja2-3.1.6-py3-none-any.whl" },
 ]
 
 [[package]]
@@ -321,7 +321,7 @@ wheels = [
 name = "lit"
 version = "15.0.7"
 source = { registry = "https://download.pytorch.org/whl/cu117" }
-sdist = { url = "https://download.pytorch.org/whl/lit-15.0.7.tar.gz", hash = "sha256:ed08ac55afe714a193653df293ae8a6ee6c45d6fb11eeca72ce347d99b88ecc8", upload-time = "2023-10-06T21:35:40Z" }
+sdist = { url = "https://download.pytorch.org/whl/lit-15.0.7.tar.gz", hash = "sha256:ed08ac55afe714a193653df293ae8a6ee6c45d6fb11eeca72ce347d99b88ecc8" }
 
 [[package]]
 name = "markdown-it-py"
@@ -340,12 +340,12 @@ name = "markupsafe"
 version = "3.0.2"
 source = { registry = "https://download.pytorch.org/whl/cu117" }
 wheels = [
-    { url = "https://download.pytorch.org/whl/MarkupSafe-3.0.2-cp39-cp39-macosx_10_9_universal2.whl", upload-time = "2026-02-19T22:23:04Z" },
-    { url = "https://download.pytorch.org/whl/MarkupSafe-3.0.2-cp39-cp39-macosx_11_0_arm64.whl", upload-time = "2026-02-19T22:23:05Z" },
-    { url = "https://download.pytorch.org/whl/MarkupSafe-3.0.2-cp39-cp39-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", upload-time = "2026-02-19T22:23:06Z" },
-    { url = "https://download.pytorch.org/whl/MarkupSafe-3.0.2-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", upload-time = "2026-02-19T22:23:06Z" },
-    { url = "https://download.pytorch.org/whl/MarkupSafe-3.0.2-cp39-cp39-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", upload-time = "2026-02-19T22:23:06Z" },
-    { url = "https://download.pytorch.org/whl/MarkupSafe-3.0.2-cp39-cp39-win_amd64.whl", upload-time = "2026-02-19T22:23:06Z" },
+    { url = "https://download.pytorch.org/whl/MarkupSafe-3.0.2-cp39-cp39-macosx_10_9_universal2.whl" },
+    { url = "https://download.pytorch.org/whl/MarkupSafe-3.0.2-cp39-cp39-macosx_11_0_arm64.whl" },
+    { url = "https://download.pytorch.org/whl/MarkupSafe-3.0.2-cp39-cp39-manylinux_2_17_aarch64.manylinux2014_aarch64.whl" },
+    { url = "https://download.pytorch.org/whl/MarkupSafe-3.0.2-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" },
+    { url = "https://download.pytorch.org/whl/MarkupSafe-3.0.2-cp39-cp39-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl" },
+    { url = "https://download.pytorch.org/whl/MarkupSafe-3.0.2-cp39-cp39-win_amd64.whl" },
 ]
 
 [[package]]
@@ -522,7 +522,7 @@ name = "packaging"
 version = "24.1"
 source = { registry = "https://download.pytorch.org/whl/cu117" }
 wheels = [
-    { url = "https://download.pytorch.org/whl/packaging-24.1-py3-none-any.whl", hash = "sha256:5b8f2217dbdbd2f7f384c41c628544e6d52f2d0f53c6d0c3ea61aa5d1d7ff124", upload-time = "2024-10-29T23:48:01Z" },
+    { url = "https://download.pytorch.org/whl/packaging-24.1-py3-none-any.whl", hash = "sha256:5b8f2217dbdbd2f7f384c41c628544e6d52f2d0f53c6d0c3ea61aa5d1d7ff124" },
 ]
 
 [[package]]
@@ -647,7 +647,7 @@ dependencies = [
     { name = "urllib3" },
 ]
 wheels = [
-    { url = "https://download.pytorch.org/whl/requests-2.28.1-py3-none-any.whl", hash = "sha256:8fefa2a1a1365bf5520aac41836fbee479da67864514bdb821f31ce07ce65349", upload-time = "2023-10-06T21:36:51Z" },
+    { url = "https://download.pytorch.org/whl/requests-2.28.1-py3-none-any.whl", hash = "sha256:8fefa2a1a1365bf5520aac41836fbee479da67864514bdb821f31ce07ce65349" },
 ]
 
 [[package]]
@@ -760,7 +760,7 @@ dependencies = [
     { name = "typing-extensions", marker = "platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/torch-2.0.1-cp39-cp39-manylinux2014_aarch64.whl", hash = "sha256:423e0ae257b756bb45a4b49072046772d1ad0c592265c5080070e0767da4e490", upload-time = "2023-10-06T21:39:38Z" },
+    { url = "https://download.pytorch.org/whl/torch-2.0.1-cp39-cp39-manylinux2014_aarch64.whl", hash = "sha256:423e0ae257b756bb45a4b49072046772d1ad0c592265c5080070e0767da4e490" },
 ]
 
 [[package]]
@@ -781,8 +781,8 @@ dependencies = [
     { name = "typing-extensions", marker = "platform_machine != 'aarch64' or platform_python_implementation != 'CPython' or sys_platform != 'linux'" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cu117/torch-2.0.1%2Bcu117-cp39-cp39-linux_x86_64.whl", hash = "sha256:e06deb28938e7468bdd79ad5a4cfda36e95113507a9144a367039b35ac73986c", upload-time = "2023-10-09T03:32:25Z" },
-    { url = "https://download-r2.pytorch.org/whl/cu117/torch-2.0.1%2Bcu117-cp39-cp39-win_amd64.whl", hash = "sha256:245d04e1541350dba11c7b76e343ca0071bbcb10f956a09b6bede3d68db9e759", upload-time = "2023-10-09T03:33:36Z" },
+    { url = "https://download.pytorch.org/whl/cu117/torch-2.0.1%2Bcu117-cp39-cp39-linux_x86_64.whl", hash = "sha256:e06deb28938e7468bdd79ad5a4cfda36e95113507a9144a367039b35ac73986c" },
+    { url = "https://download.pytorch.org/whl/cu117/torch-2.0.1%2Bcu117-cp39-cp39-win_amd64.whl", hash = "sha256:245d04e1541350dba11c7b76e343ca0071bbcb10f956a09b6bede3d68db9e759" },
 ]
 
 [[package]]
@@ -799,7 +799,7 @@ dependencies = [
     { name = "torch", version = "2.0.1", source = { registry = "https://download.pytorch.org/whl/cu117" }, marker = "platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/torchvision-0.15.2-cp39-cp39-manylinux2014_aarch64.whl", hash = "sha256:b85f98d4cc2f72452f6792ab4463a3541bc5678a8cdd3da0e139ba2fe8b56d42", upload-time = "2023-10-06T21:47:31Z" },
+    { url = "https://download-r2.pytorch.org/whl/torchvision-0.15.2-cp39-cp39-manylinux2014_aarch64.whl", hash = "sha256:b85f98d4cc2f72452f6792ab4463a3541bc5678a8cdd3da0e139ba2fe8b56d42" },
 ]
 
 [[package]]
@@ -818,8 +818,8 @@ dependencies = [
     { name = "torch", version = "2.0.1+cu117", source = { registry = "https://download.pytorch.org/whl/cu117" }, marker = "platform_machine != 'aarch64' or platform_python_implementation != 'CPython' or sys_platform != 'linux'" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/cu117/torchvision-0.15.2%2Bcu117-cp39-cp39-linux_x86_64.whl", hash = "sha256:713ec66ef09d0b0f2ae19498fabe8f480273b474f22fa288e4ee7c7290f953b3", upload-time = "2023-10-09T03:36:34Z" },
-    { url = "https://download-r2.pytorch.org/whl/cu117/torchvision-0.15.2%2Bcu117-cp39-cp39-win_amd64.whl", hash = "sha256:8e0701a162cca13cee637397d7a67248bfeec35086cc753a1c513b2ea1dd476e", upload-time = "2023-10-09T03:36:34Z" },
+    { url = "https://download-r2.pytorch.org/whl/cu117/torchvision-0.15.2%2Bcu117-cp39-cp39-linux_x86_64.whl", hash = "sha256:713ec66ef09d0b0f2ae19498fabe8f480273b474f22fa288e4ee7c7290f953b3" },
+    { url = "https://download-r2.pytorch.org/whl/cu117/torchvision-0.15.2%2Bcu117-cp39-cp39-win_amd64.whl", hash = "sha256:8e0701a162cca13cee637397d7a67248bfeec35086cc753a1c513b2ea1dd476e" },
 ]
 
 [[package]]
@@ -830,7 +830,7 @@ dependencies = [
     { name = "colorama", marker = "sys_platform == 'win32'" },
 ]
 wheels = [
-    { url = "https://download.pytorch.org/whl/tqdm-4.66.5-py3-none-any.whl", hash = "sha256:90279a3770753eafc9194a0364852159802111925aa30eb3f9d85b0e805ac7cd", upload-time = "2024-10-30T00:09:55Z" },
+    { url = "https://download.pytorch.org/whl/tqdm-4.66.5-py3-none-any.whl", hash = "sha256:90279a3770753eafc9194a0364852159802111925aa30eb3f9d85b0e805ac7cd" },
 ]
 
 [[package]]
@@ -845,8 +845,8 @@ dependencies = [
     { name = "torch", version = "2.0.1+cu117", source = { registry = "https://download.pytorch.org/whl/cu117" }, marker = "platform_machine != 'aarch64' or platform_python_implementation != 'CPython' or sys_platform != 'linux'" },
 ]
 wheels = [
-    { url = "https://download-r2.pytorch.org/whl/triton-2.0.0-1-cp39-cp39-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:74f118c12b437fb2ca25e1a04759173b517582fcf4c7be11913316c764213656", upload-time = "2023-10-06T21:48:16Z" },
-    { url = "https://download-r2.pytorch.org/whl/triton-2.0.0-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:0117722f8c2b579cd429e0bee80f7731ae05f63fe8e9414acd9a679885fcbf42", upload-time = "2023-10-06T21:48:29Z" },
+    { url = "https://download-r2.pytorch.org/whl/triton-2.0.0-1-cp39-cp39-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:74f118c12b437fb2ca25e1a04759173b517582fcf4c7be11913316c764213656" },
+    { url = "https://download-r2.pytorch.org/whl/triton-2.0.0-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:0117722f8c2b579cd429e0bee80f7731ae05f63fe8e9414acd9a679885fcbf42" },
 ]
 
 [[package]]
@@ -862,7 +862,7 @@ name = "urllib3"
 version = "1.26.13"
 source = { registry = "https://download.pytorch.org/whl/cu117" }
 wheels = [
-    { url = "https://download.pytorch.org/whl/urllib3-1.26.13-py2.py3-none-any.whl", hash = "sha256:47cc05d99aaa09c9e72ed5809b60e7ba354e64b59c9c173ac3018642d8bb41fc", upload-time = "2023-10-06T21:48:51Z" },
+    { url = "https://download.pytorch.org/whl/urllib3-1.26.13-py2.py3-none-any.whl", hash = "sha256:47cc05d99aaa09c9e72ed5809b60e7ba354e64b59c9c173ac3018642d8bb41fc" },
 ]
 
 [[package]]
@@ -883,5 +883,5 @@ name = "zipp"
 version = "3.19.2"
 source = { registry = "https://download.pytorch.org/whl/cu117" }
 wheels = [
-    { url = "https://download.pytorch.org/whl/zipp-3.19.2-py3-none-any.whl", upload-time = "2025-08-05T22:17:38Z" },
+    { url = "https://download.pytorch.org/whl/zipp-3.19.2-py3-none-any.whl" },
 ]

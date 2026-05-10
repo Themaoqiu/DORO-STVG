@@ -735,6 +735,43 @@ def _candidate_interval_similarity(left: CandidateTarget, right: CandidateTarget
     return float(sum(scores) / len(scores))
 
 
+def _candidate_temporal_confusability(
+    candidate: CandidateTarget,
+    all_candidates: List[CandidateTarget],
+    profile_map: Dict[str, CandidateProfile],
+) -> Tuple[float, Dict[str, Any]]:
+    target_signature = _member_object_signature(candidate)
+    target_tokens = _profile_temporal_tokens(profile_map[candidate.candidate_id])
+    best_score = 0.0
+    best_candidate_id = ""
+    best_similarity = 0.0
+    best_overlap = 0.0
+    competitor_count = 0
+
+    for other in all_candidates:
+        if other.candidate_id == candidate.candidate_id:
+            continue
+        if _member_object_signature(other) != target_signature:
+            continue
+        competitor_count += 1
+        similarity = _jaccard_similarity(target_tokens, _profile_temporal_tokens(profile_map[other.candidate_id]))
+        overlap = _candidate_interval_similarity(candidate, other)
+        score = math.sqrt(similarity * overlap)
+        if score > best_score:
+            best_score = score
+            best_candidate_id = other.candidate_id
+            best_similarity = similarity
+            best_overlap = overlap
+
+    return _clamp01(best_score), {
+        "temporal_competitors": competitor_count,
+        "temporal_best_candidate_id": best_candidate_id,
+        "temporal_best_similarity": best_similarity,
+        "temporal_best_interval_overlap": best_overlap,
+        "temporal_token_count": len(target_tokens),
+    }
+
+
 def _candidate_spatial_confusability(
     candidate: CandidateTarget,
     all_candidates: List[CandidateTarget],
@@ -1991,15 +2028,15 @@ def _compute_candidate_difficulty(
 ) -> Tuple[float, float, float, Dict[str, Any]]:
     lambda_weight = min(max(float(weights.lambda_weight), 0.0), 1.0)
     clues = build_atomic_clues(index, candidate)
-    _, _, time_rows = build_exclusion_matrix(candidate, all_candidates, clues, profile_map)
+    _, object_rows, time_rows = build_exclusion_matrix(candidate, all_candidates, clues, profile_map)
     D_t, temporal_meta = _best_exclusion_difficulty(time_rows, clues, allow_temporal=True)
-    D_s, spatial_meta = _candidate_spatial_confusability(candidate, all_candidates, profile_map)
+    D_s, spatial_meta = _best_exclusion_difficulty(object_rows, clues, allow_temporal=False)
     D = _clamp01(lambda_weight * D_t + (1.0 - lambda_weight) * D_s)
 
     meta = {
         "lambda_weight": lambda_weight,
         "arity": candidate.arity,
-        "difficulty_model": "hybrid_confusability_v2",
+        "difficulty_model": "exclusion_rate_v2",
         "atomic_clue_count": len(clues),
     }
     meta.update(temporal_meta)
@@ -2052,8 +2089,21 @@ def _assign_sampling_buckets(candidates: List[CandidateTarget]) -> None:
 
 
 def _assign_difficulty_buckets_5(candidates: List[CandidateTarget]) -> None:
-    for cand in candidates:
-        cand.difficulty_bucket = _difficulty_bucket_from_score(cand.difficulty)
+    if not candidates:
+        return
+    labels = ["very_easy", "easy", "medium", "hard", "very_hard"]
+    ordered = sorted(candidates, key=lambda cand: (cand.difficulty, cand.interval[1] - cand.interval[0] + 1))
+    n = len(ordered)
+    base = n // len(labels)
+    remainder = n % len(labels)
+    counts = [base + (1 if idx < remainder else 0) for idx in range(len(labels))]
+
+    start = 0
+    for label, count in zip(labels, counts):
+        end = start + count
+        for cand in ordered[start:end]:
+            cand.difficulty_bucket = label
+        start = end
 
 
 _DIFFICULTY_BUCKET_ORDER = {
@@ -2064,27 +2114,11 @@ _DIFFICULTY_BUCKET_ORDER = {
     "very_hard": 4,
 }
 
-_DIFFICULTY_BUCKET_THRESHOLDS: Tuple[Tuple[float, str], ...] = (
-    (0.20, "very_easy"),
-    (0.40, "easy"),
-    (0.60, "medium"),
-    (0.80, "hard"),
-    (1.01, "very_hard"),
-)
-
 _TEMPLATE_BUCKET_DIFFICULTY_LABELS = {
     "easy": ("very_easy", "easy"),
     "medium": ("medium",),
     "hard": ("hard", "very_hard"),
 }
-
-
-def _difficulty_bucket_from_score(score: float) -> str:
-    clamped = _clamp01(score)
-    for upper_bound, label in _DIFFICULTY_BUCKET_THRESHOLDS:
-        if clamped < upper_bound:
-            return label
-    return "very_hard"
 
 
 def _template_candidate_labels(template_bucket: str) -> Tuple[str, ...]:
@@ -2821,8 +2855,9 @@ class CPSATQuerySampler:
             flush=True,
         )
 
-        prepared_graphs: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]] = []
-        with in_path.open("r", encoding="utf-8") as fin:
+        graph_count = 0
+        record_count = 0
+        with in_path.open("r", encoding="utf-8") as fin, out_path.open("w", encoding="utf-8") as fout:
             for line in fin:
                 line = line.strip()
                 if not line:
@@ -2853,41 +2888,32 @@ class CPSATQuerySampler:
                         f"max_queries_per_difficulty_bucket={max_queries_per_difficulty_bucket}",
                         flush=True,
                     )
-                prepared_graphs.append((graph, query_nodes))
-
-        if use_llm_polish:
-            all_query_nodes = [query for _, query_nodes in prepared_graphs for query in query_nodes]
-            polished_map = asyncio.run(
-                self.polish_queries_with_llm(
-                    query_nodes=all_query_nodes,
-                    model_name=polish_model_name,
-                    api_keys=api_keys,
-                    max_concurrent_per_key=max_concurrent_per_key,
-                    max_retries=max_retries,
-                )
-            )
-            dropped = 0
-            for _, query_nodes in prepared_graphs:
-                kept_nodes: List[Dict[str, Any]] = []
-                for q in query_nodes:
-                    qid = str(q.get("query_id", ""))
-                    polished = polished_map.get(qid) or {}
-                    polished_query = _norm(polished.get("query", ""))
-                    if polished_query:
-                        q["query"] = polished_query
-                        q["per_target_queries"] = polished.get("target_queries", {})
-                        q["llm_polished"] = True
-                        kept_nodes.append(q)
-                    else:
-                        dropped += 1
-                query_nodes[:] = kept_nodes
-            if dropped > 0:
-                print(f"[query_cpsat] llm_generation_drop: dropped={dropped}", flush=True)
-
-        graph_count = 0
-        record_count = 0
-        with out_path.open("w", encoding="utf-8") as fout:
-            for graph, query_nodes in prepared_graphs:
+                if use_llm_polish and query_nodes:
+                    polished_map = asyncio.run(
+                        self.polish_queries_with_llm(
+                            query_nodes=query_nodes,
+                            model_name=polish_model_name,
+                            api_keys=api_keys,
+                            max_concurrent_per_key=max_concurrent_per_key,
+                            max_retries=max_retries,
+                        )
+                    )
+                    kept_nodes: List[Dict[str, Any]] = []
+                    dropped = 0
+                    for q in query_nodes:
+                        qid = str(q.get("query_id", ""))
+                        polished = polished_map.get(qid) or {}
+                        polished_query = _norm(polished.get("query", ""))
+                        if polished_query:
+                            q["query"] = polished_query
+                            q["per_target_queries"] = polished.get("target_queries", {})
+                            q["llm_polished"] = True
+                            kept_nodes.append(q)
+                        else:
+                            dropped += 1
+                    query_nodes = kept_nodes
+                    if dropped > 0:
+                        print(f"[query_cpsat] llm_generation_drop: dropped={dropped}", flush=True)
                 records = self._build_minimal_records(graph, query_nodes)
                 for record in records:
                     fout.write(json.dumps(record, ensure_ascii=False) + "\n")

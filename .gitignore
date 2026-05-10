@@ -24,8 +24,6 @@ anno_videos/
 BREEDS-Benchmarks/
 CLIP/
 .gitmodules
-.codex
-autoresearch/
 
 # C extensions
 *.so
@@ -75,7 +73,6 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
-test/
 
 # Translations
 *.mo
