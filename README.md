@@ -4,7 +4,7 @@
 
 `eval/main.py` is the unified entry point. The current code supports:
 
-- Models: `qwen2.5vl` / `qwen3vl` / `llava-st-qwen2` / `videomolmo` / `cgstvg` / `tastvg`
+- Models: `qwen2.5vl` / `qwen3vl` / `llava-st-qwen2` / `llava16` / `videochat-r1` / `videomolmo`(waiting for processing) / `cgstvg` / `tastvg` / `tubedetr` / `groundinggpt`(waiting for processing) 
 - Datasets: `hcstvg`, `vidstg`, `doro-stvg`
 
 
@@ -13,9 +13,13 @@ environment and launch script:
 
 - Qwen-VL: `envs/eval/qwen`, `eval/scripts/run_qwen.sh`
 - LLaVA-ST-Qwen2: `envs/eval/llavast`, `eval/scripts/run_llavast.sh`
+- LLaVA-1.6: `envs/eval/llava16`, `eval/scripts/run_llava16.sh`
+- VideoChat-R1: `envs/eval/videochat_r1`, `eval/scripts/run_videochat_r1.sh`
 - VideoMolmo: `envs/eval/videomolmo`, `eval/scripts/run_videomolmo.sh`
 - CG-STVG: `envs/eval/cgstvg`, `eval/scripts/run_cgstvg.sh`
 - TA-STVG: `envs/eval/tastvg`, `eval/scripts/run_tastvg.sh`
+- TubeDETR: `envs/eval/tubedetr`, `eval/scripts/run_tubedetr.sh`
+- GroundingGPT: `envs/eval/groundinggpt`, `eval/scripts/run_groundinggpt.sh`
 
 Edit the corresponding script directly to change model paths, annotation paths,
 video paths, GPU id, and output paths.
@@ -67,18 +71,26 @@ conflicts:
 cd /home/wangxingjian/DORO-STVG
 UV_LINK_MODE=copy uv sync --project envs/eval/qwen
 UV_LINK_MODE=copy uv sync --project envs/eval/llavast
+UV_LINK_MODE=copy uv sync --project envs/eval/llava16
+UV_LINK_MODE=copy uv sync --project envs/eval/videochat_r1
 UV_LINK_MODE=copy uv sync --project envs/eval/videomolmo
 UV_LINK_MODE=copy uv sync --project envs/eval/cgstvg
 UV_LINK_MODE=copy uv sync --project envs/eval/tastvg
+UV_LINK_MODE=copy uv sync --project envs/eval/tubedetr
+UV_LINK_MODE=copy uv sync --project envs/eval/groundinggpt
 ```
 
 Use `envs/eval/qwen` for Qwen-VL models and `envs/eval/llavast` for
-LLaVA-ST-Qwen2. Use `envs/eval/videomolmo` for the VideoMolmo wrapper.
+LLaVA-ST-Qwen2. Use `envs/eval/llava16` for LLaVA-1.6 and
+`envs/eval/videochat_r1` for VideoChat-R1. Use `envs/eval/videomolmo` for the
+VideoMolmo wrapper.
 LLaVA-ST and VideoMolmo are not vendored in this repository.
 Use `envs/eval/cgstvg` and `envs/eval/tastvg` for the lightweight framework
 wrappers around external CG-STVG and TA-STVG checkouts. These environments only
 run the DORO-STVG evaluation framework; the official model runtimes stay in
 their own external repositories.
+Use `envs/eval/tubedetr` for TubeDETR and `envs/eval/groundinggpt` for the
+GroundingGPT wrapper.
 
 After syncing `envs/eval/llavast`, install an external LLaVA-ST checkout into
 that environment:
@@ -203,6 +215,22 @@ export LLAVA_ST_SOURCE_DIR=/path/to/LLaVA-ST
 bash scripts/run_llavast.sh
 ```
 
+For LLaVA-1.6:
+
+```bash
+cd /home/wangxingjian/DORO-STVG/eval
+source ../envs/eval/llava16/.venv/bin/activate
+bash scripts/run_llava16.sh
+```
+
+For VideoChat-R1:
+
+```bash
+cd /home/wangxingjian/DORO-STVG/eval
+source ../envs/eval/videochat_r1/.venv/bin/activate
+bash scripts/run_videochat_r1.sh
+```
+
 For VideoMolmo:
 
 ```bash
@@ -225,6 +253,22 @@ For TA-STVG:
 cd /home/wangxingjian/DORO-STVG/eval
 source ../envs/eval/tastvg/.venv/bin/activate
 bash scripts/run_tastvg.sh
+```
+
+For TubeDETR:
+
+```bash
+cd /home/wangxingjian/DORO-STVG/eval
+source ../envs/eval/tubedetr/.venv/bin/activate
+bash scripts/run_tubedetr.sh
+```
+
+For GroundingGPT:
+
+```bash
+cd /home/wangxingjian/DORO-STVG/eval
+source ../envs/eval/groundinggpt/.venv/bin/activate
+bash scripts/run_groundinggpt.sh
 ```
 
 If you prefer not to use the shell script, you can call the entry point directly:
