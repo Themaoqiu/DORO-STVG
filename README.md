@@ -4,7 +4,7 @@
 
 `eval/main.py` is the unified entry point. The current code supports:
 
-- Models: `qwen2.5vl` / `qwen3vl` / `llava-st-qwen2` / `llava16` / `videochat-r1` / `videomolmo`(waiting for processing) / `cgstvg` / `tastvg` / `tubedetr` / `groundinggpt`(waiting for processing) 
+- Models: `qwen2.5vl` / `qwen3vl` / `llava-st-qwen2` / `llava16` / `videochat-r1` / `videomolmo`(waiting for processing) / `cgstvg` / `tastvg` / `tubedetr` / `groundinggpt`
 - Datasets: `hcstvg`, `vidstg`, `doro-stvg`
 
 

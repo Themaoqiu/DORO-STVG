@@ -5,10 +5,9 @@ REPO_ROOT="$(cd "$EVAL_DIR/.." && pwd)"
 
 VISIBLE_GPUS=3
 MODEL_NAME="groundinggpt"
-EVAL_PYTHON="${EVAL_PYTHON:-$REPO_ROOT/envs/eval/groundinggpt/.venv/bin/python}"
-GROUNDINGGPT_SOURCE_DIR="${GROUNDINGGPT_SOURCE_DIR:-/mnt/sdc/xingjianwang/yibowang/GroundingGPT}"
-GROUNDINGGPT_PYTHON="${GROUNDINGGPT_PYTHON:-$GROUNDINGGPT_SOURCE_DIR/.venv/bin/python}"
-MODEL_PATH="${MODEL_PATH:-/mnt/sdc/xingjianwang/yibowang/GroundingGPT/ckpt/GroundingGPT-7B}"
+GROUNDINGGPT_SOURCE_DIR="${GROUNDINGGPT_SOURCE_DIR:-/mnt/sdc/xingjianwang/yibowang/DORO-STVG-groundingGPT}"
+GROUNDINGGPT_PYTHON="${GROUNDINGGPT_PYTHON:-$REPO_ROOT/envs/eval/groundinggpt/.venv/bin/python}"
+MODEL_PATH="${MODEL_PATH:-/mnt/sdc/xingjianwang/yibowang/model_zoo/GroundingGPT}"
 DATA_NAME="doro-stvg"
 ANNOTATION_PATH="/mnt/sdc/xingjianwang/yibowang/datasets/ST-Align-Benchmark/query_train_for_eval_3uniq.jsonl"
 VIDEO_DIR="/mnt/sdc/xingjianwang/yibowang/datasets/ST-Align-Benchmark/video_test1_smoke"
@@ -19,7 +18,7 @@ MAX_MODEL_LEN=8192
 TEMPERATURE="${TEMPERATURE:-0.01}"
 TENSOR_PARALLEL_SIZE=1
 GPU_MEMORY_UTILIZATION=0.9
-GROUNDINGGPT_MAX_NEW_TOKENS="${GROUNDINGGPT_MAX_NEW_TOKENS:-2048}"
+GROUNDINGGPT_MAX_NEW_TOKENS="${GROUNDINGGPT_MAX_NEW_TOKENS:-1024}"
 GROUNDINGGPT_KEEP_LOGS="${GROUNDINGGPT_KEEP_LOGS:-0}"
 GROUNDINGGPT_PERSISTENT_CLI="${GROUNDINGGPT_PERSISTENT_CLI:-1}"
 
@@ -28,7 +27,6 @@ echo "GroundingGPT Evaluation Configuration"
 echo "=========================================="
 echo "Model Name:              $MODEL_NAME"
 echo "Model Path:              $MODEL_PATH"
-echo "Eval Python:             $EVAL_PYTHON"
 echo "GroundingGPT Source Dir: $GROUNDINGGPT_SOURCE_DIR"
 echo "GroundingGPT Python:     $GROUNDINGGPT_PYTHON"
 echo "Annotation Path:         $ANNOTATION_PATH"
@@ -44,18 +42,6 @@ echo "Visible GPUs:            $VISIBLE_GPUS"
 echo "=========================================="
 echo ""
 
-if [ ! -x "$EVAL_PYTHON" ]; then
-  echo "Missing eval python: $EVAL_PYTHON" >&2
-  echo "Create it with: uv sync --project $REPO_ROOT/envs/eval/groundinggpt" >&2
-  exit 1
-fi
-
-if [ ! -x "$GROUNDINGGPT_PYTHON" ]; then
-  echo "Missing GroundingGPT python: $GROUNDINGGPT_PYTHON" >&2
-  echo "Set GROUNDINGGPT_PYTHON to the external python that can import torch and GroundingGPT dependencies." >&2
-  exit 1
-fi
-
 CUDA_VISIBLE_DEVICES="$VISIBLE_GPUS" \
 GROUNDINGGPT_SOURCE_DIR="$GROUNDINGGPT_SOURCE_DIR" \
 GROUNDINGGPT_PYTHON="$GROUNDINGGPT_PYTHON" \
@@ -64,7 +50,7 @@ GROUNDINGGPT_MAX_NEW_TOKENS="$GROUNDINGGPT_MAX_NEW_TOKENS" \
 GROUNDINGGPT_TEMPERATURE="$TEMPERATURE" \
 GROUNDINGGPT_KEEP_LOGS="$GROUNDINGGPT_KEEP_LOGS" \
 GROUNDINGGPT_PERSISTENT_CLI="$GROUNDINGGPT_PERSISTENT_CLI" \
-"$EVAL_PYTHON" main.py run \
+"$REPO_ROOT/envs/eval/groundinggpt/.venv/bin/python" main.py run \
   --model_name="$MODEL_NAME" \
   --model_path="$MODEL_PATH" \
   --data_name="$DATA_NAME" \
