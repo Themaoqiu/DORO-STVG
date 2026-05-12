@@ -5,6 +5,7 @@ __all__ = [
     "VTimeLLMModel",
     "Llava16Model",
     "VideoChatR1",
+    "STVGR1",
     "GroundingGPTModel",
     "VideoMolmoModel",
     "CGSTVGModel",
@@ -33,6 +34,11 @@ def __getattr__(name):
         from .llava16 import Llava16Model
 
         return Llava16Model
+
+    if name == "STVGR1":
+        from .stvg_r1 import STVGR1
+
+        return STVGR1
 
     if name == "VideoChatR1":
         from .videochat_r1 import VideoChatR1

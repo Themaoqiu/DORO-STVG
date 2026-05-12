@@ -89,6 +89,18 @@ class STVGEvaluator:
                 gpu_memory_utilization=gpu_memory_utilization,
             )
 
+        if name in ['stvg-r1', 'stvg_r1', 'stvgr1']:
+            from models.stvg_r1 import STVGR1
+            return STVGR1(
+                model_path=model_path,
+                batch_size=batch_size,
+                max_tokens=max_tokens,
+                max_model_len=max_model_len,
+                temperature=temperature,
+                tensor_parallel_size=tensor_parallel_size,
+                gpu_memory_utilization=gpu_memory_utilization,
+            )
+
         if name in ['videochat-r1', 'videochat_r1', 'videochatr1']:
             from models.videochat_r1 import VideoChatR1
             return VideoChatR1(

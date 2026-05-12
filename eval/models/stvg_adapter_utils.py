@@ -174,3 +174,20 @@ def _remap_frame_map(frame_map: Dict[int, List[float]], original_indices: List[i
             continue
         remapped[str(original_frame_idx)] = normalized
     return remapped
+
+def _sample_output_positions(num_frames: int, max_points: int = 8) -> List[int]:
+    if num_frames <= 0:
+        return []
+    if max_points <= 0 or num_frames <= max_points:
+        return list(range(num_frames))
+
+    positions = np.linspace(0, num_frames - 1, num=max_points)
+    sampled = [int(round(v)) for v in positions]
+    deduped: List[int] = []
+    seen = set()
+    for idx in sampled:
+        idx = max(0, min(num_frames - 1, idx))
+        if idx not in seen:
+            deduped.append(idx)
+            seen.add(idx)
+    return deduped

@@ -478,3 +478,14 @@ The converter writes a dummy `fps=1.0` only to satisfy the official VidSTG annot
   only keeps the adapter, script, and lightweight wrapper environment.
 - `eval/prompts.py` is not modified. The adapter normalizes JSON frame-to-box
   output and computes metrics in the shared DORO-STVG framework.
+
+
+### STVG-R1
+
+- Model name: `stvg-r1`
+- Environment: `envs/eval/stvg_r1`
+- Script: `eval/scripts/run_stvg_r1.sh`
+- Default model path: `/mnt/sdc/xingjianwang/yibowang/model_zoo/stvg-r1-model-7b`
+- The wrapper follows the Qwen2.5-VL-style `vLLM` video path with `qwen_vl_utils`.
+- `eval/prompts.py` is not modified. The adapter samples the input video into a temporary clip, asks STVG-R1 to return STVG-friendly output, parses JSON/frame/time fallbacks, and remaps sampled clip frame ids back to original video frame ids.
+- Fairness note: STVG-R1 is evaluated with the same DORO-STVG annotations, videos, shared prompt template, and metrics as Qwen, and the adapter does not use ground-truth boxes. The main adapter-specific difference is that it samples each video into a temporary 32-frame clip and appends output-format constraints so STVG-R1 responses can be normalized into the framework's frame-to-box JSON format. For strict paper-level comparisons, report these sampling/output-normalization details and consider matching Qwen's video sampling settings.
