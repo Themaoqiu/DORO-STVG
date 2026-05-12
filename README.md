@@ -329,9 +329,38 @@ uv run --project ../envs/eval/llavast python main.py run \
 In that smoke set, `3783730077.mp4` is missing from `video_test1_smoke`, so the
 run loads two samples and skips one missing video.
 
-VideoMolmo writes point outputs through its external `infer.py`. The evaluation
-wrapper extracts frames with `ffmpeg`, reads VideoMolmo point outputs, converts
-points into small normalized boxes, and leaves the shared STVG prompt unchanged.
+VideoMolmo predicts points and uses SAM2 to produce masks through its external
+`infer.py`. The evaluation wrapper extracts frames with `ffmpeg`, runs
+VideoMolmo, first tries to read final mask outputs and convert each mask to its
+minimum enclosing normalized bbox, and then returns the shared STVG JSON format.
+
+There are two prompt layers in this integration:
+
+1. The framework has one public STVG prompt type in `eval/prompts.py`: a shared
+   bbox JSON prompt used by all JSON-capable models.
+2. The VideoMolmo adapter has one model-specific internal prompt type: a
+   `point to ...` prompt used only before calling external VideoMolmo `infer.py`.
+
+The public evaluation prompt in `eval/prompts.py` is not modified. Most
+generative VLM adapters, such as LLaVA-ST-Qwen2 and VideoChat-R1, should keep the
+shared framework prompt and only parse their generated text back into the shared
+frame-to-bbox format. VideoMolmo is different because its official interface is
+not a bbox JSON generator: it expects a pointing instruction, emits Molmo point
+tokens, and then uses SAM2 to propagate masks. Passing the long STVG JSON prompt
+directly to VideoMolmo can produce no `<point ...>` output, leaving
+`points.jsonl` empty and returning `{}`.
+
+For this reason, `eval/scripts/run_videomolmo.sh` enables
+`VIDEOMOLMO_USE_POINT_PROMPT=1`, which lets the VideoMolmo adapter convert the
+wrapped STVG query into a model-native prompt such as `point to the person
+holding the black camera` before calling external `infer.py`. This is an adapter
+compatibility step, not a change to the common evaluation prompt. The adapter
+must still convert the final masks back to normalized STVG boxes and score them
+with the same metrics. Set `VIDEOMOLMO_USE_POINT_PROMPT=0` to pass the unchanged
+STVG bbox prompt through for ablations.
+
+If no mask output is found, the wrapper falls back to reading `points.jsonl` and
+expanding points into small normalized boxes for debugging only.
 
 `VIDEOMOLMO_ALLOW_LOG_FALLBACK` is disabled by default. It can parse JSON from
 VideoMolmo logs for debugging, but it may also capture JSON examples from the
@@ -342,23 +371,50 @@ Current VideoMolmo status and caveats:
 
 - The framework integration has been smoke-tested through the external
   VideoMolmo `infer.py` subprocess. The wrapper can launch inference, extract
-  frames, locate `points.jsonl`, and convert point outputs into the shared STVG
-  prediction format.
+  frames, locate mask outputs when the external runtime saves them, convert
+  masks to the shared STVG bbox prediction format, and fall back to
+  `points.jsonl` point boxes when masks are unavailable.
+- VideoMolmo's paper reports point and mask metrics, not STVG bbox metrics. This
+  integration adapts VideoMolmo to STVG by converting SAM2 final masks to
+  minimum enclosing boxes before computing `tIoU`, `vIoU`, `vIoU@0.3`, and
+  `vIoU@0.5`.
+- Prompt handling is intentionally model-specific: the framework still has one
+  shared bbox JSON prompt, while the VideoMolmo adapter may translate that prompt
+  into a `point to ...` instruction because VideoMolmo's expected output is a
+  point that seeds SAM2, not JSON boxes.
+- Server debugging showed that the VideoMolmo checkpoint can generate point
+  predictions on the official `examples/video_sample1`, and SAM2 can generate a
+  non-empty mask when the same point is passed directly to
+  `build_sam2_video_predictor`. The all-black PNG symptom was confirmed to be
+  in the external `infer.py` mask saving/post-processing path. After resizing
+  squeezed SAM2 masks back to the original frame size before saving, the official
+  example produced non-empty mask PNGs and the DORO-STVG wrapper converted them
+  into STVG boxes.
+- The external VideoMolmo `infer.py` fix is local to that external checkout, not
+  vendored in this repository. The relevant saving logic should squeeze SAM2 mask
+  tensors, convert them to a 2D boolean mask, resize them to the original
+  `(height, width)` with nearest-neighbor interpolation when needed, OR multiple
+  object masks together, and save the final PNG. Without this fix, VideoMolmo can
+  produce valid points while all saved PNG masks remain black, which makes the
+  DORO-STVG wrapper return no mask boxes.
+- The smoke test is considered healthy when the log shows `Point Prompt: 1`,
+  `prompt=point to ...`, and `Converted ... VideoMolmo mask frames to STVG
+  boxes`. In the server smoke run, the two available videos converted 10 and 37
+  mask frames respectively and produced non-empty STVG predictions.
 - VideoMolmo's runtime environment is sensitive to server-specific torch, CUDA,
   bitsandbytes, accelerate, Molmo, and SAM2 versions. On a new server, use a
   `VIDEOMOLMO_PYTHON` where CUDA is available and the VideoMolmo/Molmo/SAM2
   imports work.
-- The shared STVG prompt is not modified by the wrapper. With the unmodified
-  STVG JSON-style prompt, the current VideoMolmo `infer.py` may run but produce
-  an empty `points.jsonl`, resulting in `{}` predictions and zero metrics.
+- With `VIDEOMOLMO_USE_POINT_PROMPT=0`, the unmodified STVG JSON-style prompt
+  may make VideoMolmo produce no point output, no mask output, and an empty
+  `points.jsonl`, resulting in `{}` predictions and zero metrics.
 - Enabling `VIDEOMOLMO_ALLOW_LOG_FALLBACK=1` can recover JSON-looking text from
   logs, but this may be the JSON example embedded in the prompt rather than a
   real model prediction. Do not report metrics from fallback outputs without
   manual inspection.
-- For meaningful VideoMolmo scores, either the external VideoMolmo inference
-  code must produce real point outputs for the shared STVG prompt, or a
-  deliberate VideoMolmo-specific point prompt must be enabled and documented.
-  The latter changes prompting behavior and is therefore not enabled by default.
+- For meaningful VideoMolmo scores, use the documented
+  `VIDEOMOLMO_USE_POINT_PROMPT=1` path and report that VideoMolmo was evaluated
+  through its point-to-SAM2-mask pipeline before mask-to-bbox STVG scoring.
 
 ### 4.2 Run the Data Engine
 

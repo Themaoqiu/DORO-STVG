@@ -6,13 +6,17 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from PIL import Image
 
 
 logger = logging.getLogger(__name__)
 os.environ["DECORD_EOF_RETRY_MAX"] = "20480"
+
+MASK_FILE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".npy"}
+MASK_PATH_HINTS = {"mask", "masks", "seg", "segs", "segmentation", "segmentations"}
+MASK_SKIP_HINTS = {"vis", "visual", "visualization", "overlay", "overlays", "frame", "frames", "point", "points"}
 
 
 def _extract_frames(video_path: str, out_dir: Path, max_frames: int, sample_fps: float) -> Tuple[int, int]:
@@ -75,6 +79,71 @@ def _extract_xy_from_point_text(text: str) -> Optional[Tuple[float, float]]:
         return None
     return (px, py)
 
+
+
+def _recover_query_from_stvg_prompt(query_text: str) -> str:
+    text = str(query_text or "").strip()
+    match = re.search(r"Where does\s+(.+?)\s+occur in the video\?", text, flags=re.DOTALL | re.IGNORECASE)
+    if match:
+        return " ".join(match.group(1).split())
+    return text
+
+
+def _strip_question_prefix(query: str) -> str:
+    text = " ".join(str(query or "").strip().split())
+    if not text:
+        return text
+    lowered = text.lower()
+    for prefix in ("who is ", "who ", "what is ", "what ", "which is ", "which "):
+        if lowered.startswith(prefix):
+            return text[len(prefix):].strip(" ?.")
+    return text.strip(" ?.")
+
+
+def _verb_to_gerund(phrase: str) -> str:
+    words = phrase.split(maxsplit=1)
+    if not words:
+        return phrase
+
+    verb = words[0]
+    rest = words[1] if len(words) > 1 else ""
+    irregular = {
+        "has": "having",
+        "is": "",
+        "are": "",
+        "does": "doing",
+    }
+    lowered = verb.lower()
+    if lowered in irregular:
+        converted = irregular[lowered]
+    elif lowered.endswith("ies") and len(lowered) > 3:
+        converted = verb[:-3] + "ying"
+    elif lowered.endswith("es") and len(lowered) > 3:
+        converted = verb[:-2] + "ing"
+    elif lowered.endswith("s") and len(lowered) > 2:
+        converted = verb[:-1] + "ing"
+    elif lowered.endswith("e") and len(lowered) > 2:
+        converted = verb[:-1] + "ing"
+    elif lowered.endswith("ing"):
+        converted = verb
+    else:
+        converted = verb + "ing"
+
+    return " ".join(part for part in (converted, rest) if part).strip()
+
+
+def _build_point_prompt(query_text: str) -> str:
+    raw_query = _recover_query_from_stvg_prompt(query_text)
+    target = _strip_question_prefix(raw_query)
+    if not target:
+        return raw_query
+
+    lowered = raw_query.lower().strip()
+    if lowered.startswith("who "):
+        if not lowered.startswith("who is ") and not lowered.startswith("who are "):
+            target = _verb_to_gerund(target)
+        return f"point to the person {target}"
+    return f"point to the {target}"
 
 def _collect_points(payload) -> List[Tuple[int, float, float]]:
     """Collect (frame_idx, x, y) tuples from flexible points.jsonl schemas."""
@@ -164,6 +233,197 @@ def _point_to_box(x: float, y: float, width: int, height: int, half_side: float)
     y2 = min(1.0, y + half_side)
     return [x1, y1, x2, y2]
 
+
+
+def _batched_mask_to_box(masks):
+    import torch
+
+    if torch.numel(masks) == 0:
+        return torch.zeros(*masks.shape[:-2], 4, device=masks.device)
+
+    shape = masks.shape
+    h, w = shape[-2:]
+    if len(shape) > 2:
+        masks = masks.flatten(0, -3)
+    else:
+        masks = masks.unsqueeze(0)
+
+    masks = masks.bool()
+    in_height = masks.any(dim=-1)
+    y_coords = in_height * torch.arange(h, device=masks.device)[None, :]
+    bottom_edges = y_coords.max(dim=-1).values
+    top_edges = (y_coords + h * (~in_height)).min(dim=-1).values
+
+    in_width = masks.any(dim=-2)
+    x_coords = in_width * torch.arange(w, device=masks.device)[None, :]
+    right_edges = x_coords.max(dim=-1).values
+    left_edges = (x_coords + w * (~in_width)).min(dim=-1).values
+
+    empty = (right_edges < left_edges) | (bottom_edges < top_edges)
+    boxes = torch.stack([left_edges, top_edges, right_edges, bottom_edges], dim=-1)
+    boxes = boxes * (~empty).unsqueeze(-1)
+
+    if len(shape) > 2:
+        return boxes.reshape(*shape[:-2], 4)
+    return boxes[0]
+
+
+def _normalize_pixel_box(box, width: int, height: int) -> Optional[List[float]]:
+    x1, y1, x2, y2 = [float(v) for v in box]
+    return [
+        max(0.0, min(1.0, x1 / max(width, 1))),
+        max(0.0, min(1.0, y1 / max(height, 1))),
+        max(0.0, min(1.0, (x2 + 1.0) / max(width, 1))),
+        max(0.0, min(1.0, (y2 + 1.0) / max(height, 1))),
+    ]
+
+
+def _frame_index_from_path(path: Path) -> Optional[int]:
+    matches = re.findall(r"\d+", path.stem)
+    if not matches:
+        return None
+    frame_idx = _maybe_int(matches[-1])
+    if frame_idx is None:
+        return None
+    if path.stem.lower().startswith("frame_") and frame_idx > 0:
+        return frame_idx - 1
+    return frame_idx
+
+
+def _path_has_mask_hint(path: Path, root: Path) -> bool:
+    try:
+        rel_parts = path.relative_to(root).parts
+    except ValueError:
+        rel_parts = path.parts
+    tokens = {part.lower() for part in rel_parts[:-1]}
+    stem_tokens = set(re.split(r"[_\-.]+", path.stem.lower()))
+    all_tokens = tokens | stem_tokens
+    if all_tokens & MASK_SKIP_HINTS and not (all_tokens & MASK_PATH_HINTS):
+        return False
+    return bool(all_tokens & MASK_PATH_HINTS)
+
+
+def _iter_mask_files(out_dir: Path, frames_dir_name: str) -> Iterable[Path]:
+    search_roots = [out_dir / frames_dir_name, out_dir]
+    seen = set()
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in MASK_FILE_SUFFIXES:
+                continue
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if path.parent == root and root.name == frames_dir_name:
+                yield path
+                continue
+            if _path_has_mask_hint(path, root):
+                yield path
+
+
+def _mask_image_to_box(path: Path, width: int, height: int) -> Optional[List[float]]:
+    with Image.open(path) as im:
+        mask = im.convert("L")
+        try:
+            import torch
+
+            mask_tensor = torch.as_tensor(list(mask.getdata()), dtype=torch.bool).reshape(mask.height, mask.width)
+            if not mask_tensor.any().item():
+                return None
+            box = _batched_mask_to_box(mask_tensor).tolist()
+            return _normalize_pixel_box(box, width, height)
+        except Exception:
+            box = mask.point(lambda px: 255 if px > 0 else 0).getbbox()
+    if box is None:
+        return None
+    x1, y1, x2, y2 = box
+    return [
+        max(0.0, min(1.0, x1 / max(width, 1))),
+        max(0.0, min(1.0, y1 / max(height, 1))),
+        max(0.0, min(1.0, x2 / max(width, 1))),
+        max(0.0, min(1.0, y2 / max(height, 1))),
+    ]
+
+
+def _mask_array_to_boxes(path: Path, width: int, height: int) -> Dict[str, List[float]]:
+    try:
+        import numpy as np
+    except ImportError:
+        logger.warning("Cannot read %s because numpy is not installed.", path)
+        return {}
+
+    try:
+        arr = np.load(path, allow_pickle=False)
+    except Exception as exc:
+        logger.warning("Cannot load mask array %s: %s", path, exc)
+        return {}
+
+    if arr.ndim < 2:
+        return {}
+    if arr.ndim == 2:
+        arr = arr[None, ...]
+    elif arr.shape[-1] in (1, 3, 4) and arr.ndim == 3:
+        arr = arr[..., 0][None, ...]
+    else:
+        arr = arr.reshape((-1, arr.shape[-2], arr.shape[-1]))
+
+    frame_start = _frame_index_from_path(path)
+    if frame_start is None:
+        frame_start = 0
+
+    boxes: Dict[str, List[float]] = {}
+    try:
+        import torch
+
+        mask_tensor = torch.as_tensor(arr > 0)
+        mask_boxes = _batched_mask_to_box(mask_tensor).reshape(-1, 4).tolist()
+        non_empty = mask_tensor.reshape(-1, mask_tensor.shape[-2] * mask_tensor.shape[-1]).any(dim=1).tolist()
+        for offset, box in enumerate(mask_boxes):
+            if not non_empty[offset]:
+                continue
+            normalized = _normalize_pixel_box(box, width, height)
+            if normalized is not None:
+                boxes[str(frame_start + offset)] = normalized
+        return boxes
+    except Exception:
+        pass
+
+    for offset, mask in enumerate(arr):
+        ys, xs = np.where(mask > 0)
+        if len(xs) == 0 or len(ys) == 0:
+            continue
+        boxes[str(frame_start + offset)] = [
+            max(0.0, min(1.0, float(xs.min()) / max(width, 1))),
+            max(0.0, min(1.0, float(ys.min()) / max(height, 1))),
+            max(0.0, min(1.0, float(xs.max() + 1) / max(width, 1))),
+            max(0.0, min(1.0, float(ys.max() + 1) / max(height, 1))),
+        ]
+    return boxes
+
+
+def _read_mask_boxes(out_dir: Path, frames_dir_name: str, width: int, height: int) -> Dict[str, List[float]]:
+    frame_to_box: Dict[str, List[float]] = {}
+    mask_files = sorted(_iter_mask_files(out_dir, frames_dir_name))
+    if not mask_files:
+        return frame_to_box
+
+    logger.info("Found %d candidate VideoMolmo mask files under %s", len(mask_files), out_dir)
+    for path in mask_files:
+        suffix = path.suffix.lower()
+        if suffix == ".npy":
+            frame_to_box.update(_mask_array_to_boxes(path, width, height))
+            continue
+
+        frame_idx = _frame_index_from_path(path)
+        if frame_idx is None:
+            continue
+        box = _mask_image_to_box(path, width, height)
+        if box is not None:
+            frame_to_box[str(frame_idx)] = box
+
+    return dict(sorted(frame_to_box.items(), key=lambda item: int(item[0])))
 
 def _normalize_frame_boxes(frame_map: Dict) -> Dict[str, List[float]]:
     normalized: Dict[str, List[float]] = {}
@@ -284,6 +544,7 @@ class VideoMolmoModel:
         self.box_half = float(os.getenv("VIDEOMOLMO_POINT_BOX_HALF", "0.04"))
         self.keep_tmp = os.getenv("VIDEOMOLMO_KEEP_TMP", "0").lower() in {"1", "true", "yes"}
         self.allow_log_fallback = os.getenv("VIDEOMOLMO_ALLOW_LOG_FALLBACK", "0").lower() in {"1", "true", "yes"}
+        self.use_point_prompt = os.getenv("VIDEOMOLMO_USE_POINT_PROMPT", "0").lower() in {"1", "true", "yes"}
         self.python_bin = os.getenv("VIDEOMOLMO_PYTHON", "python")
 
         repo = os.getenv("VIDEOMOLMO_REPO")
@@ -316,7 +577,7 @@ class VideoMolmoModel:
 
         try:
             width, height = _extract_frames(video_path, frames_dir, self.max_frames, self.sample_fps)
-            prompt_for_infer = query.strip() if query else query
+            prompt_for_infer = _build_point_prompt(query) if self.use_point_prompt else (query.strip() if query else query)
 
             cmd = [
                 self.python_bin,
@@ -359,6 +620,15 @@ class VideoMolmoModel:
 
                 logs = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
                 last_logs = logs
+
+                mask_frame_to_box = _read_mask_boxes(out_dir, frames_dir.name, width, height)
+                if mask_frame_to_box:
+                    logger.info(
+                        "Converted %d VideoMolmo mask frames to STVG boxes for %s",
+                        len(mask_frame_to_box),
+                        video_path,
+                    )
+                    return json.dumps({"target": mask_frame_to_box}, ensure_ascii=False)
 
                 points_file = out_dir / frames_dir.name / "points.jsonl"
                 if not points_file.exists():

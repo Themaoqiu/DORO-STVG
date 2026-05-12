@@ -2,6 +2,7 @@ __all__ = [
     "Qwen2_5VL",
     "Qwen3VL",
     "LlavaSTQwen2",
+    "VTimeLLMModel",
     "Llava16Model",
     "VideoChatR1",
     "GroundingGPTModel",
@@ -22,6 +23,11 @@ def __getattr__(name):
         from .llava_st import LlavaSTQwen2
 
         return LlavaSTQwen2
+
+    if name == "VTimeLLMModel":
+        from .vtimellm import VTimeLLMModel
+
+        return VTimeLLMModel
 
     if name == "Llava16Model":
         from .llava16 import Llava16Model
