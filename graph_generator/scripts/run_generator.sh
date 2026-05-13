@@ -12,6 +12,7 @@ if [ -f "${PROJECT_ROOT}/.env" ]; then
   set +a
 fi
 
+
 SAM2_MODEL_CFG="configs/sam2.1/sam2.1_hiera_l.yaml"
 SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/GroundedSAM2/checkpoints/sam2.1_hiera_large.pt"
 
@@ -114,7 +115,7 @@ SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/Grounde
 #   --with_reference True
 
 
-python -m query_generator \
+python -m /home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_22/query_generator_cpsat_round22.py \
   --input_path /home/wangxingjian/DORO-STVG/graph_generator/scene_graphs.jsonl \
   --output_path /home/wangxingjian/DORO-STVG/graph_generator/output/query3.jsonl \
   --time_limit_sec 3.0 \

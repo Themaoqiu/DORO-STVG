@@ -119,6 +119,13 @@ def _build_gt_tracks_from_target_members(item: Dict[str, Any]) -> List[Dict[str,
     return gt_tracks_sampled
 
 
+def _difficulty_value(item: Dict[str, Any], key: str) -> Any:
+    difficulty = item.get("Difficulty")
+    if isinstance(difficulty, dict) and key in difficulty:
+        return difficulty.get(key)
+    return item.get(key)
+
+
 class DOROSTVGPipeline(BasePipeline):
 
     def get_dataset_name(self) -> str:
@@ -162,9 +169,9 @@ class DOROSTVGPipeline(BasePipeline):
                         'queryid': item.get('queryid') or item.get('query_id', f'line_{line_idx}'),
                         'difficulty': item.get('Difficulty', {}),
                         'difficulty_bucket': item.get('difficulty_bucket'),
-                        'difficulty_score': item.get('D'),
-                        'difficulty_temporal': item.get('D_t'),
-                        'difficulty_spatial': item.get('D_s'),
+                        'difficulty_score': _difficulty_value(item, 'D'),
+                        'difficulty_temporal': _difficulty_value(item, 'D_t'),
+                        'difficulty_spatial': _difficulty_value(item, 'D_s'),
                         'template': item.get('template'),
                         'target_arity': item.get('target_arity'),
                         'width': item.get('Width') or item.get('video_width'),

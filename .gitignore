@@ -26,6 +26,7 @@ CLIP/
 .gitmodules
 .codex
 autoresearch/
+.claude/
 
 # C extensions
 *.so

@@ -1,6 +1,7 @@
-import argparse
 import math
 from pathlib import Path
+
+import fire
 
 
 def split_jsonl(input_path: Path, output_dir: Path, chunks: int) -> None:
@@ -19,15 +20,9 @@ def split_jsonl(input_path: Path, output_dir: Path, chunks: int) -> None:
         output_path.write_text("\n".join(chunk_lines) + ("\n" if chunk_lines else ""), encoding="utf-8")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, type=Path)
-    parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--chunks", required=True, type=int)
-    args = parser.parse_args()
-
-    split_jsonl(args.input, args.output_dir, args.chunks)
+def main(input: Path, output_dir: Path, chunks: int) -> None:
+    split_jsonl(input, output_dir, chunks)
 
 
 if __name__ == "__main__":
-    main()
+    fire.Fire(main)

@@ -230,6 +230,7 @@ def transform_record(
         "video_path": Path(video_path).name,
         "queryid": obj.get("query_id"),
         "query": obj.get("query"),
+        "difficulty_bucket": obj.get("difficulty_bucket"),
         "Difficulty": {
             "D_s": obj.get("D_s"),
             "D_t": obj.get("D_t"),

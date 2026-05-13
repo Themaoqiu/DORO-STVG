@@ -60,9 +60,81 @@ def _build_model(
             gpu_memory_utilization=gpu_memory_utilization,
         )
 
+    if name in ['llava16', 'llava-1.6', 'llava_16', 'llava-v1.6']:
+        from models.llava16 import Llava16Model
+        return Llava16Model(
+            model_path=model_path,
+            batch_size=batch_size,
+            max_tokens=max_tokens,
+            max_model_len=max_model_len,
+            temperature=temperature,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+        )
+
+    if name in ['videochat-r1', 'videochat_r1', 'videochatr1']:
+        from models.videochat_r1 import VideoChatR1
+        return VideoChatR1(
+            model_path=model_path,
+            batch_size=batch_size,
+            max_tokens=max_tokens,
+            max_model_len=max_model_len,
+            temperature=temperature,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+        )
+
+    if name in ['groundinggpt', 'grounding-gpt', 'grounding_gpt']:
+        from models.groundinggpt import GroundingGPTModel
+        return GroundingGPTModel(
+            model_path=model_path,
+            batch_size=batch_size,
+            max_tokens=max_tokens,
+            max_model_len=max_model_len,
+            temperature=temperature,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+        )
+
     if name in ['videomolmo', 'video-molmo', 'video_molmo', 'videomlomo']:
         from models.videomolmo import VideoMolmoModel
         return VideoMolmoModel(
+            model_path=model_path,
+            batch_size=batch_size,
+            max_tokens=max_tokens,
+            max_model_len=max_model_len,
+            temperature=temperature,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+        )
+
+    if name in ['cgstvg', 'cg-stvg', 'cg_stvg']:
+        from models.cgstvg import CGSTVGModel
+        return CGSTVGModel(
+            model_path=model_path,
+            batch_size=batch_size,
+            max_tokens=max_tokens,
+            max_model_len=max_model_len,
+            temperature=temperature,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+        )
+
+    if name in ['tastvg', 'ta-stvg', 'ta_stvg']:
+        from models.tastvg import TASTVGModel
+        return TASTVGModel(
+            model_path=model_path,
+            batch_size=batch_size,
+            max_tokens=max_tokens,
+            max_model_len=max_model_len,
+            temperature=temperature,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+        )
+
+    if name in ['tubedetr', 'tube-detr', 'tube_detr']:
+        from models.tubedetr import TubeDETRModel
+        return TubeDETRModel(
             model_path=model_path,
             batch_size=batch_size,
             max_tokens=max_tokens,

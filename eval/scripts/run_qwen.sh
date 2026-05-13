@@ -2,15 +2,15 @@
 set -euo pipefail
 
 export FORCE_QWENVL_VIDEO_READER=decord
-export CUDA_VISIBLE_DEVICES=7
+export CUDA_VISIBLE_DEVICES=0
 
 MODEL_NAME="qwen3.5"
 MODEL_PATH="/home/wangxingjian/model/qwen3.5-9b"
 DATA_NAME="doro-stvg"
-ANNOTATION_PATH="/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_17/query_eval.jsonl"
+ANNOTATION_PATH="/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_24/query_raw.jsonl"
 VIDEO_DIR="/home/wangxingjian/data/vidstg/video"
-OUTPUT_DIR="/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_17/eval"
-BATCH_SIZE=8
+OUTPUT_DIR="/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_24/eval"
+BATCH_SIZE=64
 MAX_TOKENS=4096
 MAX_MODEL_LEN=64000
 TEMPERATURE=0.1

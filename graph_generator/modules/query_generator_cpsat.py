@@ -22,28 +22,6 @@ CLUE_TYPES = ("cls", "app", "act", "seq", "spa", "env", "int")
 RELATION_SYNONYMS: Dict[str, str] = {}
 ATTRIBUTE_SYNONYMS: Dict[str, str] = {}
 
-DECORATION_POOL: Dict[str, Tuple[str, ...]] = {
-    "temporal": (
-        "within this time window",
-        "across this segment",
-    ),
-    "action": (
-        "following its visible behavior flow",
-        "under consistent motion context",
-    ),
-    "spatial": (
-        "with stable relative positioning cues",
-        "against nearby object context",
-    ),
-    "appearance": (
-        "with visually consistent appearance",
-        "using lightweight attribute hints",
-    ),
-    "neutral": (
-        "as the referred instance",
-    ),
-}
-
 QUERY_POLISH_SYSTEM_PROMPT = """## Role
 You are a precise Query Writer for spatiotemporal video grounding. Your task is
 to generate one natural, concise grounding query from structured clues while preserving
@@ -474,21 +452,6 @@ def _load_env_var_from_project_env(var_name: str) -> str:
     return ""
 
 
-def _clue_role_text(clue_type: str) -> str:
-    role_map = {
-        "cls": "class anchor: define object category",
-        "app": "appearance cue: visual attribute disambiguation",
-        "env": "context cue: scene or temporal-segment grounding",
-        "act": "action cue: dynamic behavior evidence",
-        "seq": "sequence cue: temporal order constraint",
-        "spa": "spatial cue: geometric/positional constraint",
-        "int": "interaction cue: relational interaction constraint",
-    }
-    return role_map.get(str(clue_type), "generic grounding cue")
-
-
-
-
 def _sample_class(obj: Dict[str, Any], node_id: str) -> str:
     cls = _norm(obj.get("dam_category") or obj.get("object_class") or "object").lower()
     if cls == "person" and str(node_id).lower().startswith("man"):
@@ -740,12 +703,16 @@ def _candidate_spatial_confusability(
     all_candidates: List[CandidateTarget],
     profile_map: Dict[str, CandidateProfile],
 ) -> Tuple[float, Dict[str, Any]]:
+    # D_s as softcount over aggregated spatial confusion mass:
+    #   X = sum_c ( sim_s(target, c) * tIoU(interval_t, interval_c) ) ** SPATIAL_EXPONENT
+    #   D_s = X / (1 + X)
+    # Squaring each competitor's contribution amplifies dominant near-duplicate
+    # distractors and attenuates many-weak-competitor inflation.
+    SPATIAL_EXPONENT = 2.0
     target_signature = _member_object_signature(candidate)
     target_tokens = _profile_spatial_tokens(profile_map[candidate.candidate_id])
-    best_score = 0.0
-    best_candidate_id = ""
-    best_similarity = 0.0
-    best_overlap = 0.0
+    mass = 0.0
+    best_pair = (0.0, "", 0.0, 0.0)  # (score, candidate_id, similarity, overlap)
     competitor_count = 0
 
     for other in all_candidates:
@@ -758,18 +725,20 @@ def _candidate_spatial_confusability(
             continue
         competitor_count += 1
         similarity = _jaccard_similarity(target_tokens, _profile_spatial_tokens(profile_map[other.candidate_id]))
-        score = math.sqrt(similarity * overlap)
-        if score > best_score:
-            best_score = score
-            best_candidate_id = other.candidate_id
-            best_similarity = similarity
-            best_overlap = overlap
+        contribution = similarity * overlap
+        if contribution <= 0.0:
+            continue
+        mass += contribution ** SPATIAL_EXPONENT
+        if contribution > best_pair[0]:
+            best_pair = (contribution, other.candidate_id, similarity, overlap)
 
-    return _clamp01(best_score), {
+    d_s = mass / (1.0 + mass)
+    return _clamp01(d_s), {
         "spatial_competitors": competitor_count,
-        "spatial_best_candidate_id": best_candidate_id,
-        "spatial_best_similarity": best_similarity,
-        "spatial_best_interval_overlap": best_overlap,
+        "spatial_confusion_mass": mass,
+        "spatial_best_candidate_id": best_pair[1],
+        "spatial_best_similarity": best_pair[2],
+        "spatial_best_interval_overlap": best_pair[3],
         "spatial_token_count": len(target_tokens),
     }
 
@@ -1176,7 +1145,6 @@ def _multi_interval_choices_for_combo(
 
 
 def build_candidate_intervals(
-    graph: Dict[str, Any],
     index: GraphIndex,
     min_interval_len: int = 3,
     max_intervals_per_object: int = 12,
@@ -1185,7 +1153,6 @@ def build_candidate_intervals(
     max_multi_intervals_per_group: int = 8,
     max_multi_candidates_total: int = 240,
 ) -> List[CandidateTarget]:
-    del graph
     candidates: List[CandidateTarget] = []
     object_intervals_by_obj: Dict[str, List[Tuple[int, int]]] = {}
 
@@ -1999,7 +1966,7 @@ def _compute_candidate_difficulty(
     meta = {
         "lambda_weight": lambda_weight,
         "arity": candidate.arity,
-        "difficulty_model": "hybrid_confusability_v2",
+        "difficulty_model": "hybrid_confusability_v2_spx2",
         "atomic_clue_count": len(clues),
     }
     meta.update(temporal_meta)
@@ -2458,7 +2425,6 @@ class CPSATQuerySampler:
     def generate_for_graph(self, graph: Dict[str, Any]) -> List[Dict[str, Any]]:
         self._index = build_graph_index(graph)
         candidates = build_candidate_intervals(
-            graph=graph,
             index=self._index,
             min_interval_len=self.min_interval_len,
             max_intervals_per_object=self.max_intervals_per_object,
