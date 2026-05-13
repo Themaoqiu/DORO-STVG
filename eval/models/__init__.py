@@ -3,6 +3,7 @@ __all__ = [
     "Qwen3VL",
     "LlavaSTQwen2",
     "VTimeLLMModel",
+    "GroundedVideoLLMModel",
     "Llava16Model",
     "VideoChatR1",
     "STVGR1",
@@ -29,6 +30,11 @@ def __getattr__(name):
         from .vtimellm import VTimeLLMModel
 
         return VTimeLLMModel
+
+    if name == "GroundedVideoLLMModel":
+        from .grounded_video_llm import GroundedVideoLLMModel
+
+        return GroundedVideoLLMModel
 
     if name == "Llava16Model":
         from .llava16 import Llava16Model

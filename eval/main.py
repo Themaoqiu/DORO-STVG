@@ -77,6 +77,18 @@ class STVGEvaluator:
                 gpu_memory_utilization=gpu_memory_utilization,
             )
 
+        if name in ['grounded-video-llm', 'grounded_video_llm', 'groundedvideollm']:
+            from models.grounded_video_llm import GroundedVideoLLMModel
+            return GroundedVideoLLMModel(
+                model_path=model_path,
+                batch_size=batch_size,
+                max_tokens=max_tokens,
+                max_model_len=max_model_len,
+                temperature=temperature,
+                tensor_parallel_size=tensor_parallel_size,
+                gpu_memory_utilization=gpu_memory_utilization,
+            )
+
         if name in ['llava16', 'llava-1.6', 'llava_16', 'llava-v1.6']:
             from models.llava16 import Llava16Model
             return Llava16Model(

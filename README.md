@@ -105,6 +105,18 @@ If the external checkout is not importable as `inference`, set
 `LLAVA_ST_SOURCE_DIR=/path/to/LLaVA-ST` so the wrapper can load
 `inference/src/utils.py`.
 
+Current integration status: Grounded-VideoLLM is connected through its official
+`inference.py` as a subprocess, using the unchanged shared STVG bbox JSON prompt
+as `--prompt_grounding`. The generated text is passed directly into the shared
+parser and metric code. This is a forced STVG generation adapter rather than the
+model's native temporal-grounding evaluation protocol.
+
+Known output issue: in smoke runs, the model may copy JSON examples from the
+shared prompt, such as `chair` and `table` boxes, and those copied examples can
+be parsed as predictions. Query-related boxes may also be template-like fixed
+values. Therefore the current output should be treated as a runnable integration
+check, not as meaningful Grounded-VideoLLM STVG localization performance.
+
 For VideoMolmo, the repository only provides the evaluation wrapper. The actual
 VideoMolmo runtime is external because its Molmo, SAM2, torch, CUDA,
 bitsandbytes, and accelerate versions are server-specific. Configure these
