@@ -159,6 +159,14 @@ class GroundedSAM2Tracker:
                 new_masks=det_masks,
                 existing_masks=existing_at_frame,
             )
+            removed_existing_ids = set(existing_at_frame.keys()) - set(updated_existing.keys())
+            if removed_existing_ids:
+                self._remove_objects(
+                    obj_ids=removed_existing_ids,
+                    tracked_instances=tracked_instances,
+                    instance_classes=instance_classes,
+                    frame_masks=frame_masks,
+                )
             if not new_masks:
                 continue
 
@@ -450,6 +458,30 @@ class GroundedSAM2Tracker:
             if should_add_new:
                 filtered_new.append(det)
         return filtered_new, updated_existing
+
+    @staticmethod
+    def _remove_objects(
+        obj_ids: Set[int],
+        tracked_instances: Dict[int, Dict[int, Dict[str, Any]]],
+        instance_classes: Dict[int, str],
+        frame_masks: Dict[int, Dict[int, Dict[str, Any]]],
+    ) -> None:
+        if not obj_ids:
+            return
+
+        for obj_id in obj_ids:
+            tracked_instances.pop(obj_id, None)
+            instance_classes.pop(obj_id, None)
+
+        empty_frames: List[int] = []
+        for frame_idx, frame_data in frame_masks.items():
+            for obj_id in obj_ids:
+                frame_data.pop(obj_id, None)
+            if not frame_data:
+                empty_frames.append(frame_idx)
+
+        for frame_idx in empty_frames:
+            frame_masks.pop(frame_idx, None)
 
     @staticmethod
     def _resolve_det_class(det: Dict[str, Any]) -> str:
