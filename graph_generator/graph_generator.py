@@ -14,6 +14,9 @@ from modules.yolo_detector import YOLOKeyframeDetector
 from modules.graph_filter import GraphFilter
 
 
+HUMAN_CLASSES = {"person", "man", "woman", "boy", "girl", "people"}
+
+
 def _video_record_path(video_path: str) -> str:
     return Path(video_path).name
 
@@ -239,17 +242,28 @@ class SceneGraphGenerator:
                     "Invalid tracker_backend. Expected one of: sam3, groundedsam2, yolo"
                 )
 
-        if self.use_action_detection and self._action_detector is None:
-            from modules.action_detector import VideoMAEActionDetector
+    @staticmethod
+    def _has_human_object_nodes(object_nodes: List[Dict[str, Any]]) -> bool:
+        for obj_node in object_nodes:
+            obj_class = str(obj_node.get("object_class", "")).strip().lower()
+            if obj_class in HUMAN_CLASSES or "person" in obj_class:
+                return True
+        return False
 
-            if not self.action_config or not self.action_checkpoint:
-                raise ValueError("Action detection requires action_config and action_checkpoint.")
+    def _ensure_action_detector(self) -> None:
+        if self._action_detector is not None:
+            return
 
-            self._action_detector = VideoMAEActionDetector(
-                config_path=self.action_config,
-                checkpoint_path=self.action_checkpoint,
-                label_map_path=self.action_label_map,
-            )
+        from modules.action_detector import VideoMAEActionDetector
+
+        if not self.action_config or not self.action_checkpoint:
+            raise ValueError("Action detection requires action_config and action_checkpoint.")
+
+        self._action_detector = VideoMAEActionDetector(
+            config_path=self.action_config,
+            checkpoint_path=self.action_checkpoint,
+            label_map_path=self.action_label_map,
+        )
     
     def process_video(self, video_path: str, output_path: str) -> SceneGraph:
         self._init_runtime()
@@ -342,22 +356,26 @@ class SceneGraphGenerator:
             print(f"[scene_graph] final: {len(graph.object_nodes)} objects, {len(graph.edges)} edges")
 
         if self.use_action_detection:
-            from modules.action_detector import add_actions_to_graph
+            if not self._has_human_object_nodes(graph.object_nodes):
+                print("[scene_graph] skip action detection: no person-like object nodes")
+            else:
+                self._ensure_action_detector()
+                from modules.action_detector import add_actions_to_graph
 
-            graph_dict = add_actions_to_graph(
-                graph.to_dict(),
-                video_path,
-                detector=self._action_detector,
-                fps=scene_detector._fps,
-                frame_interval=self.action_frame_interval,
-                score_thr=self.action_score_thr,
-                topk=self.action_topk,
-            )
-            graph_dict = graph_filter.normalize_graph(graph_dict, filter_objects=False)
-            graph.action_nodes = graph_dict['action_nodes']
-            graph.edges = graph_dict['edges']
+                graph_dict = add_actions_to_graph(
+                    graph.to_dict(),
+                    video_path,
+                    detector=self._action_detector,
+                    fps=scene_detector._fps,
+                    frame_interval=self.action_frame_interval,
+                    score_thr=self.action_score_thr,
+                    topk=self.action_topk,
+                )
+                graph_dict = graph_filter.normalize_graph(graph_dict, filter_objects=False)
+                graph.action_nodes = graph_dict['action_nodes']
+                graph.edges = graph_dict['edges']
 
-            print(f"[scene_graph] action nodes: {len(graph.action_nodes)}")
+                print(f"[scene_graph] action nodes: {len(graph.action_nodes)}")
 
         graph.save_to_jsonl(output_path)
         print(f"[scene_graph] saved: {output_path}")
@@ -453,6 +471,7 @@ def _run_full_pipeline_for_video(
     pipeline_python: Optional[str],
     cuda_visible_devices: Optional[str],
     hf_endpoint: Optional[str],
+    max_concurrent_per_key: int,
     with_attribute: bool,
     attribute_model_name: str,
     attribute_masks_json: Optional[str],
@@ -503,6 +522,7 @@ def _run_full_pipeline_for_video(
                 "masks_json": masks_json,
                 "model_path": attribute_model_path,
                 "max_frames": attribute_max_frames,
+                "max_concurrent_per_key": max_concurrent_per_key,
             },
             python_exec=pipeline_python,
             cwd=project_root,
@@ -551,6 +571,7 @@ def _run_full_pipeline_for_video(
                 "min_shared_frames": relation_min_shared_frames,
                 "save_intermediate_frames": relation_save_intermediate_frames,
                 "verbose": relation_verbose,
+                "max_concurrent_per_key": max_concurrent_per_key,
             },
             python_exec=pipeline_python,
             cwd=project_root,
@@ -597,6 +618,7 @@ def _run_full_pipeline_for_video(
                         "shot_a": shot_a,
                         "shot_b": shot_b,
                         "frames_per_shot": reference_frames_per_shot,
+                        "max_concurrent_per_key": max_concurrent_per_key,
                     },
                     python_exec=pipeline_python,
                     cwd=project_root,
@@ -637,6 +659,7 @@ def run(
     pipeline_python: str = None,
     cuda_visible_devices: str = None,
     hf_endpoint: str = None,
+    max_concurrent_per_key: int = 20,
     with_attribute: bool = True,
     attribute_model_name: str = "gemini-3-flash-preview",
     attribute_masks_json: str = None,
@@ -741,6 +764,7 @@ def run(
             pipeline_python=pipeline_python,
             cuda_visible_devices=cuda_visible_devices,
             hf_endpoint=hf_endpoint,
+            max_concurrent_per_key=max_concurrent_per_key,
             with_attribute=with_attribute,
             attribute_model_name=attribute_model_name,
             attribute_masks_json=attribute_masks_json,

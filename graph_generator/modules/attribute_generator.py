@@ -512,11 +512,6 @@ def run(
             environment=environment,
             actions=actions,
         )
-        print(
-            f"[attribute_generator] {object_id} -> "
-            f"category={category}; attributes={attributes}; "
-            f"environment={environment}; actions={actions}"
-        )
 
     graph = apply_attributes_to_object_nodes(
         graph=graph,
