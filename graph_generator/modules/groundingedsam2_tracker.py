@@ -2,7 +2,6 @@ import shutil
 import sys
 import tempfile
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -364,7 +363,7 @@ class GroundedSAM2Tracker:
             tracked_instances=tracked_instances,
             frame_masks=frame_masks,
             store_obj_ids=store_obj_ids,
-            frame_paths=frame_paths,
+            inference_state=inference_state,
         )
 
     def _propagate_backward_from_frame(
@@ -376,73 +375,42 @@ class GroundedSAM2Tracker:
         tracked_instances: Dict[int, Dict[int, Dict[str, Any]]],
         frame_masks: Dict[int, Dict[int, Dict[str, Any]]],
         store_obj_ids: Optional[Set[int]],
-        frame_paths: List[Path],
+        inference_state: Dict[str, Any],
     ) -> None:
         if not prompt_objects or start_frame <= clip.start_frame:
             return
 
-        reverse_window = list(reversed(frame_paths[clip.start_frame : start_frame + 1]))
-        if not reverse_window:
+        max_len = start_frame - clip.start_frame
+        if max_len <= 0:
             return
 
-        reverse_dir = Path(tempfile.mkdtemp(prefix="gsam2_reverse_"))
-        try:
-            for idx, src_path in enumerate(reverse_window):
-                dst_path = reverse_dir / f"{idx}.jpg"
-                self._link_or_copy_frame(src_path, dst_path)
-
-            backward_state = self.video_predictor.init_state(
-                video_path=str(reverse_dir),
-                offload_video_to_cpu=True,
-                async_loading_frames=True,
-            )
-            self.video_predictor.reset_state(backward_state)
-
-            valid_obj_ids: List[int] = []
-            for obj_id, info in prompt_objects.items():
-                mask_np = np.array(info["mask"], dtype=np.uint8)
-                if mask_np.sum() == 0:
+        for frame_idx, out_obj_ids, out_mask_logits in self.video_predictor.propagate_in_video(
+            inference_state,
+            start_frame_idx=start_frame,
+            max_frame_num_to_track=max_len,
+            reverse=True,
+        ):
+            if frame_idx < clip.start_frame or frame_idx >= start_frame:
+                continue
+            target_frame = frame_masks.setdefault(frame_idx, {})
+            for i, obj_id in enumerate(out_obj_ids):
+                obj_id = int(obj_id)
+                if store_obj_ids is not None and obj_id not in store_obj_ids:
                     continue
-                self.video_predictor.add_new_mask(
-                    backward_state,
-                    0,
-                    obj_id,
-                    torch.from_numpy(mask_np > 0).to(self.device),
+                out_mask = (out_mask_logits[i] > 0.0)
+                if out_mask.sum() == 0:
+                    continue
+                mask_np = out_mask[0].detach().cpu().numpy().astype(np.uint8)
+                box = self._mask_to_box(mask_np)
+                if box is None:
+                    continue
+
+                cls_name = instance_classes.get(
+                    obj_id, prompt_objects.get(obj_id, {}).get("class", "object")
                 )
-                valid_obj_ids.append(obj_id)
-            if not valid_obj_ids:
-                return
-
-            max_len = start_frame - clip.start_frame + 1
-            for reverse_idx, out_obj_ids, out_mask_logits in self.video_predictor.propagate_in_video(
-                backward_state,
-                start_frame_idx=0,
-                max_frame_num_to_track=max_len,
-            ):
-                original_frame_idx = start_frame - reverse_idx
-                if original_frame_idx < clip.start_frame or original_frame_idx >= start_frame:
-                    continue
-                target_frame = frame_masks.setdefault(original_frame_idx, {})
-                for i, obj_id in enumerate(out_obj_ids):
-                    obj_id = int(obj_id)
-                    if store_obj_ids is not None and obj_id not in store_obj_ids:
-                        continue
-                    out_mask = (out_mask_logits[i] > 0.0)
-                    if out_mask.sum() == 0:
-                        continue
-                    mask_np = out_mask[0].detach().cpu().numpy().astype(np.uint8)
-                    box = self._mask_to_box(mask_np)
-                    if box is None:
-                        continue
-
-                    cls_name = instance_classes.get(
-                        obj_id, prompt_objects.get(obj_id, {}).get("class", "object")
-                    )
-                    tracked_instances.setdefault(obj_id, {})
-                    tracked_instances[obj_id][original_frame_idx] = {"box": box}
-                    target_frame[obj_id] = {"mask": mask_np, "class": cls_name, "box": box}
-        finally:
-            shutil.rmtree(reverse_dir, ignore_errors=True)
+                tracked_instances.setdefault(obj_id, {})
+                tracked_instances[obj_id][frame_idx] = {"box": box}
+                target_frame[obj_id] = {"mask": mask_np, "class": cls_name, "box": box}
 
     def _filter_masks_by_containment(
         self,
@@ -524,13 +492,6 @@ class GroundedSAM2Tracker:
             frame_idx += 1
         cap.release()
         return frame_paths
-
-    @staticmethod
-    def _link_or_copy_frame(src_path: Path, dst_path: Path) -> None:
-        try:
-            os.symlink(src_path.resolve(), dst_path)
-        except OSError:
-            shutil.copy2(src_path, dst_path)
 
     def _convert_to_global_tracks(
         self,
