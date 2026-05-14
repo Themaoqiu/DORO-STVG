@@ -456,6 +456,7 @@ def _run_full_pipeline_for_video(
     with_attribute: bool,
     attribute_model_name: str,
     attribute_masks_json: Optional[str],
+    attribute_masks_dir: Optional[str],
     attribute_model_path: str,
     attribute_max_frames: int,
     with_action: bool,
@@ -487,9 +488,12 @@ def _run_full_pipeline_for_video(
         masks_json = attribute_masks_json
         cleanup_attribute_masks = False
         if not masks_json:
-            default_mask_dir = project_root / "output" / "sam2_masks"
-            masks_json = str(default_mask_dir / f"{Path(video_path).stem}_sam2_masks_indexed.json")
-            cleanup_attribute_masks = True
+            if attribute_masks_dir:
+                mask_dir = Path(attribute_masks_dir)
+            else:
+                mask_dir = project_root / "output" / "sam2_masks"
+                cleanup_attribute_masks = True
+            masks_json = str(mask_dir / f"{Path(video_path).stem}_sam2_masks_indexed.json")
         _run_fire_module(
             "modules.attribute_generator",
             {
@@ -652,6 +656,8 @@ def run(
     reference_crop_output_dir: str = "output/reference_id_match_test",
     reference_frames_per_shot: int = 3,
     reference_save_intermediate_frames: bool = False,
+    shard_idx: int = 0,
+    num_shards: int = 1,
 ):
     project_root = Path(__file__).resolve().parent
     output_path = str((project_root / output).resolve()) if not Path(output).is_absolute() else output
@@ -705,6 +711,12 @@ def run(
     if max_videos and max_videos > 0:
         video_paths = video_paths[:max_videos]
 
+    if num_shards > 1:
+        if not 0 <= shard_idx < num_shards:
+            raise ValueError(f"shard_idx must be in [0, {num_shards}), got {shard_idx}")
+        video_paths = video_paths[shard_idx::num_shards]
+        print(f"[pipeline] shard {shard_idx}/{num_shards}: {len(video_paths)} video(s)")
+
     if not video_paths:
         raise ValueError("No videos found to process.")
 
@@ -732,6 +744,7 @@ def run(
             with_attribute=with_attribute,
             attribute_model_name=attribute_model_name,
             attribute_masks_json=attribute_masks_json,
+            attribute_masks_dir=groundedsam2_mask_output_dir,
             attribute_model_path=attribute_model_path,
             attribute_max_frames=attribute_max_frames,
             with_action=with_action,

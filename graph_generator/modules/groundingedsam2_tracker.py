@@ -1,6 +1,4 @@
-import shutil
 import sys
-import tempfile
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -69,50 +67,46 @@ class GroundedSAM2Tracker:
         clips: List[SceneClip],
         detections: Dict[int, Dict[int, List]],
     ) -> List[GlobalTrack]:
-        temp_dir = Path(tempfile.mkdtemp(prefix="gsam2_frames_"))
-        try:
-            frame_paths = self._extract_frames(video_path, temp_dir)
-            inference_state = self.video_predictor.init_state(
-                video_path=str(temp_dir),
-                offload_video_to_cpu=True,
-                async_loading_frames=True,
-            )
+        frames_rgb = self._load_frames_rgb(video_path)
+        inference_state = self.video_predictor.init_state(
+            video_path=video_path,
+            offload_video_to_cpu=True,
+            async_loading_frames=True,
+        )
 
-            all_global_tracks: List[GlobalTrack] = []
-            all_frame_masks: Dict[int, Dict[int, np.ndarray]] = {}
-            global_track_id = 0
-            for clip in clips:
-                clip_dets = detections.get(clip.clip_id, {}) or {}
-                print(
-                    f"  Processing clip {clip.clip_id} "
-                    f"(frames {clip.start_frame}-{clip.end_frame})..."
-                )
-                clip_tracks, global_track_id, clip_frame_masks = self._track_clip(
-                    clip=clip,
-                    clip_dets=clip_dets,
-                    start_global_id=global_track_id,
-                    frame_paths=frame_paths,
-                    inference_state=inference_state,
-                )
-                all_global_tracks.extend(clip_tracks)
-                for frame_idx, frame_obj_masks in clip_frame_masks.items():
-                    all_frame_masks.setdefault(frame_idx, {}).update(frame_obj_masks)
-            if self.mask_output_dir:
-                self._export_video_masks(
-                    video_path=video_path,
-                    frame_masks=all_frame_masks,
-                    num_frames=len(frame_paths),
-                )
-            return all_global_tracks
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+        all_global_tracks: List[GlobalTrack] = []
+        all_frame_masks: Dict[int, Dict[int, np.ndarray]] = {}
+        global_track_id = 0
+        for clip in clips:
+            clip_dets = detections.get(clip.clip_id, {}) or {}
+            print(
+                f"  Processing clip {clip.clip_id} "
+                f"(frames {clip.start_frame}-{clip.end_frame})..."
+            )
+            clip_tracks, global_track_id, clip_frame_masks = self._track_clip(
+                clip=clip,
+                clip_dets=clip_dets,
+                start_global_id=global_track_id,
+                frames_rgb=frames_rgb,
+                inference_state=inference_state,
+            )
+            all_global_tracks.extend(clip_tracks)
+            for frame_idx, frame_obj_masks in clip_frame_masks.items():
+                all_frame_masks.setdefault(frame_idx, {}).update(frame_obj_masks)
+        if self.mask_output_dir:
+            self._export_video_masks(
+                video_path=video_path,
+                frame_masks=all_frame_masks,
+                num_frames=len(frames_rgb),
+            )
+        return all_global_tracks
 
     def _track_clip(
         self,
         clip: SceneClip,
         clip_dets: Dict[int, List],
         start_global_id: int,
-        frame_paths: List[Path],
+        frames_rgb: List[np.ndarray],
         inference_state: Dict[str, Any],
     ) -> Tuple[List[GlobalTrack], int, Dict[int, Dict[int, np.ndarray]]]:
         tracked_instances: Dict[int, Dict[int, Dict[str, Any]]] = {}
@@ -126,7 +120,7 @@ class GroundedSAM2Tracker:
         first_frame = clip.start_frame
         first_prompts: Dict[int, Dict[str, Any]] = {}
         for det_mask in self._collect_detection_masks(
-            frame_paths, first_frame, clip_dets.get(first_frame, [])
+            frames_rgb, first_frame, clip_dets.get(first_frame, [])
         ):
             obj_id = next_obj_id
             next_obj_id += 1
@@ -149,7 +143,7 @@ class GroundedSAM2Tracker:
         step = self.redetection_interval
         for start_frame in range(first_frame + step, clip.end_frame + 1, step):
             det_masks = self._collect_detection_masks(
-                frame_paths, start_frame, clip_dets.get(start_frame, [])
+                frames_rgb, start_frame, clip_dets.get(start_frame, [])
             )
             if not det_masks:
                 continue
@@ -195,7 +189,6 @@ class GroundedSAM2Tracker:
                 frame_masks=frame_masks,
                 store_obj_ids=new_obj_ids,
                 inference_state=inference_state,
-                frame_paths=frame_paths,
             )
 
         global_tracks = self._convert_to_global_tracks(
@@ -218,16 +211,15 @@ class GroundedSAM2Tracker:
 
     def _collect_detection_masks(
         self,
-        frame_paths: List[Path],
+        frames_rgb: List[np.ndarray],
         frame_idx: int,
         detections: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        if frame_idx < 0 or frame_idx >= len(frame_paths):
+        if frame_idx < 0 or frame_idx >= len(frames_rgb):
             return []
-        frame = cv2.imread(str(frame_paths[frame_idx]))
-        if frame is None:
+        frame_rgb = frames_rgb[frame_idx]
+        if frame_rgb is None:
             return []
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         boxes: List[List[float]] = []
         classes: List[str] = []
@@ -339,7 +331,6 @@ class GroundedSAM2Tracker:
         frame_masks: Dict[int, Dict[int, Dict[str, Any]]],
         store_obj_ids: Optional[Set[int]],
         inference_state: Dict[str, Any],
-        frame_paths: List[Path],
     ) -> None:
         self._propagate_from_frame(
             clip=clip,
@@ -478,20 +469,16 @@ class GroundedSAM2Tracker:
         return [float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())]
 
     @staticmethod
-    def _extract_frames(video_path: str, output_dir: Path) -> List[Path]:
+    def _load_frames_rgb(video_path: str) -> List[np.ndarray]:
         cap = cv2.VideoCapture(video_path)
-        frame_idx = 0
-        frame_paths: List[Path] = []
+        frames: List[np.ndarray] = []
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
-            out_path = output_dir / f"{frame_idx}.jpg"
-            cv2.imwrite(str(out_path), frame)
-            frame_paths.append(out_path)
-            frame_idx += 1
+            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         cap.release()
-        return frame_paths
+        return frames
 
     def _convert_to_global_tracks(
         self,
