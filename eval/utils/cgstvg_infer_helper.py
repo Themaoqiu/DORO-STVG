@@ -202,7 +202,7 @@ def run_official_vidstg_helper(
                 "--output-dir",
                 str(tmp_repo),
                 "--fps",
-                "1.0",
+                "2.0",
             ],
             cwd=project_root,
             env=os.environ.copy(),

@@ -113,7 +113,7 @@ def main():
     parser.add_argument("--combine-datasets", nargs="+", default=["vidstg"])
     parser.add_argument("--combine-datasets-val", nargs="+", default=["vidstg"])
     parser.add_argument("--resolution", type=int, default=224)
-    parser.add_argument("--fps", type=int, default=5)
+    parser.add_argument("--fps", type=int, default=2)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--tmp-output-dir", default="")
     args = parser.parse_args()

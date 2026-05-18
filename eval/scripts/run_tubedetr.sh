@@ -9,7 +9,7 @@ export TUBEDETR_DATASET_CONFIG=config/vidstg.json
 export TUBEDETR_COMBINE_DATASETS=vidstg
 export TUBEDETR_COMBINE_DATASETS_VAL=vidstg
 export TUBEDETR_RESOLUTION=224
-export TUBEDETR_FPS=5
+export TUBEDETR_FPS=2
 export TUBEDETR_DEVICE=cuda
 export ST_ALIGN_BENCHMARK_PATH=/mnt/sdc/xingjianwang/yibowang/LLaVA-ST/data/benchmarks/st-align/stvg.json
 

@@ -154,6 +154,22 @@ def _vtimellm_response_to_json(response_text: str, video_path: str, max_dense_fr
     return json.dumps({"target": frame_map}, ensure_ascii=False)
 
 
+def _vtimellm_response_to_temporal_json(response_text: str) -> str:
+    frame_span = _parse_frame_span_from_text(response_text)
+    if frame_span is None:
+        second_span = _parse_seconds_from_text(response_text)
+        if second_span is not None:
+            frame_span = (round(second_span[0] * 2.0), round(second_span[1] * 2.0))
+
+    if frame_span is None:
+        return response_text
+
+    start, end = int(frame_span[0]), int(frame_span[1])
+    if end < start:
+        start, end = end, start
+    return json.dumps({"temporal_span": [start, end]}, ensure_ascii=False)
+
+
 class VTimeLLMModel:
     def __init__(
         self,
@@ -286,6 +302,19 @@ class VTimeLLMModel:
                     max_dense_frames=self.max_dense_frames,
                 )
             )
+
+        self.last_raw_responses = raw_outputs
+        return converted_outputs
+
+    def predict_temporal_batch(self, queries: List[str], video_paths: List[str], system_prompt: str) -> List[str]:
+        self.last_user_prompts = list(queries)
+
+        raw_outputs = []
+        converted_outputs = []
+        for query, video_path in zip(queries, video_paths):
+            raw_output = self._predict_one(query, video_path, system_prompt)
+            raw_outputs.append(raw_output)
+            converted_outputs.append(_vtimellm_response_to_temporal_json(raw_output))
 
         self.last_raw_responses = raw_outputs
         return converted_outputs

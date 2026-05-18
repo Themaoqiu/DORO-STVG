@@ -141,3 +141,6 @@ class GroundedVideoLLMModel:
         outputs = [output for output, _raw in pairs]
         self.last_raw_responses = [raw for _output, raw in pairs]
         return outputs
+
+    def predict_temporal_batch(self, queries: List[str], video_paths: List[str], system_prompt: str) -> List[str]:
+        return self.predict_batch(queries=queries, video_paths=video_paths, system_prompt=system_prompt)

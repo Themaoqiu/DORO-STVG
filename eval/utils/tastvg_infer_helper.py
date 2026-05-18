@@ -269,7 +269,7 @@ def run_tastvg_helper(
             str(converter),
             "--annotation-path", str(doro_jsonl),
             "--output-dir", str(tmp_repo),
-            "--fps", "1.0",
+            "--fps", "2.0",
         ], cwd=project_root, env=os.environ.copy())
 
         videos_dir = data_root / "videos"
