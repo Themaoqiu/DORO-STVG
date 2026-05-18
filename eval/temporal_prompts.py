@@ -51,6 +51,16 @@ def _normalize_span(start: Any, end: Any) -> Optional[Tuple[int, int]]:
 
 
 def _parse_json_span(response_text: str) -> Optional[Tuple[int, int]]:
+    direct_matches = re.findall(
+        r'["\']temporal_span["\']\s*:\s*\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]',
+        str(response_text or ""),
+        flags=re.IGNORECASE,
+    )
+    for start, end in reversed(direct_matches):
+        parsed = _normalize_span(start, end)
+        if parsed is not None:
+            return parsed
+
     candidate = _extract_json_candidate(response_text)
     if not candidate:
         return None

@@ -250,6 +250,21 @@ class STVGEvaluator:
             )
             
             return pipeline.run_evaluation()
+
+        elif data_name.lower() in ['stalign', 'st-align', 'st_align']:
+            from pipelines.stalign import STAlignPipeline
+
+            pipeline = STAlignPipeline(
+                model=model,
+                model_name=model_name,
+                data_name=data_name,
+                annotation_path=annotation_path,
+                video_dir=video_dir,
+                output_dir=output_dir,
+                batch_size=batch_size,
+            )
+
+            return pipeline.run_evaluation()
         
         elif data_name.lower() in ['dorostvg', 'doro-stvg']:
             from pipelines.dorostvg import DOROSTVGPipeline

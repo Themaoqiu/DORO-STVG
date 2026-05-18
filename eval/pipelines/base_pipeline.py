@@ -103,24 +103,29 @@ class BasePipeline(ABC):
 
     def run_evaluation(self):
         logger.info(f"Starting {self.get_dataset_name()} Evaluation")
-        
-        samples = self.load_data()
-        
-        all_results = []
-        for i in range(0, len(samples), self.batch_size):
-            batch = samples[i:i + self.batch_size]
-            logger.info(f"Processing batch {i // self.batch_size + 1}/{(len(samples) + self.batch_size - 1) // self.batch_size}")
-            
-            batch_results = self._process_batch(batch)
-            all_results.extend(batch_results)
-        
-        avg_metrics = self._compute_average_metrics(all_results)
-        
-        self._save_results(all_results, avg_metrics)
-        
-        logger.info("Evaluation completed")
-        
-        return all_results, avg_metrics
+
+        try:
+            samples = self.load_data()
+
+            all_results = []
+            for i in range(0, len(samples), self.batch_size):
+                batch = samples[i:i + self.batch_size]
+                logger.info(f"Processing batch {i // self.batch_size + 1}/{(len(samples) + self.batch_size - 1) // self.batch_size}")
+
+                batch_results = self._process_batch(batch)
+                all_results.extend(batch_results)
+
+            avg_metrics = self._compute_average_metrics(all_results)
+
+            self._save_results(all_results, avg_metrics)
+
+            logger.info("Evaluation completed")
+
+            return all_results, avg_metrics
+        finally:
+            close_fn = getattr(self.model, "close", None)
+            if callable(close_fn):
+                close_fn()
     
     def _process_batch(self, batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         video_paths = []

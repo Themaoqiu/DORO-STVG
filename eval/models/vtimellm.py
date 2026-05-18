@@ -92,8 +92,6 @@ def _parse_seconds_from_text(text: str) -> Optional[Tuple[float, float]]:
         r"from\s+(\d+(?:\.\d+)?)\s*(?:s|sec|second|seconds)?\s+to\s+(\d+(?:\.\d+)?)",
         r"between\s+(\d+(?:\.\d+)?)\s*(?:s|sec|second|seconds)?\s+and\s+(\d+(?:\.\d+)?)",
         r"(\d+(?:\.\d+)?)\s*(?:s|sec|second|seconds)\s*[-~]\s*(\d+(?:\.\d+)?)\s*(?:s|sec|second|seconds)",
-        r"\[(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\]",
-        r"\((\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\)",
         r"(\d+(?:\.\d+)?)\s*[-~]\s*(\d+(?:\.\d+)?)\s*(?:s|sec|second|seconds)",
     ]
     for pattern in patterns:
@@ -106,6 +104,8 @@ def _parse_seconds_from_text(text: str) -> Optional[Tuple[float, float]]:
 
 def _parse_frame_span_from_text(text: str) -> Optional[Tuple[int, int]]:
     patterns = [
+        r'"temporal_span"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]',
+        r"'temporal_span'\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]",
         r"frames?\s+(\d+)\s*(?:to|through|until|-|~)\s*(\d+)",
         r"frame\s+range\s*[:=]\s*(\d+)\s*(?:to|through|until|-|~)\s*(\d+)",
         r"(\d+)\s*(?:to|through|until|-|~)\s*(\d+)\s*frames?",
@@ -154,12 +154,23 @@ def _vtimellm_response_to_json(response_text: str, video_path: str, max_dense_fr
     return json.dumps({"target": frame_map}, ensure_ascii=False)
 
 
-def _vtimellm_response_to_temporal_json(response_text: str) -> str:
+def _scale_temporal_span(span: Tuple[int, int], input_fps: float, output_fps: float) -> Tuple[int, int]:
+    if input_fps <= 0 or output_fps <= 0 or input_fps == output_fps:
+        return span
+    scale = output_fps / input_fps
+    return (round(span[0] * scale), round(span[1] * scale))
+
+
+def _vtimellm_response_to_temporal_json(
+    response_text: str,
+    input_fps: float = 2.0,
+    output_fps: float = 2.0,
+) -> str:
     frame_span = _parse_frame_span_from_text(response_text)
     if frame_span is None:
         second_span = _parse_seconds_from_text(response_text)
         if second_span is not None:
-            frame_span = (round(second_span[0] * 2.0), round(second_span[1] * 2.0))
+            frame_span = (round(second_span[0] * output_fps), round(second_span[1] * output_fps))
 
     if frame_span is None:
         return response_text
@@ -167,6 +178,7 @@ def _vtimellm_response_to_temporal_json(response_text: str) -> str:
     start, end = int(frame_span[0]), int(frame_span[1])
     if end < start:
         start, end = end, start
+    start, end = _scale_temporal_span((start, end), input_fps=input_fps, output_fps=output_fps)
     return json.dumps({"temporal_span": [start, end]}, ensure_ascii=False)
 
 
@@ -203,6 +215,8 @@ class VTimeLLMModel:
         self.conv_mode = os.getenv("VTIMELLM_CONV_MODE", "v1")
         self.max_frames = int(os.getenv("VTIMELLM_MAX_FRAMES", "100"))
         self.max_dense_frames = int(os.getenv("VTIMELLM_MAX_DENSE_FRAMES", "256"))
+        self.temporal_input_fps = float(os.getenv("VTIMELLM_TEMPORAL_INPUT_FPS", "2.0"))
+        self.temporal_output_fps = float(os.getenv("VTIMELLM_TEMPORAL_OUTPUT_FPS", str(self.temporal_input_fps)))
 
         self.last_user_prompts = []
         self.last_raw_responses = []
@@ -314,7 +328,13 @@ class VTimeLLMModel:
         for query, video_path in zip(queries, video_paths):
             raw_output = self._predict_one(query, video_path, system_prompt)
             raw_outputs.append(raw_output)
-            converted_outputs.append(_vtimellm_response_to_temporal_json(raw_output))
+            converted_outputs.append(
+                _vtimellm_response_to_temporal_json(
+                    raw_output,
+                    input_fps=self.temporal_input_fps,
+                    output_fps=self.temporal_output_fps,
+                )
+            )
 
         self.last_raw_responses = raw_outputs
         return converted_outputs

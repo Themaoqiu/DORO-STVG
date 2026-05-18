@@ -50,6 +50,8 @@ class DOROTemporalPipeline(DOROSTVGPipeline):
             raw_response = raw_responses[idx] if idx < len(raw_responses) else full_response
             parsed = parse_temporal_response(full_response)
             pred_span = parsed.get("temporal_span")
+            if pred_span is not None and hasattr(self.model, "map_temporal_span"):
+                pred_span = self.model.map_temporal_span(pred_span, sample)
             gt_span = _normalize_span(sample.get("gt_temporal_sampled"))
             metrics = compute_temporal_metrics(gt_span, pred_span)
 
