@@ -80,18 +80,11 @@ def _write_sampled_clip(frames: np.ndarray, out_path: Path, fps: float) -> None:
         Image.fromarray(frame).save(frame_dir / f"frame_{idx:06d}.jpg", quality=95)
 
     cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-framerate",
-        str(fps),
-        "-i",
-        str(frame_dir / "frame_%06d.jpg"),
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-framerate", str(fps),
+        "-i", str(frame_dir / "frame_%06d.jpg"),
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
         str(out_path),
         "-y",
     ]
@@ -109,7 +102,7 @@ def _extract_json_candidate(text: str) -> Optional[str]:
     end = stripped.rfind("}")
     if start < 0 or end < 0 or end <= start:
         return None
-    return stripped[start : end + 1].strip()
+    return stripped[start:end + 1].strip()
 
 
 def _extract_frame_map_candidates(text: str) -> Dict[int, List[float]]:
@@ -181,3 +174,20 @@ def _remap_frame_map(frame_map: Dict[int, List[float]], original_indices: List[i
             continue
         remapped[str(original_frame_idx)] = normalized
     return remapped
+
+def _sample_output_positions(num_frames: int, max_points: int = 8) -> List[int]:
+    if num_frames <= 0:
+        return []
+    if max_points <= 0 or num_frames <= max_points:
+        return list(range(num_frames))
+
+    positions = np.linspace(0, num_frames - 1, num=max_points)
+    sampled = [int(round(v)) for v in positions]
+    deduped: List[int] = []
+    seen = set()
+    for idx in sampled:
+        idx = max(0, min(num_frames - 1, idx))
+        if idx not in seen:
+            deduped.append(idx)
+            seen.add(idx)
+    return deduped

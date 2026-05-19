@@ -13,8 +13,10 @@ logger = logging.getLogger(__name__)
 
 def _recover_raw_query(query_text: str) -> str:
     text = str(query_text or "").strip()
-    m = re.match(r"Where does (.+?) occur in the video\?", text, flags=re.DOTALL)
-    return m.group(1).strip() if m else text
+    match = re.match(r"Where does (.+?) occur in the video\?", text, flags=re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text
 
 
 def _extract_video_path(video_input: str) -> str:
@@ -22,18 +24,19 @@ def _extract_video_path(video_input: str) -> str:
 
 
 def _normalize_frame_boxes(frame_map: Any) -> Dict[str, List[float]]:
-    out = {}
+    normalized: Dict[str, List[float]] = {}
     if not isinstance(frame_map, dict):
-        return out
-    for k, coords in frame_map.items():
+        return normalized
+    for frame_idx_text, coords in frame_map.items():
         try:
-            frame = int(str(k).strip())
-            vals = [float(v) for v in coords]
+            frame_idx = int(str(frame_idx_text).strip())
+            values = [float(v) for v in coords]
         except (TypeError, ValueError):
             continue
-        if len(vals) == 4:
-            out[str(frame)] = [max(0.0, min(1.0, v)) for v in vals]
-    return out
+        if len(values) != 4:
+            continue
+        normalized[str(frame_idx)] = [max(0.0, min(1.0, v)) for v in values]
+    return normalized
 
 
 def _normalize_prediction_payload(payload: Any, fallback_description: str = "target") -> str:
@@ -44,20 +47,25 @@ def _normalize_prediction_payload(payload: Any, fallback_description: str = "tar
             return payload
     if not isinstance(payload, dict):
         return "{}"
-    raw = payload.get("raw_response")
-    if isinstance(raw, str):
+
+    raw_response = payload.get("raw_response")
+    if isinstance(raw_response, str):
         try:
-            return _normalize_prediction_payload(json.loads(raw), fallback_description)
+            return _normalize_prediction_payload(json.loads(raw_response), fallback_description)
         except json.JSONDecodeError:
-            return raw
-    normalized = {}
-    for desc, frame_map in payload.items():
-        if desc in {"objects", "prediction", "raw_response", "query", "video_path"}:
+            return raw_response
+
+    normalized: Dict[str, Dict[str, List[float]]] = {}
+    for description, frame_map in payload.items():
+        if description in {"objects", "prediction", "raw_response", "query", "video_path"}:
             continue
         boxes = _normalize_frame_boxes(frame_map)
         if boxes:
-            normalized[str(desc).strip() or fallback_description] = boxes
-    return json.dumps(normalized, ensure_ascii=False) if normalized else "{}"
+            normalized[str(description).strip() or fallback_description] = boxes
+
+    if normalized:
+        return json.dumps(normalized, ensure_ascii=False)
+    return "{}"
 
 
 class TASTVGModel:
@@ -85,8 +93,8 @@ class TASTVGModel:
         self.repo_dir = str(repo_dir)
 
         self.python_bin = os.getenv("TASTVG_PYTHON") or str(repo_dir / ".venv" / "bin" / "python")
-        self.util_path = os.getenv("TASTVG_INFER_PY") or str(
-            Path(__file__).resolve().parents[1] / "utils" / "tastvg_infer_util.py"
+        self.helper_path = os.getenv("TASTVG_INFER_PY") or str(
+            Path(__file__).resolve().parents[1] / "utils" / "tastvg_infer_helper.py"
         )
         self.model_weight = os.getenv("TASTVG_MODEL_WEIGHT") or self.model_path
         self.cuda_visible_devices = os.getenv("TASTVG_CUDA_VISIBLE_DEVICES") or os.getenv("CUDA_VISIBLE_DEVICES")
@@ -103,10 +111,10 @@ class TASTVGModel:
         self.last_user_prompts: List[str] = []
         self.last_raw_responses: List[str] = []
 
-    def _run_util(self, manifest_path: Path, output_path: Path) -> List[Dict[str, Any]]:
+    def _run_helper(self, manifest_path: Path, output_path: Path) -> List[Dict[str, Any]]:
         cmd = [
             self.python_bin,
-            str(Path(self.util_path).expanduser().resolve()),
+            str(Path(self.helper_path).expanduser().resolve()),
             "--manifest", str(manifest_path),
             "--output", str(output_path),
             "--tastvg-dir", self.repo_dir,
@@ -132,15 +140,15 @@ class TASTVGModel:
         if self.cuda_visible_devices:
             env["CUDA_VISIBLE_DEVICES"] = self.cuda_visible_devices
 
-        logger.info("Running TA-STVG util: %s", " ".join(cmd))
+        logger.info("Running TA-STVG helper: %s", " ".join(cmd))
         proc = subprocess.run(cmd, cwd=self.repo_dir, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if proc.stdout.strip():
-            logger.info("TA-STVG util stdout:\n%s", proc.stdout.strip())
+            logger.info("TA-STVG helper stdout:\n%s", proc.stdout.strip())
         if proc.stderr.strip():
-            logger.warning("TA-STVG util stderr:\n%s", proc.stderr.strip())
+            logger.warning("TA-STVG helper stderr:\n%s", proc.stderr.strip())
         if proc.returncode != 0:
             raise RuntimeError(
-                f"TA-STVG util failed.\nCommand: {' '.join(cmd)}\nReturn code: {proc.returncode}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+                f"TA-STVG helper failed.\nCommand: {' '.join(cmd)}\nReturn code: {proc.returncode}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
             )
 
         rows: List[Dict[str, Any]] = []
@@ -172,7 +180,7 @@ class TASTVGModel:
                 }, ensure_ascii=False) + "\n")
 
         try:
-            rows = self._run_util(manifest_path, output_path)
+            rows = self._run_helper(manifest_path, output_path)
             outputs, raw_responses = [], []
             for idx, row in enumerate(rows):
                 fallback = self.last_user_prompts[idx] if idx < len(self.last_user_prompts) else "target"

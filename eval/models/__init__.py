@@ -2,8 +2,11 @@ __all__ = [
     "Qwen2_5VL",
     "Qwen3VL",
     "LlavaSTQwen2",
+    "VTimeLLMModel",
+    "GroundedVideoLLMModel",
     "Llava16Model",
     "VideoChatR1",
+    "STVGR1",
     "GroundingGPTModel",
     "VideoMolmoModel",
     "CGSTVGModel",
@@ -16,17 +19,32 @@ def __getattr__(name):
     if name in {"Qwen2_5VL", "Qwen3VL"}:
         from .qwen_family import Qwen2_5VL, Qwen3VL
 
-        return {"Qwen2_5VL": Qwen2_5VL, "Qwen3VL": Qwen3VL, "Qwen3.5": Qwen3VL}[name]
+        return {"Qwen2_5VL": Qwen2_5VL, "Qwen3VL": Qwen3VL}[name]
 
     if name == "LlavaSTQwen2":
         from .llava_st import LlavaSTQwen2
 
         return LlavaSTQwen2
 
+    if name == "VTimeLLMModel":
+        from .vtimellm import VTimeLLMModel
+
+        return VTimeLLMModel
+
+    if name == "GroundedVideoLLMModel":
+        from .grounded_video_llm import GroundedVideoLLMModel
+
+        return GroundedVideoLLMModel
+
     if name == "Llava16Model":
         from .llava16 import Llava16Model
 
         return Llava16Model
+
+    if name == "STVGR1":
+        from .stvg_r1 import STVGR1
+
+        return STVGR1
 
     if name == "VideoChatR1":
         from .videochat_r1 import VideoChatR1

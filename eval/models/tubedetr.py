@@ -4,16 +4,13 @@ from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
-
 def _recover_raw_query(query_text: str) -> str:
     text = str(query_text or "").strip()
     m = re.match(r"Where does (.+?) occur in the video\?", text, flags=re.DOTALL)
     return m.group(1).strip() if m else text
 
-
 def _extract_video_path(video_input: str) -> str:
     return str(video_input or "").split("::split=", 1)[0]
-
 
 def _normalize_frame_boxes(frame_map: Any) -> Dict[str, List[float]]:
     out = {}
@@ -28,7 +25,6 @@ def _normalize_frame_boxes(frame_map: Any) -> Dict[str, List[float]]:
         if len(vals) == 4:
             out[str(frame)] = [max(0.0, min(1.0, v)) for v in vals]
     return out
-
 
 def _normalize_prediction_payload(payload: Any, fallback_description: str = "target") -> str:
     if isinstance(payload, str):
@@ -53,7 +49,6 @@ def _normalize_prediction_payload(payload: Any, fallback_description: str = "tar
             normalized[str(desc).strip() or fallback_description] = boxes
     return json.dumps(normalized, ensure_ascii=False) if normalized else "{}"
 
-
 class TubeDETRModel:
     prompt_style = "json"
     use_video_input_path = True
@@ -71,7 +66,7 @@ class TubeDETRModel:
             raise FileNotFoundError(f"TUBEDETR_DIR does not exist: {repo_dir}")
         self.repo_dir = str(repo_dir)
         self.python_bin = os.getenv("TUBEDETR_PYTHON") or str(repo_dir / ".venv" / "bin" / "python")
-        self.util_path = os.getenv("TUBEDETR_INFER_PY") or str(Path(__file__).resolve().parents[1] / "utils" / "tubedetr_infer_util.py")
+        self.helper_path = os.getenv("TUBEDETR_INFER_PY") or str(Path(__file__).resolve().parents[1] / "utils" / "tubedetr_infer_helper.py")
         self.checkpoint = os.getenv("TUBEDETR_CHECKPOINT") or self.model_path
         self.dataset_config = os.getenv("TUBEDETR_DATASET_CONFIG", "config/vidstg.json")
         self.combine_datasets = os.getenv("TUBEDETR_COMBINE_DATASETS", "vidstg").split(",")
@@ -84,9 +79,9 @@ class TubeDETRModel:
         self.last_user_prompts = []
         self.last_raw_responses = []
 
-    def _run_util(self, manifest_path: Path, output_path: Path):
+    def _run_helper(self, manifest_path: Path, output_path: Path):
         cmd = [
-            self.python_bin, str(Path(self.util_path).expanduser().resolve()),
+            self.python_bin, str(Path(self.helper_path).expanduser().resolve()),
             "--manifest", str(manifest_path), "--output", str(output_path),
             "--tubedetr-dir", self.repo_dir, "--checkpoint", self.checkpoint,
             "--dataset-config", self.dataset_config,
@@ -99,11 +94,11 @@ class TubeDETRModel:
             env["CUDA_VISIBLE_DEVICES"] = self.cuda_visible_devices
         proc = subprocess.run(cmd, cwd=self.repo_dir, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if proc.stdout.strip():
-            logger.info("TubeDETR util stdout:\n%s", proc.stdout.strip())
+            logger.info("TubeDETR helper stdout:\n%s", proc.stdout.strip())
         if proc.stderr.strip():
-            logger.warning("TubeDETR util stderr:\n%s", proc.stderr.strip())
+            logger.warning("TubeDETR helper stderr:\n%s", proc.stderr.strip())
         if proc.returncode != 0:
-            raise RuntimeError(f"TubeDETR util failed.\nCommand: {' '.join(cmd)}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+            raise RuntimeError(f"TubeDETR helper failed.\nCommand: {' '.join(cmd)}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
         rows = []
         with output_path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -130,7 +125,7 @@ class TubeDETRModel:
                     "queryid": meta.get("queryid"),
                 }, ensure_ascii=False) + "\n")
         try:
-            rows = self._run_util(manifest_path, output_path)
+            rows = self._run_helper(manifest_path, output_path)
             outputs, raws = [], []
             for idx, row in enumerate(rows):
                 fallback = self.last_user_prompts[idx] if idx < len(self.last_user_prompts) else "target"

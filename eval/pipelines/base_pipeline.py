@@ -1,6 +1,6 @@
 import json
-import inspect
 import logging
+import inspect
 from pathlib import Path
 from typing import List, Dict, Any
 from datetime import datetime
@@ -103,36 +103,43 @@ class BasePipeline(ABC):
 
     def run_evaluation(self):
         logger.info(f"Starting {self.get_dataset_name()} Evaluation")
-        
-        samples = self.load_data()
-        
-        all_results = []
-        for i in range(0, len(samples), self.batch_size):
-            batch = samples[i:i + self.batch_size]
-            logger.info(f"Processing batch {i // self.batch_size + 1}/{(len(samples) + self.batch_size - 1) // self.batch_size}")
-            
-            batch_results = self._process_batch(batch)
-            all_results.extend(batch_results)
-        
-        avg_metrics = self._compute_average_metrics(all_results)
-        
-        self._save_results(all_results, avg_metrics)
-        
-        logger.info("Evaluation completed")
-        
-        return avg_metrics
+
+        try:
+            samples = self.load_data()
+
+            all_results = []
+            for i in range(0, len(samples), self.batch_size):
+                batch = samples[i:i + self.batch_size]
+                logger.info(f"Processing batch {i // self.batch_size + 1}/{(len(samples) + self.batch_size - 1) // self.batch_size}")
+
+                batch_results = self._process_batch(batch)
+                all_results.extend(batch_results)
+
+            avg_metrics = self._compute_average_metrics(all_results)
+
+            self._save_results(all_results, avg_metrics)
+
+            logger.info("Evaluation completed")
+
+            return all_results, avg_metrics
+        finally:
+            close_fn = getattr(self.model, "close", None)
+            if callable(close_fn):
+                close_fn()
     
     def _process_batch(self, batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         video_paths = []
         video_metas = []
         for sample in batch:
             video_path = sample['video_path']
-            video_paths.append(sample.get('video_input_path', video_path))
+            if getattr(self.model, "use_video_input_path", False):
+                video_paths.append(sample.get('video_input_path', video_path))
+            else:
+                video_paths.append(video_path)
             video_metas.append(sample.get('metadata') or {})
             logger.info(f"Using original video: {video_path}")
         
-        prompt_style = getattr(self.model, "prompt_style", "json")
-        queries = [format_prompt(sample['query'], prompt_style=prompt_style) for sample in batch]
+        queries = [format_prompt(sample['query']) for sample in batch]
 
         predict_kwargs = {
             "queries": queries,
@@ -146,16 +153,9 @@ class BasePipeline(ABC):
         raw_responses = getattr(self.model, "last_raw_responses", full_responses)
         
         batch_results = []
-        sampled_frame_indices = getattr(self.model, "last_video_frame_indices", [])
         for idx, (sample, full_response) in enumerate(zip(batch, full_responses)):
             raw_response = raw_responses[idx] if idx < len(raw_responses) else full_response
-            sample_indices = sampled_frame_indices[idx] if idx < len(sampled_frame_indices) else None
-            parsed = parse_response(
-                full_response,
-                query=sample.get('query'),
-                sampled_indices=sample_indices,
-                prompt_style=prompt_style,
-            )
+            parsed = parse_response(full_response)
             gt_tracks_sampled = self._build_gt_tracks(sample)
             pred_tracks_sampled = self._build_pred_tracks(parsed)
             if len(gt_tracks_sampled) == 1 and len(pred_tracks_sampled) == 1:

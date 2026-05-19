@@ -1,0 +1,27 @@
+[project]
+name = "eval-vtimellm"
+version = "0.1.0"
+description = "Evaluation environment for VTimeLLM"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "torch==2.1.2",
+    "torchvision==0.16.2",
+    "accelerate==0.21.0",
+    "decord==0.6.0",
+    "easydict>=1.13",
+    "einops==0.6.1",
+    "fire>=0.7.1",
+    "numpy==1.26.4",
+    "clip @ git+https://github.com/openai/CLIP.git",
+    "peft==0.4.0",
+    "pillow==10.3.0",
+    "sentencepiece==0.1.99",
+    "tokenizers==0.13.3",
+    "transformers==4.31.0",
+]
+
+[[tool.uv.index]]
+name = "tsinghua-pypi"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true

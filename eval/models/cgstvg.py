@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 def _recover_raw_query(query_text: str) -> str:
     text = str(query_text or "").strip()
     match = re.match(r"Where does (.+?) occur in the video\?", text, flags=re.DOTALL)
-    return match.group(1).strip() if match else text
+    if match:
+        return match.group(1).strip()
+    return text
 
 
 def _extract_video_path(video_input: str) -> str:
@@ -25,6 +27,7 @@ def _normalize_frame_boxes(frame_map: Any) -> Dict[str, List[float]]:
     normalized: Dict[str, List[float]] = {}
     if not isinstance(frame_map, dict):
         return normalized
+
     for frame_idx_text, coords in frame_map.items():
         try:
             frame_idx = int(str(frame_idx_text).strip())
@@ -43,15 +46,19 @@ def _normalize_prediction_payload(payload: Any, fallback_description: str = "tar
             payload = json.loads(payload)
         except json.JSONDecodeError:
             return payload
+
     if not isinstance(payload, dict):
         return "{}"
+
     raw_response = payload.get("raw_response")
     if isinstance(raw_response, str):
         try:
             return _normalize_prediction_payload(json.loads(raw_response), fallback_description)
         except json.JSONDecodeError:
             return raw_response
+
     normalized: Dict[str, Dict[str, List[float]]] = {}
+
     objects = payload.get("objects")
     if isinstance(objects, list):
         for item in objects:
@@ -63,6 +70,7 @@ def _normalize_prediction_payload(payload: Any, fallback_description: str = "tar
                 normalized[description] = boxes
         if normalized:
             return json.dumps(normalized, ensure_ascii=False)
+
     prediction = payload.get("prediction")
     if isinstance(prediction, dict):
         for description, frame_map in prediction.items():
@@ -71,12 +79,14 @@ def _normalize_prediction_payload(payload: Any, fallback_description: str = "tar
                 normalized[str(description).strip() or fallback_description] = boxes
         if normalized:
             return json.dumps(normalized, ensure_ascii=False)
+
     for description, frame_map in payload.items():
         if description in {"objects", "prediction", "raw_response", "query", "video_path"}:
             continue
         boxes = _normalize_frame_boxes(frame_map)
         if boxes:
             normalized[str(description).strip() or fallback_description] = boxes
+
     if normalized:
         return json.dumps(normalized, ensure_ascii=False)
     return "{}"
@@ -87,7 +97,7 @@ class CGSTVGModel:
     env_prefix = "CGSTVG"
     model_label = "CGSTVG"
     repo_flag = "--cgstvg-dir"
-    default_util_name = "cgstvg_infer_util.py"
+    default_helper_name = "cgstvg_infer_helper.py"
 
     def __init__(
         self,
@@ -113,8 +123,8 @@ class CGSTVGModel:
         self.repo_dir = str(repo_dir)
 
         self.python_bin = os.getenv(f"{prefix}_PYTHON") or str(repo_dir / ".venv" / "bin" / "python")
-        self.util_path = os.getenv(f"{prefix}_INFER_PY") or str(
-            Path(__file__).resolve().parents[1] / "utils" / self.default_util_name
+        self.helper_path = os.getenv(f"{prefix}_INFER_PY") or str(
+            Path(__file__).resolve().parents[1] / "utils" / self.default_helper_name
         )
         self.model_weight = os.getenv(f"{prefix}_MODEL_WEIGHT") or self.model_path
         self.cuda_visible_devices = os.getenv(f"{prefix}_CUDA_VISIBLE_DEVICES") or os.getenv("CUDA_VISIBLE_DEVICES")
@@ -126,17 +136,17 @@ class CGSTVGModel:
         self.last_user_prompts: List[str] = []
         self.last_raw_responses: List[str] = []
 
-    def _run_util(self, manifest_path: Path, output_path: Path) -> List[Dict[str, Any]]:
-        util = Path(self.util_path).expanduser().resolve()
-        if not util.exists():
+    def _run_helper(self, manifest_path: Path, output_path: Path) -> List[Dict[str, Any]]:
+        helper = Path(self.helper_path).expanduser().resolve()
+        if not helper.exists():
             raise FileNotFoundError(
-                f"{self.model_label} util not found at {util}. "
-                f"Set {self.env_prefix}_INFER_PY to the official inference util."
+                f"{self.model_label} helper not found at {helper}. "
+                f"Set {self.env_prefix}_INFER_PY to the official inference wrapper."
             )
 
         cmd = [
             self.python_bin,
-            str(util),
+            str(helper),
             "--manifest",
             str(manifest_path),
             "--output",
@@ -159,7 +169,7 @@ class CGSTVGModel:
         if self.cuda_visible_devices:
             env["CUDA_VISIBLE_DEVICES"] = self.cuda_visible_devices
 
-        logger.info("Running %s util: %s", self.model_label, " ".join(cmd))
+        logger.info("Running %s helper: %s", self.model_label, " ".join(cmd))
         proc = subprocess.run(
             cmd,
             cwd=self.repo_dir,
@@ -170,19 +180,19 @@ class CGSTVGModel:
             errors="replace",
         )
         if proc.stdout.strip():
-            logger.info("%s util stdout:\n%s", self.model_label, proc.stdout.strip())
+            logger.info("%s helper stdout:\n%s", self.model_label, proc.stdout.strip())
         if proc.stderr.strip():
-            logger.warning("%s util stderr:\n%s", self.model_label, proc.stderr.strip())
+            logger.warning("%s helper stderr:\n%s", self.model_label, proc.stderr.strip())
         if proc.returncode != 0:
             raise RuntimeError(
-                f"{self.model_label} util failed.\n"
+                f"{self.model_label} helper failed.\n"
                 f"Command: {' '.join(cmd)}\n"
                 f"Return code: {proc.returncode}\n"
                 f"STDOUT:\n{proc.stdout}\n"
                 f"STDERR:\n{proc.stderr}"
             )
         if not output_path.exists():
-            raise RuntimeError(f"{self.model_label} util did not create output file: {output_path}")
+            raise RuntimeError(f"{self.model_label} helper did not create output file: {output_path}")
 
         rows: List[Dict[str, Any]] = []
         with output_path.open("r", encoding="utf-8") as f:
@@ -232,7 +242,7 @@ class CGSTVGModel:
                 )
 
         try:
-            rows = self._run_util(manifest_path, output_path)
+            rows = self._run_helper(manifest_path, output_path)
             outputs: List[str] = []
             raw_responses: List[str] = []
             for idx, row in enumerate(rows):

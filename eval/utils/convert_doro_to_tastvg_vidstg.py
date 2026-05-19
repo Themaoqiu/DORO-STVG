@@ -1,9 +1,8 @@
+import argparse
 import json
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
-import fire
 
 
 def _normalize_video_name(video_name: str) -> str:
@@ -398,13 +397,15 @@ def convert(annotation_path: Path, output_dir: Path, fps: float = 1.0) -> None:
     print(f"[convert] skipped_no_bbox={skipped_no_bbox}")
 
 
-def main(
-    annotation_path: Path,
-    output_dir: Path,
-    fps: float = 1.0,
-) -> None:
-    convert(annotation_path, output_dir, fps=fps)
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Convert DORO-STVG eval jsonl to minimal TA-STVG VidSTG layout.")
+    parser.add_argument("--annotation-path", type=Path, required=True, help="Path to DORO-STVG query_eval/query_train jsonl.")
+    parser.add_argument("--output-dir", type=Path, required=True, help="Target directory to create data/vidstg under.")
+    parser.add_argument("--fps", type=float, default=1.0, help="Dummy fps value written into sent annotations.")
+    args = parser.parse_args()
+
+    convert(args.annotation_path, args.output_dir, fps=args.fps)
 
 
 if __name__ == "__main__":
-    fire.Fire(main)
+    main()

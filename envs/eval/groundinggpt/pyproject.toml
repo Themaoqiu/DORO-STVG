@@ -1,0 +1,14 @@
+[project]
+name = "eval-groundinggpt"
+version = "0.1.0"
+description = "Evaluation wrapper environment for GroundingGPT"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+   "fire>=0.7.1",
+]
+
+[[tool.uv.index]]
+name = "tsinghua-pypi"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true

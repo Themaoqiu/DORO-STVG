@@ -1,23 +1,56 @@
 #!/bin/bash
-set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EVAL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$EVAL_DIR/.." && pwd)"
 
-export CUDA_VISIBLE_DEVICES=0
-
+VISIBLE_GPUS=3
 MODEL_NAME="groundinggpt"
-MODEL_PATH="/path/to/groundinggpt"
+GROUNDINGGPT_SOURCE_DIR="${GROUNDINGGPT_SOURCE_DIR:-/mnt/sdc/xingjianwang/yibowang/DORO-STVG-groundingGPT}"
+GROUNDINGGPT_PYTHON="${GROUNDINGGPT_PYTHON:-$REPO_ROOT/envs/eval/groundinggpt/.venv/bin/python}"
+MODEL_PATH="${MODEL_PATH:-/mnt/sdc/xingjianwang/yibowang/model_zoo/GroundingGPT}"
 DATA_NAME="doro-stvg"
-ANNOTATION_PATH="/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_21/query_eval.jsonl"
-VIDEO_DIR="/home/wangxingjian/data/vidstg/video"
-OUTPUT_DIR="/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_21/eval_groundinggpt"
+ANNOTATION_PATH="/mnt/sdc/xingjianwang/yibowang/datasets/ST-Align-Benchmark/query_train_for_eval_3uniq.jsonl"
+VIDEO_DIR="/mnt/sdc/xingjianwang/yibowang/datasets/ST-Align-Benchmark/video_test1_smoke"
+OUTPUT_DIR="./res_groundinggpt"
 BATCH_SIZE=1
-MAX_TOKENS=4096
+MAX_TOKENS=512
 MAX_MODEL_LEN=8192
-TEMPERATURE=0.1
+TEMPERATURE="${TEMPERATURE:-0.01}"
 TENSOR_PARALLEL_SIZE=1
 GPU_MEMORY_UTILIZATION=0.9
-PYTHON_BIN="python"
+GROUNDINGGPT_MAX_NEW_TOKENS="${GROUNDINGGPT_MAX_NEW_TOKENS:-1024}"
+GROUNDINGGPT_KEEP_LOGS="${GROUNDINGGPT_KEEP_LOGS:-0}"
+GROUNDINGGPT_PERSISTENT_CLI="${GROUNDINGGPT_PERSISTENT_CLI:-1}"
 
-"$PYTHON_BIN" main.py run \
+echo "=========================================="
+echo "GroundingGPT Evaluation Configuration"
+echo "=========================================="
+echo "Model Name:              $MODEL_NAME"
+echo "Model Path:              $MODEL_PATH"
+echo "GroundingGPT Source Dir: $GROUNDINGGPT_SOURCE_DIR"
+echo "GroundingGPT Python:     $GROUNDINGGPT_PYTHON"
+echo "Annotation Path:         $ANNOTATION_PATH"
+echo "Video Directory:         $VIDEO_DIR"
+echo "Output Directory:        $OUTPUT_DIR"
+echo "Batch Size:              $BATCH_SIZE"
+echo "Max Tokens:              $MAX_TOKENS"
+echo "Temperature:             $TEMPERATURE"
+echo "Max New Tokens:          $GROUNDINGGPT_MAX_NEW_TOKENS"
+echo "Keep Logs:               $GROUNDINGGPT_KEEP_LOGS"
+echo "Persistent CLI:          $GROUNDINGGPT_PERSISTENT_CLI"
+echo "Visible GPUs:            $VISIBLE_GPUS"
+echo "=========================================="
+echo ""
+
+CUDA_VISIBLE_DEVICES="$VISIBLE_GPUS" \
+GROUNDINGGPT_SOURCE_DIR="$GROUNDINGGPT_SOURCE_DIR" \
+GROUNDINGGPT_PYTHON="$GROUNDINGGPT_PYTHON" \
+GROUNDINGGPT_CUDA_VISIBLE_DEVICES="$VISIBLE_GPUS" \
+GROUNDINGGPT_MAX_NEW_TOKENS="$GROUNDINGGPT_MAX_NEW_TOKENS" \
+GROUNDINGGPT_TEMPERATURE="$TEMPERATURE" \
+GROUNDINGGPT_KEEP_LOGS="$GROUNDINGGPT_KEEP_LOGS" \
+GROUNDINGGPT_PERSISTENT_CLI="$GROUNDINGGPT_PERSISTENT_CLI" \
+"$REPO_ROOT/envs/eval/groundinggpt/.venv/bin/python" main.py run \
   --model_name="$MODEL_NAME" \
   --model_path="$MODEL_PATH" \
   --data_name="$DATA_NAME" \
