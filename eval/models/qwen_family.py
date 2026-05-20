@@ -41,7 +41,7 @@ class QwenVLBase:
         self.last_user_prompts = []
         self.last_raw_responses = []
         self.load_model()
-    
+
     def load_model(self):
         """To be implemented by subclass."""
         raise NotImplementedError
@@ -64,7 +64,7 @@ class QwenVLBase:
                     {
                         "type": "video",
                         "video": video_path,
-                        "max_pixels": 1280 * 28 * 28,
+                        "max_pixels": 512 * 28 * 28,
                     },
                     {
                         "type": "text",
@@ -169,7 +169,7 @@ class Qwen3VL(QwenVLBase):
             gpu_memory_utilization=self.gpu_memory_utilization,
             mm_processor_kwargs={
                 "min_pixels": 28 * 28,
-                "max_pixels": 1280 * 28 * 28,
+                "max_pixels": 512 * 28 * 28,
             },
             limit_mm_per_prompt={"image": 1, "video": 1},
             trust_remote_code=True,

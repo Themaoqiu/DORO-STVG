@@ -144,7 +144,7 @@ python main.py run \
 | VTimeLLM | `models/vtimellm.py` | `scripts/run_vtimellm.sh`, `scripts/run_vtimellm_temporal.sh` |
 | Grounded-Video-LLM | `models/grounded_video_llm.py` | `scripts/run_grounded_video_llm.sh`, `scripts/run_grounded_video_llm_temporal.sh` |
 | LLaVA-1.6 | `models/llava16.py` | `scripts/run_llava16.sh` |
-| VideoChat-R1 | `models/videochat_r1.py` | `scripts/run_videochat_r1.sh` |
+| VideoChat-R1 | `models/qwen_family.py` | `scripts/run_videochat_r1.sh` |
 | STVG-R1 | `models/stvg_r1.py` | `scripts/run_stvg_r1.sh` |
 | GroundingGPT | `models/groundinggpt.py` | `scripts/run_groundinggpt.sh` |
 | VideoMolmo | `models/videomolmo.py` | `scripts/run_videomolmo.sh` |

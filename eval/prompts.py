@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 
 SYSTEM_PROMPT = """You are an expert in spatiotemporal video grounding tasked with precisely locating objects/subjects in videos. You should output the space-time tube for each object the user intends to find."""
@@ -24,6 +24,14 @@ Guidelines:\n
 
 def format_prompt(query: str) -> str:
     return USER_PROMPT.format(query=query)
+
+
+def format_llavast_prompt(query: str) -> str:
+    return (
+        "Where does {query} occur in the video? Please find the location of the "
+        "corresponding subject/object in this video. Give the corresponding bounding "
+        "boxes for the object(s) in each corresponding frame.\n\n"
+    ).format(query=query)
 
 
 def _extract_json_candidate(response_text: str) -> Optional[str]:
@@ -101,6 +109,69 @@ def _parse_objects_from_json(response_text: str) -> Optional[Dict[str, Any]]:
     return result
 
 
+def _build_result_from_objects(objects: List[Dict[str, Any]]) -> Dict[str, Any]:
+    result = {
+        'temporal_span': None,
+        'spatial_bboxes': {},
+        'objects': objects,
+    }
+
+    if len(objects) == 1:
+        result['temporal_span'] = objects[0]['temporal_span']
+        result['spatial_bboxes'] = objects[0]['spatial_bboxes']
+
+    return result
+
+
+def _parse_partial_objects(response_text: str) -> Optional[Dict[str, Any]]:
+    object_headers = list(
+        re.finditer(
+            r'(?P<quote>["\'])(?P<description>[^"\']+)(?P=quote)\s*:\s*\{',
+            response_text,
+            flags=re.DOTALL,
+        )
+    )
+    if not object_headers:
+        return None
+
+    objects = []
+    for idx, match in enumerate(object_headers):
+        segment_start = match.end()
+        segment_end = object_headers[idx + 1].start() if idx + 1 < len(object_headers) else len(response_text)
+        frame_map_text = response_text[segment_start:segment_end]
+
+        spatial_bboxes = {}
+        frame_matches = re.findall(
+            r'["\']?(\d+)["\']?\s*:\s*\[\s*([^\]]+?)\s*\]',
+            frame_map_text,
+        )
+        for frame_idx_text, coords_text in frame_matches:
+            try:
+                coords = [float(x.strip()) for x in coords_text.split(",")]
+            except ValueError:
+                continue
+            if len(coords) != 4:
+                continue
+            spatial_bboxes[int(frame_idx_text)] = [max(0.0, min(1.0, c)) for c in coords]
+
+        if not spatial_bboxes:
+            continue
+
+        frames = sorted(spatial_bboxes.keys())
+        objects.append(
+            {
+                'description': match.group('description').strip(),
+                'temporal_span': (frames[0], frames[-1]),
+                'spatial_bboxes': spatial_bboxes,
+            }
+        )
+
+    if not objects:
+        return None
+
+    return _build_result_from_objects(objects)
+
+
 def parse_response(response_text: str) -> Dict[str, Any]:
     result = {
         'temporal_span': None,
@@ -111,6 +182,10 @@ def parse_response(response_text: str) -> Dict[str, Any]:
     json_result = _parse_objects_from_json(response_text)
     if json_result is not None and json_result.get("objects"):
         return json_result
+
+    partial_result = _parse_partial_objects(response_text)
+    if partial_result is not None and partial_result.get("objects"):
+        return partial_result
 
     object_matches = re.findall(
         r'["\']?([^"\':{}]+?)["\']?\s*:\s*\{([^{}]*)\}',
@@ -146,9 +221,6 @@ def parse_response(response_text: str) -> Dict[str, Any]:
                 }
             )
 
-        if len(result['objects']) == 1:
-            result['temporal_span'] = result['objects'][0]['temporal_span']
-            result['spatial_bboxes'] = result['objects'][0]['spatial_bboxes']
-        return result
+        return _build_result_from_objects(result['objects'])
 
     return result

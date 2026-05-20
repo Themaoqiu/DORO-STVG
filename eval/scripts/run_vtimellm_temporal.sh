@@ -2,10 +2,10 @@
 source ../envs/eval/vtimellm/.venv/bin/activate
 
 export CUDA_VISIBLE_DEVICES=3
-export VTIMELLM_SOURCE_DIR="${VTIMELLM_SOURCE_DIR:-/mnt/sdc/xingjianwang/yibowang/VTimeLLM}"
-export VTIMELLM_MODEL_BASE="${VTIMELLM_MODEL_BASE:-/mnt/sdc/xingjianwang/yibowang/VTimeLLM/checkpoints/vicuna-7b-v1.5}"
-export VTIMELLM_PRETRAIN_MM_MLP_ADAPTER="${VTIMELLM_PRETRAIN_MM_MLP_ADAPTER:-/mnt/sdc/xingjianwang/yibowang/VTimeLLM/checkpoints/vtimellm-vicuna-v1-5-7b-stage1/mm_projector.bin}"
-export VTIMELLM_STAGE2="${VTIMELLM_STAGE2:-/mnt/sdc/xingjianwang/yibowang/VTimeLLM/checkpoints/vtimellm-vicuna-v1-5-7b-stage2}"
+export VTIMELLM_SOURCE_DIR="/mnt/sdc/xingjianwang/yibowang/VTimeLLM"
+export VTIMELLM_MODEL_BASE="/mnt/sdc/xingjianwang/yibowang/VTimeLLM/checkpoints/vicuna-7b-v1.5"
+export VTIMELLM_PRETRAIN_MM_MLP_ADAPTER="/mnt/sdc/xingjianwang/yibowang/VTimeLLM/checkpoints/vtimellm-vicuna-v1-5-7b-stage1/mm_projector.bin"
+export VTIMELLM_STAGE2="/mnt/sdc/xingjianwang/yibowang/VTimeLLM/checkpoints/vtimellm-vicuna-v1-5-7b-stage2"
 export VTIMELLM_STAGE3="${VTIMELLM_STAGE3:-/mnt/sdc/xingjianwang/yibowang/VTimeLLM/checkpoints/vtimellm-vicuna-v1-5-7b-stage3}"
 export VTIMELLM_CLIP_PATH="${VTIMELLM_CLIP_PATH:-/mnt/sdc/xingjianwang/yibowang/VTimeLLM/checkpoints/clip/ViT-L-14.pt}"
 

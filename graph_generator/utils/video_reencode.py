@@ -1,7 +1,9 @@
 import argparse
+import os
 import subprocess
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Tuple
 
 
 VIDEO_EXTENSIONS = {".mp4", ".m4v", ".webm", ".avi", ".mkv", ".mov", ".flv", ".wmv"}
@@ -69,6 +71,25 @@ def reencode_video_fps(
         )
 
 
+def _reencode_one(
+    src: str,
+    dst: str,
+    target_fps: float,
+    codec: Optional[str],
+    overwrite: bool,
+) -> Tuple[str, bool, str]:
+    src_path = Path(src)
+    dst_path = Path(dst)
+    if dst_path.exists() and not overwrite:
+        return str(src_path), True, f"skip existing: {dst_path}"
+
+    try:
+        reencode_video_fps(src, dst, target_fps, codec)
+        return str(src_path), True, str(dst_path)
+    except Exception as e:  # noqa: BLE001
+        return str(src_path), False, str(e)
+
+
 def iter_video_files(root: Path) -> Iterable[Path]:
     for path in root.rglob("*"):
         if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS:
@@ -84,6 +105,17 @@ def main() -> None:
         "--codec",
         default=None,
         help="Video codec (default: auto-detect, e.g., libx264, libx265, mpeg4)",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=max(1, (os.cpu_count() or 1) // 2),
+        help="Number of parallel ffmpeg workers when --input is a folder",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing output files",
     )
     args = parser.parse_args()
 
@@ -107,16 +139,36 @@ def main() -> None:
 
     print(f"Found {len(video_files)} videos in {input_path}. Output folder: {output_root}", flush=True)
     failed = []
-    for idx, src in enumerate(video_files, 1):
+    jobs = []
+    for src in video_files:
         rel = src.relative_to(input_path)
         dst = output_root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        print(f"[{idx}/{len(video_files)}] Re-encoding: {src} -> {dst}", flush=True)
-        try:
-            reencode_video_fps(str(src), str(dst), args.fps, args.codec)
-        except Exception as e:  # noqa: BLE001
-            failed.append((src, str(e)))
-            print(f"⚠️ Skip failed video: {src}\n   Reason: {e}", flush=True)
+        jobs.append((str(src), str(dst)))
+
+    print(f"Using {args.workers} parallel workers", flush=True)
+    completed = 0
+    with ProcessPoolExecutor(max_workers=args.workers) as executor:
+        futures = {
+            executor.submit(
+                _reencode_one,
+                src,
+                dst,
+                args.fps,
+                args.codec,
+                args.overwrite,
+            ): (src, dst)
+            for src, dst in jobs
+        }
+        for future in as_completed(futures):
+            src, dst = futures[future]
+            completed += 1
+            ok_src, ok, message = future.result()
+            if ok:
+                print(f"[{completed}/{len(video_files)}] Done: {ok_src} -> {message}", flush=True)
+            else:
+                failed.append((src, message))
+                print(f"[{completed}/{len(video_files)}] Failed: {src}\n   Reason: {message}", flush=True)
 
     print(
         f"Done. Success: {len(video_files) - len(failed)}, Failed: {len(failed)}, Total: {len(video_files)}",

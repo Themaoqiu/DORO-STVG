@@ -4,11 +4,12 @@ import os
 import queue
 import re
 import subprocess
-import tempfile
 import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+from dependence.groundinggpt import BUNDLED_ROOT
 
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,7 @@ def _one_line_prompt(text: str) -> str:
 
 def _compact_groundinggpt_prompt(text: str) -> str:
     prompt = _one_line_prompt(text)
-    return prompt + " For GroundingGPT evaluation, output at most 32 frame keys."
+    return prompt
 
 
 def _normalize_frame_boxes(frame_map) -> Dict[str, List[float]]:
@@ -136,26 +137,13 @@ class GroundingGPTModel:
         self.batch_size = batch_size
         self.max_tokens = max_tokens
         self.temperature = temperature
-        self.keep_logs = os.getenv("GROUNDINGGPT_KEEP_LOGS", "0").lower() in {"1", "true", "yes"}
 
-        source_dir = os.getenv("GROUNDINGGPT_SOURCE_DIR") or os.getenv("GROUNDINGGPT_REPO")
-        if not source_dir:
-            raise RuntimeError(
-                "GROUNDINGGPT_SOURCE_DIR is required. Set it to the GroundingGPT code checkout "
-                "prepared by the evaluation environment, while MODEL_PATH points to the external model weights."
-            )
-        self.source_dir = Path(source_dir).expanduser().resolve()
+        self.source_dir = BUNDLED_ROOT
         if not self.source_dir.exists():
             raise FileNotFoundError(
                 f"GroundingGPT source directory not found at {self.source_dir}. "
-                "Clone https://github.com/lzw-lzw/GroundingGPT outside this evaluation framework "
-                "or provide a prepared source checkout through GROUNDINGGPT_SOURCE_DIR."
+                "Expected the bundled official repository under eval/dependence/groundinggpt."
             )
-
-        python_bin = os.getenv("GROUNDINGGPT_PYTHON")
-        if not python_bin:
-            raise RuntimeError("GROUNDINGGPT_PYTHON is required (python executable with GroundingGPT dependencies).")
-        self.python_bin = str(Path(python_bin).expanduser())
 
         self.cli_py = self.source_dir / "lego" / "serve" / "cli.py"
         if not self.cli_py.exists():
@@ -164,13 +152,11 @@ class GroundingGPTModel:
         self.default_max_new_tokens = int(os.getenv("GROUNDINGGPT_MAX_NEW_TOKENS", str(max(self.max_tokens, 1024))))
         self.default_temperature = float(os.getenv("GROUNDINGGPT_TEMPERATURE", str(self.temperature)))
         self.cuda_visible_devices = os.getenv("GROUNDINGGPT_CUDA_VISIBLE_DEVICES") or os.getenv("CUDA_VISIBLE_DEVICES")
-        self.persistent_cli = _enabled_env("GROUNDINGGPT_PERSISTENT_CLI", "1")
         self.cli_timeout = float(os.getenv("GROUNDINGGPT_CLI_TIMEOUT", "600"))
 
         self._proc: Optional[subprocess.Popen] = None
         self._stdout_queue: "queue.Queue[str]" = queue.Queue()
-        self._stderr_chunks: List[str] = []
-        self._session_chunks: List[str] = []
+        self.system_prompt: Optional[str] = None
 
 
         self.last_user_prompts = []
@@ -178,8 +164,8 @@ class GroundingGPTModel:
         logger.info("Initialized groundinggpt adapter | source=%s cli=%s", self.source_dir, self.cli_py)
 
     def _build_cmd(self) -> List[str]:
-        return [
-            self.python_bin,
+        cmd = [
+            "python",
             str(self.cli_py),
             "--model_path",
             self.model_path,
@@ -188,10 +174,18 @@ class GroundingGPTModel:
             "--max_new_tokens",
             str(self.default_max_new_tokens),
         ]
+        if self.system_prompt is not None:
+            cmd.extend(["--system_prompt", self.system_prompt])
+        return cmd
 
     def _build_env(self) -> Dict[str, str]:
         env = os.environ.copy()
-        env["PYTHONPATH"] = str(self.source_dir)
+        existing_pythonpath = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = (
+            str(self.source_dir)
+            if not existing_pythonpath
+            else str(self.source_dir) + os.pathsep + existing_pythonpath
+        )
         for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
             env.pop(key, None)
         if self.cuda_visible_devices:
@@ -222,7 +216,6 @@ class GroundingGPTModel:
             chunks.append(char)
             text = "".join(chunks)
             if any(pattern in text for pattern in patterns):
-                self._session_chunks.append(text)
                 return text
         raise TimeoutError(f"Timed out waiting for GroundingGPT prompt {patterns}")
 
@@ -230,8 +223,6 @@ class GroundingGPTModel:
         if self._proc is not None and self._proc.poll() is None:
             return
         self._stdout_queue = queue.Queue()
-        self._stderr_chunks = []
-        self._session_chunks = []
         self._proc = subprocess.Popen(
             self._build_cmd(),
             cwd=str(self.source_dir),
@@ -245,7 +236,7 @@ class GroundingGPTModel:
             bufsize=0,
         )
         threading.Thread(target=self._read_stream, args=(self._proc.stdout, self._stdout_queue, None), daemon=True).start()
-        threading.Thread(target=self._read_stream, args=(self._proc.stderr, None, self._stderr_chunks), daemon=True).start()
+        threading.Thread(target=self._read_stream, args=(self._proc.stderr, None, None), daemon=True).start()
         self._read_until(["Human:"], timeout=self.cli_timeout)
 
     def _stop_cli(self) -> None:
@@ -284,24 +275,14 @@ class GroundingGPTModel:
 
         full_output = self._run_persistent(prompt, real_video_path)
 
-        if self.keep_logs:
-            log_dir = Path(tempfile.mkdtemp(prefix="groundinggpt_eval_"))
-            (log_dir / "session.log").write_text(full_output, encoding="utf-8")
-            logger.info("Saved GroundingGPT session log to %s", log_dir / "session.log")
-
         normalized = _normalize_response_text(full_output, fallback_description="target")
         return normalized, full_output
 
     def predict_batch(self, queries: List[str], video_paths: List[str], system_prompt: str) -> List[str]:
-        del system_prompt
+        self.system_prompt = system_prompt
         self.last_user_prompts = list(queries)
         pairs = [self._run_one(query, video_path) for query, video_path in zip(queries, video_paths)]
         outputs = [normalized for normalized, _raw in pairs]
         self.last_raw_responses = [raw for _normalized, raw in pairs]
-        if self.keep_logs and self._session_chunks:
-            log_dir = Path(tempfile.mkdtemp(prefix="groundinggpt_eval_session_"))
-            (log_dir / "session.log").write_text("".join(self._session_chunks), encoding="utf-8")
-            (log_dir / "stderr.log").write_text("".join(self._stderr_chunks), encoding="utf-8")
-            logger.info("Saved GroundingGPT persistent session logs to %s", log_dir)
         self._stop_cli()
         return outputs

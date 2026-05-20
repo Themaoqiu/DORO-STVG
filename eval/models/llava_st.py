@@ -1,115 +1,34 @@
 import copy
-import importlib.util
 import json
 import logging
 import os
 import re
-from pathlib import Path
+from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from decord import VideoReader, cpu
+from dependence.llavast.inference.src.datasets import load_video
+from dependence.llavast.inference.src.utils import get_variables
+from dependence.llavast.llava import conversation as conversation_lib
+from dependence.llavast.llava.constants import (
+    DEFAULT_IM_END_TOKEN,
+    DEFAULT_IM_START_TOKEN,
+    DEFAULT_IMAGE_PATCH_TOKEN,
+    DEFAULT_IMAGE_TOKEN,
+    DEFAULT_SLOW_VID_END_TOKEN,
+    DEFAULT_SLOW_VID_START_TOKEN,
+    DEFAULT_VID_END_TOKEN,
+    DEFAULT_VID_START_TOKEN,
+    DEFAULT_VIDEO_PATCH_TOKEN,
+    DEFAULT_VIDEO_TOKEN,
+    IGNORE_INDEX,
+    IMAGE_TOKEN_INDEX,
+)
+from dependence.llavast.llava.model.builder import load_lora_model
 
 os.environ["DECORD_EOF_RETRY_MAX"] = "20480"
 logger = logging.getLogger(__name__)
-LLAVA_ST_DEPENDENCIES_LOADED = False
-
-
-def _bundled_llava_st_root() -> Path:
-    env_root = os.getenv("LLAVA_ST_SOURCE_DIR")
-    if env_root:
-        return Path(env_root).expanduser().resolve()
-
-    raise ImportError(
-        "LLAVA_ST_SOURCE_DIR is not set. Install the external LLaVA-ST repository "
-        "into envs/eval/llavast or set LLAVA_ST_SOURCE_DIR=/path/to/LLaVA-ST."
-    )
-
-
-def _load_bundled_get_variables():
-    source_root = _bundled_llava_st_root()
-    utils_path = source_root / "inference" / "src" / "utils.py"
-    if not utils_path.exists():
-        raise ImportError(f"LLaVA-ST inference utilities not found at {utils_path}")
-
-    spec = importlib.util.spec_from_file_location("_llava_st_inference_utils", utils_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Failed to load module spec for {utils_path}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.get_variables
-
-
-def _ensure_llava_st_dependencies() -> None:
-    global LLAVA_ST_DEPENDENCIES_LOADED
-    global conversation_lib
-    global get_variables
-    global load_lora_model
-    global DEFAULT_IM_END_TOKEN
-    global DEFAULT_IM_START_TOKEN
-    global DEFAULT_IMAGE_PATCH_TOKEN
-    global DEFAULT_IMAGE_TOKEN
-    global DEFAULT_SLOW_VID_END_TOKEN
-    global DEFAULT_SLOW_VID_START_TOKEN
-    global DEFAULT_VID_END_TOKEN
-    global DEFAULT_VID_START_TOKEN
-    global DEFAULT_VIDEO_PATCH_TOKEN
-    global DEFAULT_VIDEO_TOKEN
-    global IGNORE_INDEX
-    global IMAGE_TOKEN_INDEX
-
-    if LLAVA_ST_DEPENDENCIES_LOADED:
-        return
-
-    try:
-        from llava import conversation as imported_conversation_lib
-        from llava.constants import (
-            DEFAULT_IM_END_TOKEN as imported_default_im_end_token,
-            DEFAULT_IM_START_TOKEN as imported_default_im_start_token,
-            DEFAULT_IMAGE_PATCH_TOKEN as imported_default_image_patch_token,
-            DEFAULT_IMAGE_TOKEN as imported_default_image_token,
-            DEFAULT_SLOW_VID_END_TOKEN as imported_default_slow_vid_end_token,
-            DEFAULT_SLOW_VID_START_TOKEN as imported_default_slow_vid_start_token,
-            DEFAULT_VID_END_TOKEN as imported_default_vid_end_token,
-            DEFAULT_VID_START_TOKEN as imported_default_vid_start_token,
-            DEFAULT_VIDEO_PATCH_TOKEN as imported_default_video_patch_token,
-            DEFAULT_VIDEO_TOKEN as imported_default_video_token,
-            IGNORE_INDEX as imported_ignore_index,
-            IMAGE_TOKEN_INDEX as imported_image_token_index,
-        )
-        from llava.model.builder import load_lora_model as imported_load_lora_model
-    except ImportError as exc:
-        raise ImportError(
-            "Failed to import LLaVA-ST dependencies. Run with envs/eval/llavast "
-            "and install the external LLaVA-ST repository, for example: "
-            "uv pip install -e /path/to/LLaVA-ST"
-        ) from exc
-
-    try:
-        from inference.src.utils import get_variables as imported_get_variables
-    except ModuleNotFoundError as exc:
-        if exc.name != "inference":
-            raise
-        imported_get_variables = _load_bundled_get_variables()
-
-    conversation_lib = imported_conversation_lib
-    get_variables = imported_get_variables
-    load_lora_model = imported_load_lora_model
-    DEFAULT_IM_END_TOKEN = imported_default_im_end_token
-    DEFAULT_IM_START_TOKEN = imported_default_im_start_token
-    DEFAULT_IMAGE_PATCH_TOKEN = imported_default_image_patch_token
-    DEFAULT_IMAGE_TOKEN = imported_default_image_token
-    DEFAULT_SLOW_VID_END_TOKEN = imported_default_slow_vid_end_token
-    DEFAULT_SLOW_VID_START_TOKEN = imported_default_slow_vid_start_token
-    DEFAULT_VID_END_TOKEN = imported_default_vid_end_token
-    DEFAULT_VID_START_TOKEN = imported_default_vid_start_token
-    DEFAULT_VIDEO_PATCH_TOKEN = imported_default_video_patch_token
-    DEFAULT_VIDEO_TOKEN = imported_default_video_token
-    IGNORE_INDEX = imported_ignore_index
-    IMAGE_TOKEN_INDEX = imported_image_token_index
-    LLAVA_ST_DEPENDENCIES_LOADED = True
 
 
 def preprocess_qwen(
@@ -211,20 +130,6 @@ def preprocess_multimodal(sources, vision_config):
     return sources
 
 
-def _load_video_frames(video_path: str, max_frames: int) -> Tuple[np.ndarray, List[int]]:
-    vr = VideoReader(video_path, ctx=cpu(0))
-    total = len(vr)
-    if total <= 0:
-        raise ValueError(f"Empty video: {video_path}")
-
-    if max_frames <= 1:
-        indices = [0]
-    else:
-        indices = [round((i / (max_frames - 1)) * (total - 1)) for i in range(max_frames)]
-    frames = vr.get_batch(indices).asnumpy()
-    return frames, indices
-
-
 def _llava_st_tokens_to_json(response_text: str, sampled_indices: List[int]) -> str:
     frame_map: Dict[str, List[float]] = {}
 
@@ -283,13 +188,16 @@ class LlavaSTQwen2:
         self.max_frames = int(os.getenv("LLAVA_ST_MAX_FRAMES", "100"))
         self.vt_chunk = int(os.getenv("LLAVA_ST_VT_CHUNK", "1"))
         self.use_cache = os.getenv("LLAVA_ST_USE_CACHE", "1").lower() in {"1", "true", "yes"}
+        self.video_cache_size = max(0, int(os.getenv("LLAVA_ST_VIDEO_CACHE_SIZE", "16")))
         self.decode_temperature = temperature if temperature > 0 else float(os.getenv("LLAVA_ST_FALLBACK_TEMPERATURE", "0.01"))
+        self.vision_tower_path = os.getenv("LLAVA_ST_VISION_TOWER", "").strip()
+        self.do_sample = temperature > 0
+        self.use_llavast_user_prompt = True
+        self._video_cache: "OrderedDict[str, Tuple[torch.Tensor, List[int]]]" = OrderedDict()
 
         self.last_user_prompts: List[str] = []
         self.last_raw_responses: List[str] = []
         self.last_video_frame_indices: List[List[int]] = []
-
-        _ensure_llava_st_dependencies()
 
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is required for llava-st-qwen2.")
@@ -298,16 +206,21 @@ class LlavaSTQwen2:
         self.device = torch.device("cuda:0")
         self.dtype = torch.float16
 
+        overwrite_config = {
+            "num_spatial_tokens": 100,
+            "num_temporal_tokens": 100,
+        }
+        if self.vision_tower_path:
+            overwrite_config["vision_tower"] = self.vision_tower_path
+            overwrite_config["mm_vision_tower"] = self.vision_tower_path
+
         self.tokenizer, self.model, self.image_processor, _ = load_lora_model(
             [],
             self.model_path,
             "llava_qwen",
             device_map="auto",
             attn_implementation="sdpa",
-            overwrite_config={
-                "num_spatial_tokens": 100,
-                "num_temporal_tokens": 100,
-            },
+            overwrite_config=overwrite_config,
         )
         self.model.eval()
 
@@ -335,19 +248,37 @@ class LlavaSTQwen2:
 
         logger.info(
             "Initialized llava-st-qwen2 | source=%s device=%s dtype=%s max_frames=%s vt_chunk=%s",
-            _bundled_llava_st_root(),
+            "dependence.llavast",
             self.device,
             self.dtype,
             self.max_frames,
             self.vt_chunk,
         )
 
-    def _predict_one(self, query: str, video_path: str, system_prompt: str) -> Tuple[str, List[int]]:
-        del system_prompt
+    def _get_video_features(self, video_path: str) -> Tuple[torch.Tensor, List[int]]:
+        cached = self._video_cache.get(video_path)
+        if cached is not None:
+            self._video_cache.move_to_end(video_path)
+            video_tensor, sampled_indices = cached
+            return video_tensor.to(device=self.device, dtype=self.dtype, non_blocking=True), list(sampled_indices)
 
-        frames, sampled_indices = _load_video_frames(video_path, max_frames=self.max_frames)
-        video_tensor = self.image_processor.preprocess(frames, return_tensors="pt")["pixel_values"]
-        video_tensor = video_tensor.to(device=self.device, dtype=self.dtype, non_blocking=True)
+        frames, sampled_indices = load_video(
+            video_path,
+            n_frms=self.max_frames,
+            return_id=True,
+        )
+        video_tensor = self.image_processor.preprocess(frames, return_tensors="pt")["pixel_values"].to(dtype=self.dtype)
+
+        if self.video_cache_size > 0:
+            self._video_cache[video_path] = (video_tensor.cpu(), list(sampled_indices))
+            self._video_cache.move_to_end(video_path)
+            while len(self._video_cache) > self.video_cache_size:
+                self._video_cache.popitem(last=False)
+
+        return video_tensor.to(device=self.device, dtype=self.dtype, non_blocking=True), sampled_indices
+
+    def _predict_one(self, query: str, video_path: str, system_prompt: str) -> Tuple[str, List[int]]:
+        video_tensor, sampled_indices = self._get_video_features(video_path)
 
         conversations = [
             {
@@ -365,6 +296,7 @@ class LlavaSTQwen2:
             [sources[0][0], {"from": "gpt", "value": None}],
             self.tokenizer,
             has_image=True,
+            system_message=system_prompt,
         ).to(self.device)
         attention_mask = torch.ones_like(input_ids, device=self.device)
 
@@ -375,7 +307,7 @@ class LlavaSTQwen2:
                 images=[video_tensor],
                 modalities=["video"],
                 variables=[variables],
-                do_sample=True,
+                do_sample=self.do_sample,
                 temperature=self.decode_temperature,
                 top_p=None,
                 num_beams=1,

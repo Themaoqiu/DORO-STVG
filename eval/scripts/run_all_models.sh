@@ -195,9 +195,6 @@ configure_model() {
       MODEL_NAME="videochat-r1"
       MODEL_PATH="${VIDEOCHAT_R1_MODEL_PATH:-/mnt/sdc/xingjianwang/yibowang/model_zoo/VideoChat-R1_7B}"
       GPU_MEMORY_UTILIZATION="${VIDEOCHAT_R1_GPU_MEMORY_UTILIZATION:-0.8}"
-      export VIDEOCHAT_R1_MAX_FRAMES="${VIDEOCHAT_R1_MAX_FRAMES:-32}"
-      export VIDEOCHAT_R1_CLIP_FPS="${VIDEOCHAT_R1_CLIP_FPS:-2.0}"
-      export VIDEOCHAT_R1_KEEP_TMP="${VIDEOCHAT_R1_KEEP_TMP:-0}"
       ;;
 
     stvg-r1|stvg_r1|stvgr1)
@@ -220,12 +217,12 @@ configure_model() {
       MODEL_NAME="groundinggpt"
       MODEL_PATH="${GROUNDINGGPT_MODEL_PATH:-/mnt/sdc/xingjianwang/yibowang/model_zoo/GroundingGPT}"
       TEMPERATURE="${GROUNDINGGPT_TEMPERATURE:-0.01}"
-      export GROUNDINGGPT_SOURCE_DIR="${GROUNDINGGPT_SOURCE_DIR:-/mnt/sdc/xingjianwang/yibowang/DORO-STVG-groundingGPT}"
-      export GROUNDINGGPT_PYTHON="${GROUNDINGGPT_PYTHON:-$REPO_ROOT/envs/eval/groundinggpt/.venv/bin/python}"
       export GROUNDINGGPT_CUDA_VISIBLE_DEVICES="$VISIBLE_GPUS"
+      export GROUNDINGGPT_CLIP_VISION_TOWER="${GROUNDINGGPT_CLIP_VISION_TOWER:-/mnt/sdc/xingjianwang/models/GroundingGPT/clip-vit-large-patch14-336}"
+      export GROUNDINGGPT_BERT_PATH="${GROUNDINGGPT_BERT_PATH:-/mnt/sdc/xingjianwang/models/GroundingGPT/bert-base-uncased}"
+      export GROUNDINGGPT_IMAGEBIND_PATH="${GROUNDINGGPT_IMAGEBIND_PATH:-/mnt/sdc/xingjianwang/models/GroundingGPT/imagebind/imagebind_huge.pth}"
+      export GROUNDINGGPT_EVA_VIT_G_PATH="${GROUNDINGGPT_EVA_VIT_G_PATH:-/mnt/sdc/xingjianwang/models/GroundingGPT/eva_vit_g.pth}"
       export GROUNDINGGPT_MAX_NEW_TOKENS="${GROUNDINGGPT_MAX_NEW_TOKENS:-1024}"
-      export GROUNDINGGPT_KEEP_LOGS="${GROUNDINGGPT_KEEP_LOGS:-0}"
-      export GROUNDINGGPT_PERSISTENT_CLI="${GROUNDINGGPT_PERSISTENT_CLI:-1}"
       ;;
 
     videomolmo|video-molmo)

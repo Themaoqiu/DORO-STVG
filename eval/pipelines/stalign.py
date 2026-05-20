@@ -48,15 +48,9 @@ class STAlignPipeline(BasePipeline):
             }]
 
             meta = anno.get("meta", {})
-            split = _get_split(meta)
-            video_input_path = str(video_path)
-            if split is not None:
-                video_input_path = f"{video_path}::split={split[0]}:{split[1]}"
-
             samples.append({
                 "video_name": video_name,
                 "video_path": str(video_path),
-                "video_input_path": video_input_path,
                 "query": query,
                 "gt_temporal_sampled": gt_temporal_sampled,
                 "gt_bboxes_sampled": gt_bboxes_sampled,

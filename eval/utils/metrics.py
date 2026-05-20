@@ -21,13 +21,13 @@ def compute_tiou(gt_span: TemporalSpan, pred_span: TemporalSpan) -> float:
 
     inter_start = max(gt_span[0], pred_span[0])
     inter_end = min(gt_span[1], pred_span[1])
-    if inter_end <= inter_start:
+    if inter_end < inter_start:
         return 0.0
 
-    intersection = inter_end - inter_start
+    intersection = inter_end - inter_start + 1
     union_start = min(gt_span[0], pred_span[0])
     union_end = max(gt_span[1], pred_span[1])
-    union = union_end - union_start
+    union = union_end - union_start + 1
     return intersection / union if union > 0 else 0.0
 
 

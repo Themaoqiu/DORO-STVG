@@ -23,6 +23,8 @@ dependencies = [
     "tokenizers==0.15.2",
     "black==24.1.0",
     "flake8>=7.0.0",
+    "opencv-python>=4.11.0.86",
+    "imageio>=2.37.3",
 ]
 
 [[tool.uv.index]]

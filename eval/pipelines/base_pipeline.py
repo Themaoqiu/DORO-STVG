@@ -7,7 +7,7 @@ from datetime import datetime
 from abc import ABC, abstractmethod
 
 from utils.metrics import Track, compute_metrics, compute_multi_target_metrics
-from prompts import SYSTEM_PROMPT, format_prompt, parse_response
+from prompts import SYSTEM_PROMPT, format_llavast_prompt, format_prompt, parse_response
 
 
 logger = logging.getLogger(__name__)
@@ -139,7 +139,10 @@ class BasePipeline(ABC):
             video_metas.append(sample.get('metadata') or {})
             logger.info(f"Using original video: {video_path}")
         
-        queries = [format_prompt(sample['query']) for sample in batch]
+        if getattr(self.model, "use_llavast_user_prompt", False):
+            queries = [format_llavast_prompt(sample['query']) for sample in batch]
+        else:
+            queries = [format_prompt(sample['query']) for sample in batch]
 
         predict_kwargs = {
             "queries": queries,
