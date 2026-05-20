@@ -1,4 +1,6 @@
 #!/bin/bash
+source ../envs/eval/tastvg/.venv/bin/activate
+
 export CUDA_VISIBLE_DEVICES=3
 export TASTVG_DIR=/mnt/sdc/xingjianwang/yibowang/TA-STVG
 export TASTVG_PYTHON=/mnt/sdc/xingjianwang/yibowang/TA-STVG/.venv/bin/python

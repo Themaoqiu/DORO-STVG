@@ -1,17 +1,19 @@
 #!/bin/bash
+source ../envs/eval/qwen/.venv/bin/activate
+
 export FORCE_QWENVL_VIDEO_READER=decord
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=1
 
 # Default parameters
-MODEL_NAME="qwen3.5"
-MODEL_PATH="/home/wangxingjian/model/qwen3.5-9b"
+MODEL_NAME="qwen3VL"
+MODEL_PATH="/home/wangxingjian/model/qwen3_vl_8b_instruct"
 DATA_NAME="doro-stvg"
-ANNOTATION_PATH="/home/wangxingjian/DORO-STVG/graph_generator/output/query2.jsonl"
+ANNOTATION_PATH="/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_24/query_raw.jsonl"
 VIDEO_DIR="/home/wangxingjian/data/vidstg/video"
 OUTPUT_DIR="./res"
-BATCH_SIZE=8
+BATCH_SIZE=64
 MAX_TOKENS=4096
-MAX_MODEL_LEN=64000
+MAX_MODEL_LEN=24800
 TEMPERATURE=0.1
 TENSOR_PARALLEL_SIZE=1
 GPU_MEMORY_UTILIZATION=0.9

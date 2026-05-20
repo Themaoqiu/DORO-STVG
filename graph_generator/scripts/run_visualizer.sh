@@ -1,7 +1,7 @@
 python -m utils.graph_visualizer \
     --jsonl_path /home/wangxingjian/DORO-STVG/graph_generator/output/testscene_graphs.jsonl \
-    --video_path /home/wangxingjian/data/vidstg/2451862413_2fps.mp4 \
-    --output_path /home/wangxingjian/DORO-STVG/graph_generator/output/2451862413_2fps.mp4 \
+    --video_path /home/wangxingjian/data/MOSE/MOSE_release/train/videos_1fps/2ae75f99.mp4 \
+    --output_path /home/wangxingjian/DORO-STVG/graph_generator/output/2ae75f99.mp4 \
 
 # python3 utils/hc_stvg_visualizer.py \
 #     --ann /home/wangxingjian/data/hc-stvg2/annos/test.json \

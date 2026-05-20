@@ -8,11 +8,19 @@ import fire
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
+def _is_valid_frame_file(path: Path) -> bool:
+    return (
+        path.is_file()
+        and path.suffix.lower() in IMAGE_EXTENSIONS
+        and not path.name.startswith("_")
+    )
+
+
 def _detect_frame_extension(frame_dir: Path) -> str:
     extensions = {
         path.suffix.lower()
         for path in frame_dir.iterdir()
-        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+        if _is_valid_frame_file(path)
     }
     if not extensions:
         raise ValueError(f"No supported image frames found in folder: {frame_dir}")
@@ -22,7 +30,7 @@ def _detect_frame_extension(frame_dir: Path) -> str:
 
 
 def _build_ffmpeg_pattern(frame_dir: Path, extension: str) -> str:
-    sample_names = {path.name for path in frame_dir.iterdir() if path.is_file()}
+    sample_names = {path.name for path in frame_dir.iterdir() if _is_valid_frame_file(path)}
     numbered_patterns = [
         ("00000", "%05d"),
         ("000000", "%06d"),

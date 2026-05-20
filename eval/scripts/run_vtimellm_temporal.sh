@@ -1,4 +1,6 @@
 #!/bin/bash
+source ../envs/eval/vtimellm/.venv/bin/activate
+
 export CUDA_VISIBLE_DEVICES=3
 export VTIMELLM_SOURCE_DIR="${VTIMELLM_SOURCE_DIR:-/mnt/sdc/xingjianwang/yibowang/VTimeLLM}"
 export VTIMELLM_MODEL_BASE="${VTIMELLM_MODEL_BASE:-/mnt/sdc/xingjianwang/yibowang/VTimeLLM/checkpoints/vicuna-7b-v1.5}"

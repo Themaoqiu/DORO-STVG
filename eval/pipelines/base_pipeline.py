@@ -121,7 +121,7 @@ class BasePipeline(ABC):
 
             logger.info("Evaluation completed")
 
-            return all_results, avg_metrics
+            return avg_metrics
         finally:
             close_fn = getattr(self.model, "close", None)
             if callable(close_fn):

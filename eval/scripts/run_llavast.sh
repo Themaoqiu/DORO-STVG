@@ -1,15 +1,17 @@
 #!/bin/bash
+source ../envs/eval/llavast/.venv/bin/activate
+
 export CUDA_VISIBLE_DEVICES=3
-export LLAVA_ST_SOURCE_DIR="${LLAVA_ST_SOURCE_DIR:-/mnt/sdc/xingjianwang/yibowang/LLaVA-ST}"
+export LLAVA_ST_SOURCE_DIR="/mnt/sdc/xingjianwang/yibowang/LLaVA-ST"
 
 # Default parameters
-MODEL_NAME="llava-st-qwen2"
+MODEL_NAME="llava-st"
 MODEL_PATH="/mnt/sdc/xingjianwang/yibowang/models/LLaVA-ST-Qwen2-7B"
 DATA_NAME="doro-stvg"
 ANNOTATION_PATH="/mnt/sdc/xingjianwang/yibowang/datasets/ST-Align-Benchmark/query_train_for_eval_3uniq.jsonl"
 VIDEO_DIR="/mnt/sdc/xingjianwang/yibowang/datasets/ST-Align-Benchmark/video_test1_smoke"
 OUTPUT_DIR="./res_llavast"
-BATCH_SIZE=1
+BATCH_SIZE=64
 MAX_TOKENS=512
 MAX_MODEL_LEN=8192
 TEMPERATURE=0.1

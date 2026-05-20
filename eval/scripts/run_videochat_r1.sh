@@ -1,4 +1,6 @@
 #!/bin/bash
+source ../envs/eval/videochat_r1/.venv/bin/activate
+
 export FORCE_QWENVL_VIDEO_READER=decord
 export CUDA_VISIBLE_DEVICES=3
 

@@ -1,4 +1,6 @@
 #!/bin/bash
+source ../envs/eval/grounded_video_llm/.venv/bin/activate
+
 export CUDA_VISIBLE_DEVICES=3
 export GROUNDED_VIDEO_LLM_SOURCE_DIR="/mnt/sdc/xingjianwang/yibowang/Grounded-Video-LLM"
 export GROUNDED_VIDEO_LLM_PYTHON="/mnt/sdc/xingjianwang/yibowang/DORO-STVG/envs/eval/grounded_video_llm/.venv/bin/python"

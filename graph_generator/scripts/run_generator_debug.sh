@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=2
 export HF_ENDPOINT=https://hf-mirror.com
 
 # Load project env vars if available (API_KEYS / MM_API_BASE_URL / etc.).
@@ -17,7 +17,7 @@ SAM2_MODEL_CFG="configs/sam2.1/sam2.1_hiera_l.yaml"
 SAM2_CHECKPOINT="/home/wangxingjian/DORO-STVG/graph_generator/dependence/GroundedSAM2/checkpoints/sam2.1_hiera_large.pt"
 
 python -m graph_generator \
-    --video /home/wangxingjian/data/vidstg/2451862413_2fps.mp4 \
+    --video /home/wangxingjian/data/MOSE/MOSE_release/train/videos_1fps/2ae75f99.mp4 \
     --output /home/wangxingjian/DORO-STVG/graph_generator/output/testscene_graphs.jsonl \
     --yolo_model /home/wangxingjian/model/yolo26x/yolo26x.pt \
     --tracker_backend "groundedsam2" \

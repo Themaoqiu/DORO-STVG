@@ -1,4 +1,6 @@
 #!/bin/bash
+source ../envs/eval/cgstvg/.venv/bin/activate
+
 export CUDA_VISIBLE_DEVICES=3
 export CGSTVG_DIR=/mnt/sdc/xingjianwang/yibowang/CGSTVG
 export CGSTVG_PYTHON=/mnt/sdc/xingjianwang/yibowang/CGSTVG/.venv/bin/python

@@ -1,4 +1,6 @@
 #!/bin/bash
+source ../envs/eval/tubedetr/.venv/bin/activate
+
 export CUDA_VISIBLE_DEVICES=3
 export TUBEDETR_DIR=/mnt/sdc/xingjianwang/yibowang/TubeDETR
 export TUBEDETR_PYTHON=/mnt/sdc/xingjianwang/yibowang/TubeDETR/.venv/bin/python

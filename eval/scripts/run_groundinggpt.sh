@@ -1,4 +1,5 @@
 #!/bin/bash
+source ../envs/eval/groundinggpt/.venv/bin/activate
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EVAL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$EVAL_DIR/.." && pwd)"

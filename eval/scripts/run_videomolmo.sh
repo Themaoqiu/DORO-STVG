@@ -1,4 +1,5 @@
 #!/bin/bash
+source ../envs/eval/videomolmo/.venv/bin/activate
 
 # Default parameters
 VISIBLE_GPUS=3
