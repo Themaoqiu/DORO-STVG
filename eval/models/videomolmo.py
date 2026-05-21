@@ -528,16 +528,8 @@ class VideoMolmoModel:
     def __init__(
         self,
         model_path: str,
-        batch_size: int = 1,
-        max_tokens: int = 512,
-        max_model_len: int = 8192,
-        temperature: float = 0.0,
-        tensor_parallel_size: int = 1,
-        gpu_memory_utilization: float = 0.9,
     ):
-        del model_path, max_tokens, max_model_len, temperature, tensor_parallel_size, gpu_memory_utilization
-
-        self.batch_size = batch_size
+        del model_path
         self.max_frames = int(os.getenv("VIDEOMOLMO_MAX_FRAMES", "100"))
         self.sample_fps = float(os.getenv("VIDEOMOLMO_SAMPLE_FPS", "2.0"))
         self.infer_retries = max(1, int(os.getenv("VIDEOMOLMO_INFER_RETRIES", "3")))

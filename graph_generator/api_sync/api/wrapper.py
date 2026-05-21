@@ -7,30 +7,15 @@ import json
 import base64
 import mimetypes
 from pathlib import Path
+from .vision_utils import build_multimodal_message
 
 logger = logging.getLogger(__name__)
-
-
-def _load_env_var_from_project_env(var_name: str) -> str:
-    env_path = Path(__file__).resolve().parents[2] / ".env"
-    if not env_path.exists():
-        return ""
-    with open(env_path, "r", encoding="utf-8") as f:
-        for raw_line in f:
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            if key.strip() != var_name:
-                continue
-            return value.strip().strip('"').strip("'")
-    return ""
 
 
 class QAWrapper:
     """Asynchronous wrapper for LLM API client."""
 
-    SUPPORTED_REASONING_MODELS = ["DeepSeek-R1", "gemini-3-flash"]
+    SUPPORTED_REASONING_MODELS = ["DeepSeek-R1", "gemini-3-flash-preview", "qwen3-vl-flash"]
 
     def __init__(self, model_name: str, api_key: str, max_retries: int = 5):
         """
@@ -50,27 +35,64 @@ class QAWrapper:
             os.getenv("MM_API_BASE_URL")
             or os.getenv("VISION_API_BASE_URL")
             or os.getenv("VIDEO_API_BASE_URL")
-            or _load_env_var_from_project_env("MM_API_BASE_URL")
-            or _load_env_var_from_project_env("VISION_API_BASE_URL")
-            or _load_env_var_from_project_env("VIDEO_API_BASE_URL")
             or "https://dashscope.aliyuncs.com/compatible-mode/v1"
         )
-        
+
+        default_headers = self._load_default_headers()
+
         logger.info(f"Initializing QAWrapper")
         logger.info(f"  API Base URL: {api_base_url}")
         logger.info(f"  Model: {model_name}")
         logger.info(f"  API Key: {api_key[:20]}...")
-        
-        self.client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=api_base_url
-        )
+        if default_headers:
+            logger.info(f"  Default headers: {list(default_headers.keys())}")
+
+        client_kwargs: Dict[str, Any] = {
+            "api_key": api_key,
+            "base_url": api_base_url,
+        }
+        if default_headers:
+            client_kwargs["default_headers"] = default_headers
+
+        self.client = AsyncOpenAI(**client_kwargs)
 
         self.stats = {
             "calls": 0,
             "errors": 0,
             "retries": 0
         }
+
+    @staticmethod
+    def _load_default_headers() -> Dict[str, str]:
+        """Collect optional default HTTP headers from the environment.
+
+        Supports two mechanisms, both opt-in (no effect when unset):
+          * ``MM_DEFAULT_HEADERS`` — a JSON object of arbitrary headers.
+          * ``MM_USER_EMAIL`` / ``MM_APP_ID`` — convenience vars for the
+            MAAS-style ``x-maas-user-email`` / ``x-maas-app-id`` headers.
+        """
+        headers: Dict[str, str] = {}
+
+        raw = os.getenv("MM_DEFAULT_HEADERS")
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    headers.update({str(k): str(v) for k, v in parsed.items()})
+                else:
+                    logger.warning("MM_DEFAULT_HEADERS must be a JSON object; ignored")
+            except json.JSONDecodeError as exc:
+                logger.warning(f"Failed to parse MM_DEFAULT_HEADERS as JSON: {exc}")
+
+        user_email = os.getenv("MM_USER_EMAIL")
+        if user_email:
+            headers.setdefault("x-maas-user-email", user_email)
+
+        app_id = os.getenv("MM_APP_ID")
+        if app_id:
+            headers.setdefault("x-maas-app-id", app_id)
+
+        return headers
 
     async def qa(self, system_prompt: str, user_prompt: str = "", rational: bool = False) -> Any:
         """
@@ -103,6 +125,13 @@ class QAWrapper:
                         return await self._qa_standard(system_prompt, user_prompt)
 
             except Exception as e:
+                error_text = str(e).lower()
+                if "data_inspection_failed" in error_text or "datainspectionfailed" in error_text:
+                    logger.error("Content inspection failed; skip this sample without retry")
+                    return {
+                        "answer": "__ERROR__:data_inspection_failed",
+                        "rational": ""
+                    }
                 self.stats["errors"] += 1
                 self.stats["retries"] += 1
 
@@ -195,9 +224,6 @@ class QAWrapper:
                     logger.debug(f"  Video content: {video_obj}")
                     content.append(video_obj)
                 
-                elif item.get('type') == 'video_url':
-                    content.append(item)
-                
                 elif item.get('type') == 'text':
                     text_obj = {
                         "type": "text",
@@ -214,16 +240,32 @@ class QAWrapper:
                     )
                     if image_value is None:
                         raise ValueError("Image item must include 'image' or 'image_path'")
-                    image_url = self._to_image_url(image_value)
+                    image_str = str(image_value)
+                    if image_str.startswith(("http://", "https://", "data:")):
+                        image_url = image_str
+                    else:
+                        image_path = Path(image_str)
+                        if not image_path.exists():
+                            raise FileNotFoundError(f"Image file not found: {image_path}")
+                        mime_type, _ = mimetypes.guess_type(str(image_path))
+                        if not mime_type:
+                            mime_type = "image/jpeg"
+                        encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+                        image_url = f"data:{mime_type};base64,{encoded}"
+
                     image_obj = {
                         "type": "image_url",
                         "image_url": {"url": image_url},
                     }
                     logger.debug(f"  Image content: {image_obj}")
                     content.append(image_obj)
-
+                
                 elif item.get('type') == 'image_url':
-                    content.append(item)
+                    image_obj = {
+                        "type": "image_url",
+                        "image_url": item.get("image_url"),
+                    }
+                    content.append(image_obj)
             
             logger.info(f"Making API request:")
             logger.info(f"  Model: {self.model_name}")
@@ -257,32 +299,6 @@ class QAWrapper:
             if hasattr(e, 'response'):
                 logger.error(f"  Response: {e.response}")
             raise
-
-    @staticmethod
-    def _to_image_url(image_value: str) -> str:
-        """
-        Normalize image input into an API-compatible image URL.
-        - Keep http(s)/data URLs as-is
-        - Convert local file paths to data URLs
-        """
-        if not isinstance(image_value, str):
-            image_value = str(image_value)
-
-        lowered = image_value.lower()
-        if lowered.startswith("http://") or lowered.startswith("https://") or lowered.startswith("data:"):
-            return image_value
-
-        image_path = Path(image_value).expanduser()
-        if not image_path.exists():
-            return image_value
-
-        mime_type, _ = mimetypes.guess_type(str(image_path))
-        if mime_type is None:
-            mime_type = "image/jpeg"
-
-        with open(image_path, "rb") as f:
-            encoded = base64.b64encode(f.read()).decode("utf-8")
-        return f"data:{mime_type};base64,{encoded}"
 
     def get_stats(self) -> Dict[str, int]:
         """Get usage statistics for this API instance."""

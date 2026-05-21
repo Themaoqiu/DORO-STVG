@@ -102,15 +102,7 @@ class CGSTVGModel:
     def __init__(
         self,
         model_path: str,
-        batch_size: int = 1,
-        max_tokens: int = 512,
-        max_model_len: int = 8192,
-        temperature: float = 0.0,
-        tensor_parallel_size: int = 1,
-        gpu_memory_utilization: float = 0.9,
     ):
-        del batch_size, max_tokens, max_model_len, temperature, tensor_parallel_size, gpu_memory_utilization
-
         self.model_path = model_path
         prefix = self.env_prefix
         self.repo_dir = os.getenv(f"{prefix}_DIR")

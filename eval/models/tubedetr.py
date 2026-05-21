@@ -53,10 +53,7 @@ class TubeDETRModel:
     prompt_style = "json"
     use_video_input_path = True
 
-    def __init__(self, model_path: str, batch_size: int = 1, max_tokens: int = 512,
-                 max_model_len: int = 8192, temperature: float = 0.0,
-                 tensor_parallel_size: int = 1, gpu_memory_utilization: float = 0.9):
-        del batch_size, max_tokens, max_model_len, temperature, tensor_parallel_size, gpu_memory_utilization
+    def __init__(self, model_path: str):
         self.model_path = model_path
         self.repo_dir = os.getenv("TUBEDETR_DIR")
         if not self.repo_dir:

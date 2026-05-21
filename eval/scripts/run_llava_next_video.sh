@@ -1,24 +1,23 @@
 #!/bin/bash
-source ../envs/eval/qwen/.venv/bin/activate
+source ../envs/eval/qwen_internvl/.venv/bin/activate
 
 export DECORD_EOF_RETRY_MAX=20480
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=7
 
 MODEL_NAME="llava-next-video"
-MODEL_PATH="llava-hf/LLaVA-NeXT-Video-7B-hf"
+MODEL_PATH="/home/wangxingjian/model/LLaVA-NeXT-Video-7B-hf"
 DATA_NAME="doro-stvg"
-ANNOTATION_PATH="/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_24/query_raw.jsonl"
+ANNOTATION_PATH="/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_22/query_polished.jsonl"
 VIDEO_DIR="/home/wangxingjian/data/vidstg/video"
 OUTPUT_DIR="./res"
-BATCH_SIZE=16
+BATCH_SIZE=8
 MAX_TOKENS=2048
-MAX_MODEL_LEN=8192
-TEMPERATURE=0.0
+MAX_MODEL_LEN=10240
+TEMPERATURE=0.1
 TENSOR_PARALLEL_SIZE=1
 GPU_MEMORY_UTILIZATION=0.9
 export LLAVA_FPS=2.0
 export LLAVA_MAX_FRAMES=32
-export EVAL_GT_FPS=2.0
 
 echo "=========================================="
 echo "LLaVA-NeXT-Video Evaluation: $MODEL_PATH"

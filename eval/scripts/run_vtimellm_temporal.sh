@@ -17,10 +17,7 @@ VIDEO_DIR="/mnt/sdc/xingjianwang/yibowang/datasets/ST-Align-Benchmark/video_test
 OUTPUT_DIR="./res_vtimellm_temporal"
 BATCH_SIZE=1
 MAX_TOKENS=512
-MAX_MODEL_LEN=8192
 TEMPERATURE=0.0
-TENSOR_PARALLEL_SIZE=1
-GPU_MEMORY_UTILIZATION=0.9
 
 echo "=========================================="
 echo "VTimeLLM Temporal Evaluation Configuration"
@@ -43,7 +40,4 @@ python temporal_main.py run \
   --output_dir="$OUTPUT_DIR" \
   --batch_size="$BATCH_SIZE" \
   --max_tokens="$MAX_TOKENS" \
-  --max_model_len="$MAX_MODEL_LEN" \
-  --temperature="$TEMPERATURE" \
-  --tensor_parallel_size="$TENSOR_PARALLEL_SIZE" \
-  --gpu_memory_utilization="$GPU_MEMORY_UTILIZATION"
+  --temperature="$TEMPERATURE"

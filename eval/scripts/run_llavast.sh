@@ -12,7 +12,6 @@ DATA_NAME="doro-stvg"
 ANNOTATION_PATH="/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_22/query_polished.jsonl"
 VIDEO_DIR="/home/wangxingjian/data/vidstg/video"
 OUTPUT_DIR="./res/llavast"
-BATCH_SIZE=64
 MAX_TOKENS=4096
 TEMPERATURE=0.1
 RUN_ID="$(date +%Y%m%d%H%M%S)"
@@ -25,12 +24,8 @@ echo "Model Path:              $MODEL_PATH"
 echo "Annotation Path:         $ANNOTATION_PATH"
 echo "Video Directory:         $VIDEO_DIR"
 echo "Output Directory:        $OUTPUT_DIR"
-echo "Batch Size:              $BATCH_SIZE"
 echo "Max Tokens:              $MAX_TOKENS"
-echo "Max Model Length:        $MAX_MODEL_LEN"
 echo "Temperature:             $TEMPERATURE"
-echo "Tensor Parallel Size:    $TENSOR_PARALLEL_SIZE"
-echo "GPU Memory Utilization:  $GPU_MEMORY_UTILIZATION"
 echo "Vision Tower Path:       $LLAVA_ST_VISION_TOWER"
 echo "Run ID:                  $RUN_ID"
 echo "=========================================="
@@ -50,10 +45,7 @@ if [ "$CHUNK_NUM" -le 1 ]; then
     --output_dir="$OUTPUT_DIR" \
     --batch_size=1 \
     --max_tokens="$MAX_TOKENS" \
-    --max_model_len="$MAX_MODEL_LEN" \
-    --temperature="$TEMPERATURE" \
-    --tensor_parallel_size=1 \
-    --gpu_memory_utilization="$GPU_MEMORY_UTILIZATION"
+    --temperature="$TEMPERATURE"
   exit $?
 fi
 
@@ -72,10 +64,7 @@ for CHUNK_ID in "${!GPUS[@]}"; do
     --output_dir="$OUTPUT_DIR" \
     --batch_size=1 \
     --max_tokens="$MAX_TOKENS" \
-    --max_model_len="$MAX_MODEL_LEN" \
-    --temperature="$TEMPERATURE" \
-    --tensor_parallel_size=1 \
-    --gpu_memory_utilization="$GPU_MEMORY_UTILIZATION" &
+    --temperature="$TEMPERATURE" &
   PIDS+=("$!")
 done
 
@@ -100,10 +89,7 @@ python main.py run \
   --output_dir="$OUTPUT_DIR" \
   --batch_size=1 \
   --max_tokens="$MAX_TOKENS" \
-  --max_model_len="$MAX_MODEL_LEN" \
   --temperature="$TEMPERATURE" \
-  --tensor_parallel_size=1 \
-  --gpu_memory_utilization="$GPU_MEMORY_UTILIZATION" \
   --aggregate_only=True \
   --run_id="$RUN_ID" \
   --chunk_num="$CHUNK_NUM"

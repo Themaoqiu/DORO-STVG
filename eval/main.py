@@ -36,253 +36,112 @@ class STVGEvaluator:
         gpu_memory_utilization: float,
     ):
         name = model_name.lower()
+        batching_kwargs = {
+            "batch_size": batch_size,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        vllm_kwargs = {
+            **batching_kwargs,
+            "max_model_len": max_model_len,
+            "tensor_parallel_size": tensor_parallel_size,
+            "gpu_memory_utilization": gpu_memory_utilization,
+        }
 
         if name in ["qwen2.5vl", "qwen2.5-vl"]:
             from models.qwen_family import Qwen2_5VL
 
-            return Qwen2_5VL(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return Qwen2_5VL(model_path=model_path, **vllm_kwargs)
 
         if name in ["qwen3vl", "qwen3-vl", "qwen3.5", "qwen3.5vl", "qwen3.5-vl"]:
             from models.qwen_family import Qwen3VL
 
-            return Qwen3VL(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return Qwen3VL(model_path=model_path, **vllm_kwargs)
 
         if name in ["llava-st-qwen2", "llava_st_qwen2", "llavast", "llava-st"] or "llava-st-qwen2" in model_path.lower():
             from models.llava_st import LlavaSTQwen2
 
-            return LlavaSTQwen2(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return LlavaSTQwen2(model_path=model_path, max_tokens=max_tokens, temperature=temperature)
 
         if name in ["vtimellm", "vtime-llm", "vtime_llm"]:
             from models.vtimellm import VTimeLLMModel
 
-            return VTimeLLMModel(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return VTimeLLMModel(model_path=model_path, max_tokens=max_tokens, temperature=temperature)
 
         if name in ["grounded-video-llm", "grounded_video_llm", "groundedvideollm"]:
             from models.grounded_video_llm import GroundedVideoLLMModel
 
-            return GroundedVideoLLMModel(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return GroundedVideoLLMModel(model_path=model_path, max_tokens=max_tokens, temperature=temperature)
 
         if name in ["llava16", "llava-1.6", "llava_16", "llava-v1.6"]:
             from models.llava16 import Llava16Model
 
-            return Llava16Model(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return Llava16Model(model_path=model_path, **vllm_kwargs)
 
         if name in ["stvg-r1", "stvg_r1", "stvgr1"]:
             from models.stvg_r1 import STVGR1
 
-            return STVGR1(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return STVGR1(model_path=model_path, **vllm_kwargs)
 
         if name in ["videochat-r1", "videochat_r1", "videochatr1"]:
             from models.qwen_family import Qwen2_5VL
 
-            return Qwen2_5VL(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return Qwen2_5VL(model_path=model_path, **vllm_kwargs)
 
         if name in ["groundinggpt", "grounding-gpt", "grounding_gpt"]:
             from models.groundinggpt import GroundingGPTModel
 
-            return GroundingGPTModel(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return GroundingGPTModel(model_path=model_path, max_tokens=max_tokens, temperature=temperature)
 
         if name in ["videomolmo", "video-molmo"]:
             from models.videomolmo import VideoMolmoModel
 
-            return VideoMolmoModel(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return VideoMolmoModel(model_path=model_path)
 
         if name in ["cgstvg", "cg-stvg", "cg_stvg"]:
             from models.cgstvg import CGSTVGModel
 
-            return CGSTVGModel(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return CGSTVGModel(model_path=model_path)
 
         if name in ["tastvg", "ta-stvg", "ta_stvg"]:
             from models.tastvg import TASTVGModel
 
-            return TASTVGModel(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return TASTVGModel(model_path=model_path)
 
         if name in ["devil", "de-vil"]:
             from models.devil import DeViLModel
 
-            return DeViLModel(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return DeViLModel(model_path=model_path, max_tokens=max_tokens, temperature=temperature)
 
         if name in ["internvl3", "internvl-3", "internvl_3"]:
             from models.internvl_family import InternVL3
 
-            return InternVL3(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return InternVL3(model_path=model_path, **vllm_kwargs)
 
         if name in ["internvl3.5", "internvl-3.5", "internvl_3_5", "internvl35"]:
             from models.internvl_family import InternVL3_5
 
-            return InternVL3_5(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return InternVL3_5(model_path=model_path, **vllm_kwargs)
 
         if name in ["llava-next-video", "llava_next_video", "llavanextvideo"]:
             from models.llava_family import LlavaNextVideo
 
-            return LlavaNextVideo(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return LlavaNextVideo(model_path=model_path, **vllm_kwargs)
 
         if name in ["llava-onevision-1.5", "llava_onevision_1_5", "llavaonevision1.5", "ov1.5"]:
             from models.llava_family import LlavaOneVision1_5
 
-            return LlavaOneVision1_5(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return LlavaOneVision1_5(model_path=model_path, **vllm_kwargs)
 
         if name in ["llava-onevision-2", "llava_onevision_2", "llavaonevision2", "ov2"]:
             from models.llava_family import LlavaOneVision2
 
-            return LlavaOneVision2(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return LlavaOneVision2(model_path=model_path, **vllm_kwargs)
 
         if name in ["tubedetr", "tube-detr", "tube_detr"]:
             from models.tubedetr import TubeDETRModel
 
-            return TubeDETRModel(
-                model_path=model_path,
-                batch_size=batch_size,
-                max_tokens=max_tokens,
-                max_model_len=max_model_len,
-                temperature=temperature,
-                tensor_parallel_size=tensor_parallel_size,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            return TubeDETRModel(model_path=model_path)
 
         raise ValueError(f"Unknown model: {model_name}")
 

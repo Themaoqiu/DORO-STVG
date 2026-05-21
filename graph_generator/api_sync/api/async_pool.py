@@ -1,11 +1,34 @@
 import asyncio
+import os
 import random
 from typing import List, Dict, Any, TypeVar
 import logging
 from .wrapper import QAWrapper
+from .gemini_wrapper import GeminiWrapper
 
 T = TypeVar('T')
 logger = logging.getLogger(__name__)
+
+
+def _select_wrapper_cls(model_name: str):
+    """Choose an API wrapper class for ``model_name``.
+
+    Default is the OpenAI-compatible :class:`QAWrapper`. A Gemini-native
+    wrapper is used when either:
+      * env ``API_BACKEND`` is set to ``"gemini"`` (case-insensitive), or
+      * the model name starts with ``"gemini"`` (case-insensitive).
+
+    Users can force the OpenAI path for gemini-* models by setting
+    ``API_BACKEND=openai``.
+    """
+    backend = (os.getenv("API_BACKEND") or "").strip().lower()
+    if backend == "gemini":
+        return GeminiWrapper
+    if backend in {"openai", "qwen", "dashscope", "maas"}:
+        return QAWrapper
+    if model_name.lower().startswith("gemini"):
+        return GeminiWrapper
+    return QAWrapper
 
 
 class APIPool:
@@ -32,7 +55,7 @@ class APIPool:
             raise ValueError("At least one API key is required")
 
         self.api_instances = [
-            QAWrapper(model_name, api_key)
+            _select_wrapper_cls(model_name)(model_name, api_key)
             for api_key in api_keys
         ]
 

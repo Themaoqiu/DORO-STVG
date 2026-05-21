@@ -1,8 +1,5 @@
 import base64
-import numpy as np
-from PIL import Image
 from io import BytesIO
-from qwen_vl_utils import process_vision_info
 from typing import List, Dict, Any, Tuple
 
 
@@ -16,6 +13,11 @@ def build_video_message(user_prompt: List[Dict[str, Any]]) -> Tuple[List[Dict[st
     Returns:
         Tuple of (processed_content, video_kwargs)
     """
+    # Lazy import to avoid forcing video dependencies for text/image-only workloads.
+    import numpy as np
+    from PIL import Image
+    from qwen_vl_utils import process_vision_info
+
     processed_content = []
     video_kwargs = {}
     
@@ -83,8 +85,8 @@ def build_image_message(user_prompt: List[Dict[str, Any]]) -> Tuple[List[Dict[st
             if image_value is None:
                 raise ValueError("Image item must provide 'image' or 'image_path'")
             processed_content.append({
-                "type": "image_url",
-                "image_url": {"url": image_value},
+                "type": "image",
+                "image": image_value
             })
         else:
             processed_content.append(item)

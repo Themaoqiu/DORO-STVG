@@ -192,28 +192,29 @@ class StreamGenerator:
                     )
 
                     answer = response["answer"]
+                    if isinstance(answer, str) and answer.startswith("__ERROR__:"):
+                        return answer
 
                     # If validation function exists, validate the answer
                     if validate_func is not None:
-                        validated_answer = validate_func(answer)
-                        if validated_answer is False or validated_answer is None:
-                            answer_preview = str(answer).strip().replace("\n", "\\n")
-                            if len(answer_preview) > 800:
-                                answer_preview = answer_preview[:800] + "...<truncated>"
-                            logger.warning(
-                                "Answer validation failed, retrying (attempt %s). Raw answer: %s",
-                                retry_count + 1,
-                                answer_preview,
-                            )
+                        if not validate_func(answer):
+                            logger.warning(f"Answer validation failed, retrying (attempt {retry_count + 1})")
                             retry_count += 1
                             continue
-                        answer = validated_answer
+                        else:
+                            validated_answer = validate_func(answer)
+                            if validated_answer is not None:
+                                answer = validated_answer
 
                     return answer
 
                 except Exception as e:
+                    error_text = str(e).lower()
+                    if "data_inspection_failed" in error_text or "datainspectionfailed" in error_text:
+                        logger.error("Content inspection failed; skip this sample without retry")
+                        return "__ERROR__:data_inspection_failed"
                     logger.warning(f"Generation error: {e}, retrying (attempt {retry_count + 1})")
                     retry_count += 1
 
         logger.error(f"Max retries reached for prompt")
-        return None
+        return "__ERROR__:request_failed"

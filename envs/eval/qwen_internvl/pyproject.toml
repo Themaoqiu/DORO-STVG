@@ -1,5 +1,5 @@
 [project]
-name = "eval"
+name = "qwen_internvl"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -8,7 +8,7 @@ dependencies = [
    "decord>=0.6.0",
    "fire>=0.7.1",
    "qwen-vl-utils>=0.0.14",
-   "transformers>=4.57.6",
+   "transformers>=4.53.2",
    "vllm>=0.19.0",
 ]
 

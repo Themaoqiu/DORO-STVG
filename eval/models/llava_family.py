@@ -143,22 +143,32 @@ class LlavaOneVision1_5(_BaseLlava):
     UNSUPPORTED_INPUT_KEYS = ("second_per_grid_ts",)
 
     def load_model(self):
-        from transformers import AutoConfig, AutoProcessor, AutoModelForCausalLM
+        from transformers import AutoConfig, AutoProcessor, AutoTokenizer, AutoModelForCausalLM
 
         self.max_num_frames = int(os.getenv("LLAVA_MAX_FRAMES", str(self.DEFAULT_MAX_FRAMES)))
         self.min_pixels = int(os.getenv("OV1_5_MIN_PIXELS", str(256 * 28 * 28)))
         self.max_pixels = int(os.getenv("OV1_5_MAX_PIXELS", "1605632"))
 
-        config = AutoConfig.from_pretrained(self.model_path, trust_remote_code=True)
         self.processor = AutoProcessor.from_pretrained(
             self.model_path,
-            config=config,
             max_pixels=self.max_pixels,
             min_pixels=self.min_pixels,
             trust_remote_code=True,
         )
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
         if self.batch_size > 1 and getattr(self.processor, "tokenizer", None) is not None:
             self.processor.tokenizer.padding_side = "left"
+
+        # LLaVA-OneVision-1.5's published config.json omits pad_token_id from
+        # text_config, but its remote modeling code reads config.text_config.pad_token_id
+        # in TextModel.__init__. lmms-eval doesn't hit this because older transformers
+        # silently returned None for missing attrs; newer transformers strictly raise.
+        # Backfill from the tokenizer before model construction.
+        config = AutoConfig.from_pretrained(self.model_path, trust_remote_code=True)
+        text_config = getattr(config, "text_config", None)
+        if text_config is not None and getattr(text_config, "pad_token_id", None) is None:
+            pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+            text_config.pad_token_id = pad_id
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_path,
             config=config,
@@ -189,7 +199,7 @@ class LlavaOneVision1_5(_BaseLlava):
 
     @torch.inference_mode()
     def predict_batch(self, queries, video_paths, system_prompt):
-        from qwen_vl_utils import process_vision_info
+        from qwen_vl_utils import fetch_video
 
         self.last_user_prompts = list(queries)
         all_messages = [
@@ -199,25 +209,24 @@ class LlavaOneVision1_5(_BaseLlava):
             self.processor.apply_chat_template(m, tokenize=False, add_generation_prompt=True)
             for m in all_messages
         ]
-        image_inputs, video_inputs = process_vision_info(all_messages)
 
-        # Per lmms-eval: uniformly resample each video to ~max_num_frames and
-        # ensure the last frame is included (may produce max_num_frames+1).
-        if video_inputs:
-            resampled = []
-            for vid in video_inputs:
-                if isinstance(vid, torch.Tensor) and vid.shape[0] > 1:
-                    total = vid.shape[0]
-                    indices = np.linspace(0, total - 1, self.max_num_frames, dtype=int)
-                    if total - 1 not in indices:
-                        indices = np.append(indices, total - 1)
-                    vid = vid[indices]
-                resampled.append(vid)
-            video_inputs = resampled
+        # Use fetch_video directly (instead of process_vision_info) so we can
+        # recover the original frame indices from video_metadata.frames_indices
+        # and feed them to remap_frame_indices for STVG metric alignment.
+        video_inputs = []
+        per_sample_indices: List[List[int]] = []
+        for messages in all_messages:
+            video_item = next(
+                (c for c in messages[-1]["content"] if c.get("type") == "video"), None
+            )
+            video, video_metadata = fetch_video(video_item, return_video_metadata=True)
+            video_inputs.append(video)
+            frames_indices = video_metadata.get("frames_indices") if isinstance(video_metadata, dict) else getattr(video_metadata, "frames_indices", None)
+            per_sample_indices.append(list(frames_indices) if frames_indices is not None else [])
 
         inputs = self.processor(
             text=texts,
-            images=image_inputs,
+            images=None,
             videos=video_inputs,
             padding=True,
             return_tensors="pt",
@@ -227,30 +236,28 @@ class LlavaOneVision1_5(_BaseLlava):
             inputs.pop(key, None)
         inputs = inputs.to(self.model.device)
 
-        gen_kwargs = {"max_new_tokens": self.max_tokens, "do_sample": self.temperature > 0.0}
+        pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+        gen_kwargs = {
+            "max_new_tokens": self.max_tokens,
+            "do_sample": self.temperature > 0.0,
+            "eos_token_id": self.tokenizer.eos_token_id,
+            "pad_token_id": pad_token_id,
+        }
         if self.temperature > 0.0:
             gen_kwargs["temperature"] = self.temperature
         gen = self.model.generate(**inputs, **gen_kwargs)
         trimmed = [g[len(i):] for g, i in zip(gen, inputs.input_ids)]
         raw = self.processor.batch_decode(trimmed, skip_special_tokens=True)
         self.last_raw_responses = list(raw)
-        return list(raw)
+        self.last_video_frame_indices = per_sample_indices
+        return [
+            remap_frame_indices(resp, sampled)
+            for resp, sampled in zip(raw, per_sample_indices)
+        ]
 
 
 class LlavaOneVision2(_BaseLlava):
-    """LLaVA-OneVision-2 via transformers.
-
-    Mirrors the official lmms-eval ``llava_onevision2`` chat model:
-    - ``AutoModelForImageTextToText`` + ``AutoProcessor`` (trust_remote_code).
-    - Pre-fetch frames + timestamps with ``qwen_vl_utils.fetch_video``.
-    - Interleave per-frame ``<t seconds>`` text and ``{"type":"image"}`` items;
-      pass PIL frames via ``images=``, ``videos=None``.
-
-    Frame-index remap is NOT applied here: the model is conditioned on
-    timestamps (seconds), not frame indices, so its output frame keys are in
-    its own sampled space. STVG metrics will compare in that space too.
-    """
-
+ 
     DEFAULT_MAX_FRAMES = 32
     TIMESTAMP_DECIMALS = 1
 

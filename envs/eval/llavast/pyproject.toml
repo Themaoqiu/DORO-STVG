@@ -1,5 +1,5 @@
 [project]
-name = "eval-llavast"
+name = "llavast"
 version = "0.1.0"
 description = "Evaluation environment for LLaVA-ST"
 readme = "README.md"

@@ -567,6 +567,10 @@ def _extract_query(response: str) -> Union[str, bool]:
     return query if query else False
 
 
+def _is_error_response(result: Any) -> bool:
+    return isinstance(result, str) and result.startswith("__ERROR__:")
+
+
 class MinimalSTVGQueryGenerator:
     def __init__(
         self,
@@ -1338,10 +1342,17 @@ class MinimalSTVGQueryGenerator:
         query_map: Dict[str, str] = {}
         completed = 0
         async for item in generator.generate_stream(prompts=prompts, system_prompt=system_prompt, validate_func=_extract_query):
-            if item and isinstance(item.get("result"), str) and item["result"].strip():
-                query_map[str(item["id"])] = item["result"].strip()
-                completed += 1
-                print(f"[query_minimal] llm_progress: {completed}/{len(prompts)}", flush=True)
+            if not item:
+                continue
+            result = item.get("result")
+            if not isinstance(result, str):
+                continue
+            result = result.strip()
+            if not result or _is_error_response(result):
+                continue
+            query_map[str(item["id"])] = result
+            completed += 1
+            print(f"[query_minimal] llm_progress: {completed}/{len(prompts)}", flush=True)
         print(f"[query_minimal] llm_done: received={len(query_map)}", flush=True)
         return query_map
 

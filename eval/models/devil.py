@@ -28,17 +28,10 @@ class DeViLModel:
     def __init__(
         self,
         model_path: str,
-        batch_size: int = 1,
         max_tokens: int = 1024,
-        max_model_len: int = 8192,
         temperature: float = 0.0,
-        tensor_parallel_size: int = 1,
-        gpu_memory_utilization: float = 0.9,
     ):
-        del max_model_len, tensor_parallel_size, gpu_memory_utilization
-
         self.model_path = model_path
-        self.batch_size = batch_size
         self.max_tokens = max_tokens
         self.temperature = temperature
 

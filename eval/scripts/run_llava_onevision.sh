@@ -1,8 +1,10 @@
 #!/bin/bash
 # LLaVA-OneVision-1.5 / 2 use transformers (no vLLM). Multi-GPU via device_map="auto".
-source ../envs/eval/llava_onevision/.venv/bin/activate
 
-export DECORD_EOF_RETRY_MAX=64000
+# source ../envs/eval/llava_onevision1.5/.venv/bin/activate
+
+
+export DECORD_EOF_RETRY_MAX=409600
 export CUDA_VISIBLE_DEVICES=7
 
 # MODEL_NAME options: llava-onevision-1.5 | llava-onevision-2
@@ -12,10 +14,10 @@ DATA_NAME="doro-stvg"
 ANNOTATION_PATH="/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_22/query_polished.jsonl"
 VIDEO_DIR="/home/wangxingjian/data/vidstg/video"
 OUTPUT_DIR="./res"
-BATCH_SIZE=2
+BATCH_SIZE=1
 MAX_TOKENS=4096
 MAX_MODEL_LEN=16384
-TEMPERATURE=0.0
+TEMPERATURE=0.1
 export LLAVA_FPS=2.0
 export LLAVA_MAX_FRAMES=32
 export OV1_5_MAX_PIXELS=1003520
