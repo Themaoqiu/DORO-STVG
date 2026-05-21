@@ -11,6 +11,12 @@ __all__ = [
     "CGSTVGModel",
     "TASTVGModel",
     "TubeDETRModel",
+    "DeViLModel",
+    "InternVL3",
+    "InternVL3_5",
+    "LlavaNextVideo",
+    "LlavaOneVision1_5",
+    "LlavaOneVision2",
 ]
 
 
@@ -69,5 +75,24 @@ def __getattr__(name):
         from .tubedetr import TubeDETRModel
 
         return TubeDETRModel
+
+    if name == "DeViLModel":
+        from .devil import DeViLModel
+
+        return DeViLModel
+
+    if name in {"InternVL3", "InternVL3_5"}:
+        from .internvl_family import InternVL3, InternVL3_5
+
+        return {"InternVL3": InternVL3, "InternVL3_5": InternVL3_5}[name]
+
+    if name in {"LlavaNextVideo", "LlavaOneVision1_5", "LlavaOneVision2"}:
+        from .llava_family import LlavaNextVideo, LlavaOneVision1_5, LlavaOneVision2
+
+        return {
+            "LlavaNextVideo": LlavaNextVideo,
+            "LlavaOneVision1_5": LlavaOneVision1_5,
+            "LlavaOneVision2": LlavaOneVision2,
+        }[name]
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

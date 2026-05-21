@@ -193,6 +193,84 @@ class STVGEvaluator:
                 gpu_memory_utilization=gpu_memory_utilization,
             )
 
+        if name in ["devil", "de-vil"]:
+            from models.devil import DeViLModel
+
+            return DeViLModel(
+                model_path=model_path,
+                batch_size=batch_size,
+                max_tokens=max_tokens,
+                max_model_len=max_model_len,
+                temperature=temperature,
+                tensor_parallel_size=tensor_parallel_size,
+                gpu_memory_utilization=gpu_memory_utilization,
+            )
+
+        if name in ["internvl3", "internvl-3", "internvl_3"]:
+            from models.internvl_family import InternVL3
+
+            return InternVL3(
+                model_path=model_path,
+                batch_size=batch_size,
+                max_tokens=max_tokens,
+                max_model_len=max_model_len,
+                temperature=temperature,
+                tensor_parallel_size=tensor_parallel_size,
+                gpu_memory_utilization=gpu_memory_utilization,
+            )
+
+        if name in ["internvl3.5", "internvl-3.5", "internvl_3_5", "internvl35"]:
+            from models.internvl_family import InternVL3_5
+
+            return InternVL3_5(
+                model_path=model_path,
+                batch_size=batch_size,
+                max_tokens=max_tokens,
+                max_model_len=max_model_len,
+                temperature=temperature,
+                tensor_parallel_size=tensor_parallel_size,
+                gpu_memory_utilization=gpu_memory_utilization,
+            )
+
+        if name in ["llava-next-video", "llava_next_video", "llavanextvideo"]:
+            from models.llava_family import LlavaNextVideo
+
+            return LlavaNextVideo(
+                model_path=model_path,
+                batch_size=batch_size,
+                max_tokens=max_tokens,
+                max_model_len=max_model_len,
+                temperature=temperature,
+                tensor_parallel_size=tensor_parallel_size,
+                gpu_memory_utilization=gpu_memory_utilization,
+            )
+
+        if name in ["llava-onevision-1.5", "llava_onevision_1_5", "llavaonevision1.5", "ov1.5"]:
+            from models.llava_family import LlavaOneVision1_5
+
+            return LlavaOneVision1_5(
+                model_path=model_path,
+                batch_size=batch_size,
+                max_tokens=max_tokens,
+                max_model_len=max_model_len,
+                temperature=temperature,
+                tensor_parallel_size=tensor_parallel_size,
+                gpu_memory_utilization=gpu_memory_utilization,
+            )
+
+        if name in ["llava-onevision-2", "llava_onevision_2", "llavaonevision2", "ov2"]:
+            from models.llava_family import LlavaOneVision2
+
+            return LlavaOneVision2(
+                model_path=model_path,
+                batch_size=batch_size,
+                max_tokens=max_tokens,
+                max_model_len=max_model_len,
+                temperature=temperature,
+                tensor_parallel_size=tensor_parallel_size,
+                gpu_memory_utilization=gpu_memory_utilization,
+            )
+
         if name in ["tubedetr", "tube-detr", "tube_detr"]:
             from models.tubedetr import TubeDETRModel
 
