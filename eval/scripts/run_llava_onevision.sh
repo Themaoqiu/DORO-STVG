@@ -3,25 +3,25 @@
 source ../envs/eval/qwen/.venv/bin/activate
 
 export DECORD_EOF_RETRY_MAX=20480
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export CUDA_VISIBLE_DEVICES=0
 
 # MODEL_NAME options: llava-onevision-1.5 | llava-onevision-2
-MODEL_NAME="${MODEL_NAME:-llava-onevision-1.5}"
-MODEL_PATH="${MODEL_PATH:-lmms-lab/LLaVA-OneVision-1.5-8B-Instruct}"
-DATA_NAME="${DATA_NAME:-doro-stvg}"
-ANNOTATION_PATH="${ANNOTATION_PATH:-/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_24/query_raw.jsonl}"
-VIDEO_DIR="${VIDEO_DIR:-/home/wangxingjian/data/vidstg/video}"
-OUTPUT_DIR="${OUTPUT_DIR:-./res}"
-BATCH_SIZE="${BATCH_SIZE:-4}"
-MAX_TOKENS="${MAX_TOKENS:-2048}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
-TEMPERATURE="${TEMPERATURE:-0.0}"
-TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
-GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.9}"
-export LLAVA_FPS="${LLAVA_FPS:-2.0}"
-export LLAVA_MAX_FRAMES="${LLAVA_MAX_FRAMES:-32}"
-export OV1_5_MAX_PIXELS="${OV1_5_MAX_PIXELS:-1003520}"
-export OV2_MAX_PIXELS="${OV2_MAX_PIXELS:-200704}"
+MODEL_NAME="llava-onevision-1.5"
+MODEL_PATH="lmms-lab/LLaVA-OneVision-1.5-8B-Instruct"
+DATA_NAME="doro-stvg"
+ANNOTATION_PATH="/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_24/query_raw.jsonl"
+VIDEO_DIR="/home/wangxingjian/data/vidstg/video"
+OUTPUT_DIR="./res"
+BATCH_SIZE=4
+MAX_TOKENS=2048
+MAX_MODEL_LEN=16384
+TEMPERATURE=0.0
+TENSOR_PARALLEL_SIZE=1
+GPU_MEMORY_UTILIZATION=0.9
+export LLAVA_FPS=2.0
+export LLAVA_MAX_FRAMES=32
+export OV1_5_MAX_PIXELS=1003520
+export OV2_MAX_PIXELS=200704
 
 echo "=========================================="
 echo "LLaVA-OneVision Evaluation: $MODEL_NAME ($MODEL_PATH)"

@@ -4,7 +4,7 @@ from typing import List
 import numpy as np
 import torch
 
-from utils.video_loader import sample_video_uniform
+from utils.video_loader import remap_frame_indices, sample_video_uniform
 
 
 os.environ["DECORD_EOF_RETRY_MAX"] = "20480"
@@ -13,6 +13,7 @@ os.environ["DECORD_EOF_RETRY_MAX"] = "20480"
 class _BaseLlava:
     FPS_ENV = "LLAVA_FPS"
     DEFAULT_FPS = 2.0
+    DEFAULT_MAX_FRAMES = 32
 
     def __init__(
         self,
@@ -32,6 +33,10 @@ class _BaseLlava:
         self.tensor_parallel_size = tensor_parallel_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.fps = float(os.getenv(self.FPS_ENV, str(self.DEFAULT_FPS)))
+        # GT annotation fps; defaults to sampling fps. Set EVAL_GT_FPS when
+        # GT and model fps differ (e.g. GT@2fps, you sample @1fps).
+        self.gt_fps = float(os.getenv("EVAL_GT_FPS", str(self.fps)))
+        self.max_frames = int(os.getenv("LLAVA_MAX_FRAMES", str(self.DEFAULT_MAX_FRAMES)))
         self.last_user_prompts: List[str] = []
         self.last_raw_responses: List[str] = []
         self.load_model()
@@ -97,18 +102,26 @@ class LlavaNextVideo(_BaseLlava):
     def predict_batch(self, queries, video_paths, system_prompt):
         self.last_user_prompts = list(queries)
         llm_inputs = []
+        per_sample_indices: List[List[int]] = []
         for query, video_path in zip(queries, video_paths):
-            frames, _, _ = sample_video_uniform(video_path, fps=self.fps)
+            frames, sampled_indices, _ = sample_video_uniform(
+                video_path, fps=self.fps, max_frames=self.max_frames, gt_fps=self.gt_fps
+            )
             prompt = self._build_prompt(query, system_prompt)
             llm_inputs.append({
                 "prompt": prompt,
                 "multi_modal_data": {"video": frames},
             })
+            per_sample_indices.append(sampled_indices)
 
         outputs = self.llm.generate(llm_inputs, sampling_params=self.sampling_params)
         raw_responses = [out.outputs[0].text for out in outputs]
         self.last_raw_responses = raw_responses
-        return raw_responses
+        self.last_video_frame_indices = per_sample_indices
+        return [
+            remap_frame_indices(resp, sampled)
+            for resp, sampled in zip(raw_responses, per_sample_indices)
+        ]
 
 
 class LlavaOneVision1_5(_BaseLlava):
@@ -119,6 +132,11 @@ class LlavaOneVision1_5(_BaseLlava):
     - Build messages with ``{"type": "video", "video": path}`` and pass ``fps``
       / ``max_frames`` through ``qwen_vl_utils.process_vision_info``.
     - Optionally cap to ``LLAVA_MAX_FRAMES`` via uniform ``np.linspace`` resampling.
+
+    Frame-index remap is NOT applied here: ``process_vision_info`` decodes the
+    video itself, so we don't have a clean sampled-frame ↔ original-frame map.
+    The model's frame-key output is in its own sampled space; STVG metrics
+    will compare in that space too.
     """
 
     DEFAULT_MAX_FRAMES = 32
@@ -225,6 +243,10 @@ class LlavaOneVision2(_BaseLlava):
     - Pre-fetch frames + timestamps with ``qwen_vl_utils.fetch_video``.
     - Interleave per-frame ``<t seconds>`` text and ``{"type":"image"}`` items;
       pass PIL frames via ``images=``, ``videos=None``.
+
+    Frame-index remap is NOT applied here: the model is conditioned on
+    timestamps (seconds), not frame indices, so its output frame keys are in
+    its own sampled space. STVG metrics will compare in that space too.
     """
 
     DEFAULT_MAX_FRAMES = 32
