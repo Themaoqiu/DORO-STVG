@@ -1,0 +1,12 @@
+[project]
+name = "llava-st-bundled"
+version = "0.0.0"
+description = "Bundled LLaVA-ST package (https://github.com/appletea233/LLaVA-ST). Vendored under DORO-STVG/eval/dependence/llavast so 'import llava' resolves without cloning the upstream repo."
+requires-python = ">=3.10,<3.11"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["llava"]

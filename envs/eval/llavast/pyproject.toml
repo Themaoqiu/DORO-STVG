@@ -25,9 +25,15 @@ dependencies = [
     "flake8>=7.0.0",
     "opencv-python>=4.11.0.86",
     "imageio>=2.37.3",
+    "llava-st-bundled",
 ]
 
 [[tool.uv.index]]
 name = "tsinghua-pypi"
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
+
+[tool.uv.sources]
+# Vendored LLaVA-ST package; installs the `llava` import root from the repo
+# so we don't need to clone https://github.com/appletea233/LLaVA-ST.
+llava-st-bundled = { path = "../../../eval/dependence/llavast", editable = true }
