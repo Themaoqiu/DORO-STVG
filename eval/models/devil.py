@@ -150,36 +150,3 @@ class DeViLModel:
             raw.append(raw_text)
         self.last_raw_responses = raw
         return outputs
-
-    def predict_temporal_batch(
-        self,
-        queries: List[str],
-        video_paths: List[str],
-        system_prompt: str,
-    ) -> List[str]:
-        return self.predict_batch(queries=queries, video_paths=video_paths, system_prompt=system_prompt)
-
-    def close(self) -> None:
-        if self.proc is None:
-            return
-        proc = self.proc
-        self.proc = None
-        try:
-            if proc.poll() is None and proc.stdin is not None:
-                proc.stdin.write(json.dumps({"type": "shutdown"}, ensure_ascii=False) + "\n")
-                proc.stdin.flush()
-        except Exception:
-            pass
-        try:
-            proc.wait(timeout=10)
-        except Exception:
-            proc.kill()
-
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
-
-    def map_temporal_span(self, pred_span, sample):
-        return pred_span

@@ -2,17 +2,17 @@
 
 source ../envs/eval/llavast/.venv/bin/activate
 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=4,5
 
-export LLAVA_ST_VISION_TOWER="/mnt/sdc/xingjianwang/models/siglip-so400m-patch14-384"
+export LLAVA_ST_VISION_TOWER="/home/wangxingjian/model/siglip-so400m-patch14-384"
 
 MODEL_NAME="llava-st"
-MODEL_PATH="/mnt/sdc/xingjianwang/models/LLaVA-ST-Qwen2-7B"
+MODEL_PATH="/home/wangxingjian/model/LLaVA-ST-Qwen2-7B"
 DATA_NAME="doro-stvg"
-ANNOTATION_PATH="/mnt/sdc/xingjianwang/data/vidstg/query_polished.jsonl"
-VIDEO_DIR="/mnt/sdc/xingjianwang/data/vidstg/video"
-OUTPUT_DIR="./res_llavast"
-BATCH_SIZE=16
+ANNOTATION_PATH="/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_22/query_polished.jsonl"
+VIDEO_DIR="/home/wangxingjian/data/vidstg/video"
+OUTPUT_DIR="./res/llavast"
+BATCH_SIZE=64
 MAX_TOKENS=4096
 TEMPERATURE=0.1
 RUN_ID="$(date +%Y%m%d%H%M%S)"

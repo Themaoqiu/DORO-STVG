@@ -143,15 +143,16 @@ class LlavaOneVision1_5(_BaseLlava):
     UNSUPPORTED_INPUT_KEYS = ("second_per_grid_ts",)
 
     def load_model(self):
-        from transformers import AutoProcessor, AutoModelForCausalLM
+        from transformers import AutoConfig, AutoProcessor, AutoModelForCausalLM
 
         self.max_num_frames = int(os.getenv("LLAVA_MAX_FRAMES", str(self.DEFAULT_MAX_FRAMES)))
         self.min_pixels = int(os.getenv("OV1_5_MIN_PIXELS", str(256 * 28 * 28)))
         self.max_pixels = int(os.getenv("OV1_5_MAX_PIXELS", "1605632"))
 
-        device_map = "auto" if self.tensor_parallel_size > 1 or torch.cuda.device_count() > 1 else "cuda"
+        config = AutoConfig.from_pretrained(self.model_path, trust_remote_code=True)
         self.processor = AutoProcessor.from_pretrained(
             self.model_path,
+            config=config,
             max_pixels=self.max_pixels,
             min_pixels=self.min_pixels,
             trust_remote_code=True,
@@ -160,8 +161,9 @@ class LlavaOneVision1_5(_BaseLlava):
             self.processor.tokenizer.padding_side = "left"
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_path,
+            config=config,
             torch_dtype="auto",
-            device_map=device_map,
+            device_map="auto",
             trust_remote_code=True,
         ).eval()
 
@@ -253,14 +255,18 @@ class LlavaOneVision2(_BaseLlava):
     TIMESTAMP_DECIMALS = 1
 
     def load_model(self):
-        from transformers import AutoProcessor, AutoModelForImageTextToText
+        from transformers import AutoConfig, AutoProcessor, AutoModelForImageTextToText
 
         self.max_num_frames = int(os.getenv("LLAVA_MAX_FRAMES", str(self.DEFAULT_MAX_FRAMES)))
         self.min_pixels = int(os.getenv("OV2_MIN_PIXELS", str(28 * 28 * 4)))
         self.max_pixels = int(os.getenv("OV2_MAX_PIXELS", "200704"))
 
-        device_map = "auto" if self.tensor_parallel_size > 1 or torch.cuda.device_count() > 1 else "cuda"
-        self.processor = AutoProcessor.from_pretrained(self.model_path, trust_remote_code=True)
+        config = AutoConfig.from_pretrained(self.model_path, trust_remote_code=True)
+        self.processor = AutoProcessor.from_pretrained(
+            self.model_path,
+            config=config,
+            trust_remote_code=True,
+        )
         for sub in ("video_processor", "image_processor"):
             proc = getattr(self.processor, sub, None)
             if proc is not None:
@@ -272,9 +278,10 @@ class LlavaOneVision2(_BaseLlava):
             self.processor.tokenizer.padding_side = "left"
         self.model = AutoModelForImageTextToText.from_pretrained(
             self.model_path,
+            config=config,
             trust_remote_code=True,
             torch_dtype="auto",
-            device_map=device_map,
+            device_map="auto",
         ).eval()
 
     def _video_to_frames_and_timestamps(self, video_path: str):

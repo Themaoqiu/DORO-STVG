@@ -6,6 +6,8 @@ from typing import List, Dict, Any
 from datetime import datetime
 from abc import ABC, abstractmethod
 
+from tqdm import tqdm
+
 from utils.metrics import Track, compute_metrics, compute_multi_target_metrics
 from prompts import SYSTEM_PROMPT, format_llavast_prompt, format_prompt, parse_response
 
@@ -108,10 +110,9 @@ class BasePipeline(ABC):
             samples = self.load_data()
 
             all_results = []
-            for i in range(0, len(samples), self.batch_size):
+            total_batches = (len(samples) + self.batch_size - 1) // self.batch_size if samples else 0
+            for i in tqdm(range(0, len(samples), self.batch_size), total=total_batches, desc="Evaluating", unit="batch"):
                 batch = samples[i:i + self.batch_size]
-                logger.info(f"Processing batch {i // self.batch_size + 1}/{(len(samples) + self.batch_size - 1) // self.batch_size}")
-
                 batch_results = self._process_batch(batch)
                 all_results.extend(batch_results)
 
@@ -137,7 +138,7 @@ class BasePipeline(ABC):
             else:
                 video_paths.append(video_path)
             video_metas.append(sample.get('metadata') or {})
-            logger.info(f"Using original video: {video_path}")
+            logger.debug(f"Using original video: {video_path}")
         
         if getattr(self.model, "use_llavast_user_prompt", False):
             queries = [format_llavast_prompt(sample['query']) for sample in batch]

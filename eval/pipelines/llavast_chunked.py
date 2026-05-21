@@ -6,6 +6,8 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List
 
+from tqdm import tqdm
+
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +37,17 @@ def run_chunked_worker(pipeline, chunk_num: int, chunk_id: int, run_id: str) -> 
         logger.info("Processing chunk %s/%s with sample range [%s, %s)", chunk_id, chunk_num, start, end)
 
         all_results: List[Dict[str, Any]] = []
-        for i in range(0, len(samples), pipeline.batch_size):
+        total_batches = (len(samples) + pipeline.batch_size - 1) // pipeline.batch_size if samples else 0
+        for i in tqdm(
+            range(0, len(samples), pipeline.batch_size),
+            total=total_batches,
+            desc=f"Chunk {chunk_id + 1}/{chunk_num}",
+            unit="batch",
+            position=max(chunk_id, 0),
+            leave=True,
+            dynamic_ncols=True,
+        ):
             batch = samples[i : i + pipeline.batch_size]
-            logger.info(
-                "Processing chunk batch %s/%s",
-                i // pipeline.batch_size + 1,
-                (len(samples) + pipeline.batch_size - 1) // pipeline.batch_size if samples else 0,
-            )
             all_results.extend(pipeline._process_batch(batch))
 
         chunk_file = _chunk_file_path(pipeline, run_id, chunk_id)
