@@ -2,6 +2,7 @@
 
 import os
 import math
+import ast
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple, Union
 from ruamel.yaml import YAML
@@ -39,10 +40,93 @@ def resolve_repo_relative_path(path):
 
 def load_grounding_dino_config(path):
     with open(resolve_repo_relative_path(path)) as f:
+        raw_text = f.read()
+    if "=" in raw_text and ":" not in raw_text.splitlines()[0]:
+        parsed = {}
+        for raw_line in raw_text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            value = value.strip()
+            if value == "None":
+                parsed_value = None
+            elif value in {"True", "False"}:
+                parsed_value = value == "True"
+            else:
+                try:
+                    parsed_value = ast.literal_eval(value)
+                except (SyntaxError, ValueError):
+                    parsed_value = value
+            parsed[key.strip()] = parsed_value
+        return _normalize_grounding_dino_config(parsed)
+
+    with open(resolve_repo_relative_path(path)) as f:
         yaml = YAML(typ='safe', pure=True)
         g_dino_config = yaml.load(f)
-    g_dino_config = {k: v['value'] for k, v in g_dino_config.items()}
-    return EasyDict(g_dino_config)
+    if isinstance(g_dino_config, dict):
+        g_dino_config = {
+            k: (v['value'] if isinstance(v, dict) and 'value' in v else v)
+            for k, v in g_dino_config.items()
+        }
+        return _normalize_grounding_dino_config(g_dino_config)
+
+    raise TypeError(f"Unsupported Grounding DINO config format: {type(g_dino_config).__name__}")
+
+
+def _normalize_grounding_dino_config(config_dict):
+    config = EasyDict(config_dict)
+    if hasattr(config, "GroundingDINO"):
+        if not isinstance(config.GroundingDINO, EasyDict):
+            config.GroundingDINO = EasyDict(config.GroundingDINO)
+        _apply_grounding_dino_defaults(config.GroundingDINO)
+        return config
+
+    # DeViL's bundled weight config is a flat "key = value" file, while the
+    # runtime builder expects a nested `config.GroundingDINO` object plus a few
+    # task-level fields that normally come from training configs.
+    defaults = {
+        "GroundingDINO": EasyDict(dict(config_dict)),
+        "device": "cuda",
+        "dataset_name": "a2d_sentences",
+        "binary": 1,
+        "cls_loss_coef": 1.0,
+        "bbox_loss_coef": 5.0,
+        "giou_loss_coef": 2.0,
+        "feat_consistency_loss_coef": 1.0,
+        "geom_consistency_loss_coef": 1.0,
+        "mask_loss_coef": 1.0,
+        "dice_loss_coef": 1.0,
+        "proj_loss_coef": 1.0,
+        "eos_coef": 0.1,
+        "set_cost_class": 1.0,
+        "set_cost_bbox": 5.0,
+        "set_cost_giou": 2.0,
+        "set_cost_mask": 1.0,
+        "set_cost_dice": 1.0,
+        "set_cost_proj": 1.0,
+        "set_cost_temporal": 1.0,
+    }
+    normalized = EasyDict(defaults)
+    _apply_grounding_dino_defaults(normalized.GroundingDINO)
+    return normalized
+
+
+def _apply_grounding_dino_defaults(config):
+    defaults = {
+        "query_decay": 1.0,
+        "aux_loss": False,
+        "dec_lora": False,
+        "enc_lora": False,
+        "lora_rank": 16,
+        "full_tune": False,
+        "temporal_layer": 6,
+        "tracking_alpha": 0.1,
+        "pretrained_path": resolve_repo_relative_path("weights/groundingdino_swinb_cogcoor.pth"),
+    }
+    for key, value in defaults.items():
+        if not hasattr(config, key):
+            setattr(config, key, value)
 
 def spatial_downsampling(features, grid_thws, stride=2):
     n, c = features.shape

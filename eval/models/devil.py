@@ -11,6 +11,11 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _prepend_env_path(env: Dict[str, str], key: str, path: str) -> None:
+    existing = env.get(key)
+    env[key] = path if not existing else f"{path}{os.pathsep}{existing}"
+
+
 class DeViLModel:
     """DeViL adapter using the bundled dependence.devil package.
 
@@ -51,6 +56,28 @@ class DeViLModel:
         env = os.environ.copy()
         existing = env.get("PYTHONPATH")
         env["PYTHONPATH"] = str(self.eval_root) if not existing else f"{self.eval_root}{os.pathsep}{existing}"
+
+        python_bin = Path(self.python_bin)
+        if python_bin.exists():
+            venv_root = python_bin.resolve().parent.parent
+            torch_lib_candidates = sorted((venv_root / "lib").glob("python*/site-packages/torch/lib"))
+            for torch_lib in torch_lib_candidates:
+                if torch_lib.exists():
+                    _prepend_env_path(env, "LD_LIBRARY_PATH", str(torch_lib))
+                    break
+
+        # flash-attn is imported transitively by transformers' Qwen2 code path.
+        # On this machine, libcudart.so.12 is present but not on the default
+        # runtime search path for the spawned worker process.
+        cuda_runtime_candidates = [
+            "/usr/local/lib/ollama",
+            "/usr/local/cuda/lib64",
+            "/usr/local/cuda-13.0/targets/x86_64-linux/lib",
+        ]
+        for candidate in cuda_runtime_candidates:
+            if Path(candidate, "libcudart.so.12").exists():
+                _prepend_env_path(env, "LD_LIBRARY_PATH", candidate)
+                break
         return env
 
     def _read_proto(self) -> Dict[str, Any]:

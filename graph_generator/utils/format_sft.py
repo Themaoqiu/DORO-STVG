@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
-import fire
 import json
 import os
+import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+import fire
+
+_ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(_ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(_ROOT_DIR))
+
+from eval.prompts import SYSTEM_PROMPT, format_prompt
 
 
 def _to_int(x: Any, default: int = 0) -> int:
@@ -58,6 +66,120 @@ def _format_boxes(
             f"{x2:.{coord_decimals}f}, {y2:.{coord_decimals}f}"
         )
     return "<" + "; ".join(parts) + " />"
+
+
+def _format_box_dict(
+    boxes: Dict[str, List[Any]],
+    video_width: Optional[int] = None,
+    video_height: Optional[int] = None,
+    coord_decimals: int = 4,
+) -> Dict[str, List[float]]:
+    frame_map: Dict[str, List[float]] = {}
+    for frame_idx, coords in _sorted_box_items(boxes):
+        if not isinstance(coords, list) or len(coords) != 4:
+            continue
+        x1, y1, x2, y2 = (_to_float(v) for v in coords)
+        if video_width and video_height and video_width > 0 and video_height > 0:
+            x1 /= video_width
+            y1 /= video_height
+            x2 /= video_width
+            y2 /= video_height
+        frame_map[str(frame_idx)] = [
+            round(x1, coord_decimals),
+            round(y1, coord_decimals),
+            round(x2, coord_decimals),
+            round(y2, coord_decimals),
+        ]
+    return frame_map
+
+
+def _humanize_object_id(object_id: str) -> str:
+    text = str(object_id).strip()
+    if not text:
+        return "object"
+    parts = text.split("_")
+    if len(parts) >= 2 and parts[-1].isdigit():
+        parts = parts[:-1]
+    text = " ".join(parts).replace("-", " ").strip()
+    return text or "object"
+
+
+def _ensure_definite_np(text: str) -> str:
+    text = str(text).strip()
+    if not text:
+        return "the object"
+    if text.lower().startswith(("the ", "a ", "an ")):
+        return text
+    return f"the {text}"
+
+
+def _fallback_query_label(obj: Dict[str, Any]) -> str:
+    text = str(obj.get("query", "")).strip()
+    return text or "the object"
+
+
+def _build_target_labels(obj: Dict[str, Any], target_members: List[Dict[str, Any]]) -> List[str]:
+    saved_target_queries = obj.get("per_target_queries")
+    labels: List[str] = []
+    for idx, member in enumerate(target_members, start=1):
+        value = saved_target_queries.get(f"target {idx}") if isinstance(saved_target_queries, dict) else None
+        if value is None and isinstance(saved_target_queries, dict):
+            value = saved_target_queries.get(str(idx))
+        text = str(value).strip() if value is not None else ""
+        if text:
+            labels.append(text)
+            continue
+        labels.append(_ensure_definite_np(_humanize_object_id(str(member.get("object_id", "")))))
+    return labels
+
+
+def _format_target_box_json(
+    obj: Dict[str, Any],
+    video_width: Optional[int],
+    video_height: Optional[int],
+) -> str:
+    target_members = obj.get("target_members")
+    if not isinstance(target_members, list) or not target_members:
+        boxes = obj.get("boxes")
+        if not isinstance(boxes, dict):
+            boxes = {}
+        payload = {
+            _fallback_query_label(obj): _format_box_dict(
+                boxes=boxes,
+                video_width=video_width,
+                video_height=video_height,
+            )
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    labels = _build_target_labels(obj, target_members)
+    if len(target_members) == 1:
+        label = labels[0] if labels else _fallback_query_label(obj)
+        if label == _ensure_definite_np(_humanize_object_id(str(target_members[0].get("object_id", "")))):
+            label = _fallback_query_label(obj)
+        boxes = target_members[0].get("boxes")
+        if not isinstance(boxes, dict):
+            boxes = {}
+        payload = {
+            label: _format_box_dict(
+                boxes=boxes,
+                video_width=video_width,
+                video_height=video_height,
+            )
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    payload: Dict[str, Dict[str, List[float]]] = {}
+    for member, label in zip(target_members, labels):
+        boxes = member.get("boxes")
+        if not isinstance(boxes, dict):
+            boxes = {}
+        payload[label] = _format_box_dict(
+            boxes=boxes,
+            video_width=video_width,
+            video_height=video_height,
+        )
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _detect_media_dir(video_paths: List[str]) -> Optional[Path]:
@@ -152,6 +274,26 @@ def build_messages(
     return msgs
 
 
+def build_messages_from_prompt(
+    query: str,
+    assistant_content: str,
+    include_system: bool,
+) -> Tuple[List[Dict[str, str]], str]:
+    user_content = format_prompt(query)
+    if "<video>" not in user_content:
+        user_content = f"<video>{user_content}"
+
+    msgs: List[Dict[str, str]] = []
+    msgs.extend(
+        [
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": assistant_content},
+        ]
+    )
+    system = SYSTEM_PROMPT if include_system else ""
+    return msgs, system
+
+
 def main(
     input: str = "/home/wangxingjian/DORO-STVG/graph_generator/output/query_train.jsonl",
     output: str = "/home/wangxingjian/DORO-STVG/trainer/LlamaFactory/data/vidstg_query_train_sharegpt.jsonl",
@@ -160,11 +302,14 @@ def main(
     path_mode: str = "relative",
     assistant_format: str = "pixel",
     include_system: bool = False,
+    prompt_style: str = "legacy",
 ) -> None:
     if path_mode not in {"relative", "basename", "absolute"}:
         raise ValueError("path_mode must be one of: relative, basename, absolute")
     if assistant_format not in {"pixel", "norm", "both"}:
         raise ValueError("assistant_format must be one of: pixel, norm, both")
+    if prompt_style not in {"legacy", "eval_json"}:
+        raise ValueError("prompt_style must be one of: legacy, eval_json")
 
     in_path = Path(input)
     out_path = Path(output)
@@ -217,14 +362,30 @@ def main(
                         video_height=video_height,
                     )
 
-            sample = {
-                "messages": build_messages(
+            if prompt_style == "eval_json":
+                assistant_content = _format_target_box_json(
+                    obj=row,
+                    video_width=_to_int(video_width, 0) or None,
+                    video_height=_to_int(video_height, 0) or None,
+                )
+                messages, system = build_messages_from_prompt(
+                    query=query,
+                    assistant_content=assistant_content,
+                    include_system=include_system,
+                )
+            else:
+                system = ""
+                messages = build_messages(
                     query=query,
                     pixel_box_text=pixel_box_text,
                     norm_box_text=norm_box_text,
                     assistant_format=assistant_format,
                     include_system=include_system,
-                ),
+                )
+
+            sample = {
+                "messages": messages,
+                "system": system,
                 "videos": [_resolve_video_ref(video_ref_raw, media_dir=media_dir_path, path_mode=path_mode)],
                 "query_id": row.get("queryid") or row.get("query_id") or f"query_{idx}",
                 "video_width": video_width,

@@ -9,7 +9,6 @@ SYSTEM_PROMPT = """You are an expert in spatiotemporal video grounding tasked wi
 USER_PROMPT = """Where does {query} occur in the video? Please find the location of the corresponding subject/object in this video. Give the corresponding bounding boxes for the object(s) in each corresponding frame.\n\n
 
 Guidelines:\n
-- Videos are sampled at 2 fps.\n
 - Use normalized box coordinates in [0, 1].\n
 - Do not output explanations.\n
 - You must follow the exact output format below, and only output the format without any additional text or explanation.\n
