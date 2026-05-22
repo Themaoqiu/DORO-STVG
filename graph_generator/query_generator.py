@@ -8,7 +8,7 @@ from typing import Iterable, Optional, Union
 import fire
 
 from modules.graph_filter import GraphFilter
-from graph_generator.modules.query_generator import CPSATQuerySampler, DifficultyWeights
+from modules.query_generator import CPSATQuerySampler, DifficultyWeights
 
 
 def main(
