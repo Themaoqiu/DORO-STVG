@@ -4,6 +4,7 @@
 Backbone modules.
 """
 from collections import OrderedDict
+import os
 import torch
 import torch.nn.functional as F
 import torchvision
@@ -114,9 +115,20 @@ class Backbone(BackboneBase):
     ):
         backbone = getattr(torchvision.models, name)(
             replace_stride_with_dilation=[False, False, dilation],
-            pretrained=True,
+            pretrained=False,
             norm_layer=FrozenBatchNorm2d,
         )
+        resnet_ckpt = os.getenv("CGSTVG_RESNET101_CKPT")
+        if resnet_ckpt:
+            checkpoint = torch.load(resnet_ckpt, map_location="cpu")
+            state_dict = checkpoint.get("state_dict") or checkpoint.get("model") or checkpoint
+            backbone.load_state_dict(state_dict)
+        else:
+            backbone = getattr(torchvision.models, name)(
+                replace_stride_with_dilation=[False, False, dilation],
+                pretrained=True,
+                norm_layer=FrozenBatchNorm2d,
+            )
         num_channels = 512 if name in ("resnet18", "resnet34") else 2048
         super().__init__(backbone, train_backbone, num_channels, return_interm_layers)
 

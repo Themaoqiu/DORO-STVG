@@ -9,7 +9,7 @@ INPUT:
   TRAIN_SAMPLE_NUM: 64
 
 MODEL:
-  WEIGHT: model_zoo/pretrained_resnet101_checkpoint.pth
+  WEIGHT: /mnt/sdc/xingjianwang/stvg-test/CGSTVG/model_zoo/pretrained_resnet101_checkpoint.pth
   VISION_BACKBONE:
     NAME: resnet101
     POS_ENC: sine

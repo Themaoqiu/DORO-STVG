@@ -1,3 +1,4 @@
+import os
 from cgitb import text
 import torch
 import torch.nn.functional as F
@@ -42,8 +43,10 @@ class BERT(nn.Module):
 class Roberta(nn.Module):
     def __init__(self, name, outdim, freeze=False) -> None:
         super().__init__()
-        self.body = RobertaModel.from_pretrained("model_zoo/roberta-base/")
-        self.tokenizer = RobertaTokenizerFast.from_pretrained(pretrained_model_name_or_path='model_zoo/roberta/')
+        roberta_dir = os.getenv("CGSTVG_ROBERTA_DIR", "/mnt/sdc/xingjianwang/models/roberta-base")
+        tokenizer_dir = os.getenv("CGSTVG_ROBERTA_TOKENIZER_DIR", "/mnt/sdc/xingjianwang/models/roberta-base")
+        self.body = RobertaModel.from_pretrained(roberta_dir)
+        self.tokenizer = RobertaTokenizerFast.from_pretrained(pretrained_model_name_or_path=tokenizer_dir)
 
         if freeze:
             for p in self.body.parameters():

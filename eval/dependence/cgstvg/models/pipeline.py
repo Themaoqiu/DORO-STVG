@@ -1,3 +1,4 @@
+import os
 from torch import nn
 from .net_utils import MLP
 from .vision_model import build_vis_encoder
@@ -30,7 +31,10 @@ class CGSTVG(nn.Module):
         self.temp_embed = MLP(hidden_dim, hidden_dim, 2, 2, dropout=0.3)
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
 
-        self.vid = vidswin_model("video_swin_t_p4w7", "video_swin_t_p4w7_k400_1k")
+        self.vid = vidswin_model(
+            "video_swin_t_p4w7",
+            os.getenv("CGSTVG_SWIN_CKPT", "video_swin_t_p4w7_k400_1k"),
+        )
         self.input_proj2 = nn.Conv2d(768, hidden_dim, kernel_size=1)
         for param in self.vid.parameters():
             param.requires_grad = False
