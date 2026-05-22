@@ -15,9 +15,9 @@ fi
 
 # ---- I/O ----
 # Comma-separated list of input scene-graph .jsonl files.
-INPUTS=1.jsonl,2.jsonl
+INPUTS=/tmp/preception_50.jsonl,/tmp/mose_50.jsonl
 # Output directory; per-input file is written as <stem>.queries.jsonl here.
-OUTPUT_DIR=/Users/themaoqiu/CodeRepo/DORO-STVG/graph_generator/output/queries
+OUTPUT_DIR=/tmp/queries_q100
 
 # ---- sampler / solver ----
 MIN_INTERVAL_LEN=3
@@ -39,7 +39,7 @@ MAX_QUERIES_PER_BUCKET=2
 EXPAND_NON_TEMPORAL_QUERY_TRACKS=True
 
 # ---- optional LLM polishing ----
-USE_LLM_POLISH=True
+USE_LLM_POLISH=False
 POLISH_MODEL_NAME=gemini-3-flash
 MAX_CONCURRENT_PER_KEY=30
 MAX_RETRIES=5
