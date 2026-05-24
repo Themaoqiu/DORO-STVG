@@ -153,34 +153,85 @@ def _run_solver(name: str, fn, case: SolverCase, time_limit_sec: float) -> Dict[
 
 
 def _summarize(per_case: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate per-case solver records into headline metrics.
+
+    The reported metrics follow standard mathematical-programming and
+    approximation-algorithm benchmarking practice:
+
+    * ``success_rate``   — fraction of instances on which the solver returns a
+      feasible assignment within the time limit. Standard branch-and-bound
+      reporting, see Achterberg 2007, *Constraint Integer Programming*, §6.
+    * ``optimality_rate`` — fraction of instances on which the solver matches
+      the best-known objective (taken as the minimum objective achieved by any
+      solver on that instance; for an exact solver this coincides with the
+      proven optimum). Cf. Wolsey 1998, *Integer Programming*, §1.4.
+    * ``mean_opt_gap``   — average relative gap ``(obj - best) / best`` against
+      the per-instance best-known objective; the per-instance baseline avoids
+      tying gap to a single reference solver. Cf. Dolan & Moré 2002,
+      *Mathematical Programming* 91(2), and Beiranvand et al. 2017,
+      *Optimization & Engineering* 18(4), on performance profiles.
+    * ``win_rate``       — fraction of instances on which the solver is the
+      strict argmin of the objective among all baselines (ties excluded).
+    * ``approx_ratio_mean`` / ``approx_ratio_max`` — mean and worst observed
+      ``obj / best``. For greedy set-cover, Chvátal 1979 / Johnson 1974 give a
+      worst-case bound of ``H(n) = O(log n)``; we report the empirical
+      counterpart.
+    * ``mean_time_sec`` / ``p95_time_sec`` — wall-clock cost.
+    """
     by_solver: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    cpsat_obj: Dict[int, int] = {}
+    best_known: Dict[int, int] = {}
     for i, case in enumerate(per_case):
+        feas_objs = [int(r["objective"]) for r in case["results"] if r["feasible"]]
+        if feas_objs:
+            best_known[i] = min(feas_objs)
         for r in case["results"]:
             by_solver[r["solver"]].append((i, r))
-            if r["solver"] == "cpsat" and r["feasible"]:
-                cpsat_obj[i] = int(r["objective"])
+
+    # Strict-winner bookkeeping: only one solver wins per instance.
+    winners: Dict[int, Optional[str]] = {}
+    for i, case in enumerate(per_case):
+        feas = [(r["solver"], int(r["objective"])) for r in case["results"] if r["feasible"]]
+        if not feas:
+            winners[i] = None
+            continue
+        m = min(o for _, o in feas)
+        argmins = [s for s, o in feas if o == m]
+        winners[i] = argmins[0] if len(argmins) == 1 else None
 
     summary: Dict[str, Any] = {}
     for name, indexed in by_solver.items():
         n = len(indexed)
-        feas = [r for _, r in indexed if r["feasible"]]
-        feas_count = len(feas)
-        mean_obj = (sum(r["objective"] for r in feas) / feas_count) if feas else None
-        mean_time = sum(r["time_sec"] for _, r in indexed) / n if n else 0.0
-        gaps = []
-        for idx, r in indexed:
-            if not r["feasible"] or idx not in cpsat_obj:
+        feas_records = [(idx, r) for idx, r in indexed if r["feasible"]]
+        feas_count = len(feas_records)
+
+        gaps: List[float] = []
+        ratios: List[float] = []
+        opt_match = 0
+        for idx, r in feas_records:
+            base = best_known.get(idx)
+            if base is None or base <= 0:
                 continue
-            base = cpsat_obj[idx]
-            if base > 0:
-                gaps.append((r["objective"] - base) / base)
+            obj = int(r["objective"])
+            ratios.append(obj / base)
+            gaps.append((obj - base) / base)
+            if obj == base:
+                opt_match += 1
+
+        wins = sum(1 for idx, r in feas_records if winners.get(idx) == name)
+        times = [r["time_sec"] for _, r in indexed]
+        times_sorted = sorted(times)
+        p95 = times_sorted[max(0, int(0.95 * len(times_sorted)) - 1)] if times_sorted else 0.0
+
         summary[name] = {
             "n_cases": n,
-            "feasibility_rate": feas_count / n if n else 0.0,
-            "mean_objective": mean_obj,
-            "mean_time_sec": mean_time,
-            "mean_relative_gap_vs_cpsat": (sum(gaps) / len(gaps)) if gaps else None,
+            "success_rate": feas_count / n if n else 0.0,
+            "optimality_rate": (opt_match / feas_count) if feas_count else None,
+            "mean_opt_gap": (sum(gaps) / len(gaps)) if gaps else None,
+            "win_rate": (wins / n) if n else 0.0,
+            "approx_ratio_mean": (sum(ratios) / len(ratios)) if ratios else None,
+            "approx_ratio_max": max(ratios) if ratios else None,
+            "mean_time_sec": (sum(times) / n) if n else 0.0,
+            "p95_time_sec": p95,
         }
     return summary
 
@@ -195,17 +246,27 @@ def _summarize_by_source(per_case: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
 
 
 def _format_table(summary: Dict[str, Any]) -> str:
-    header = f"{'solver':<10} {'n':>5} {'feas%':>7} {'mean|x|':>9} {'gap%':>7} {'time(ms)':>10}"
+    header = (
+        f"{'solver':<10} {'n':>5} {'succ%':>7} {'opt%':>7} {'win%':>7} "
+        f"{'gap%':>7} {'ratio':>7} {'rmax':>6} {'t_mean(ms)':>11} {'t_p95(ms)':>10}"
+    )
     lines = [header, "-" * len(header)]
     for name in ["cpsat", "ilp", "greedy", "random"]:
         if name not in summary:
             continue
         s = summary[name]
-        feas = f"{100 * s['feasibility_rate']:.1f}"
-        mo = f"{s['mean_objective']:.2f}" if s['mean_objective'] is not None else "-"
-        gap = f"{100 * s['mean_relative_gap_vs_cpsat']:.1f}" if s['mean_relative_gap_vs_cpsat'] is not None else "-"
-        ms = f"{1000 * s['mean_time_sec']:.1f}"
-        lines.append(f"{name:<10} {s['n_cases']:>5} {feas:>7} {mo:>9} {gap:>7} {ms:>10}")
+        succ = f"{100 * s['success_rate']:.1f}"
+        opt = f"{100 * s['optimality_rate']:.1f}" if s['optimality_rate'] is not None else "-"
+        win = f"{100 * s['win_rate']:.1f}"
+        gap = f"{100 * s['mean_opt_gap']:.1f}" if s['mean_opt_gap'] is not None else "-"
+        ratio = f"{s['approx_ratio_mean']:.2f}" if s['approx_ratio_mean'] is not None else "-"
+        rmax = f"{s['approx_ratio_max']:.2f}" if s['approx_ratio_max'] is not None else "-"
+        tm = f"{1000 * s['mean_time_sec']:.1f}"
+        tp = f"{1000 * s['p95_time_sec']:.1f}"
+        lines.append(
+            f"{name:<10} {s['n_cases']:>5} {succ:>7} {opt:>7} {win:>7} "
+            f"{gap:>7} {ratio:>7} {rmax:>6} {tm:>11} {tp:>10}"
+        )
     return "\n".join(lines)
 
 
