@@ -6,15 +6,15 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
 VENV="$REPO_ROOT/.venv-baseline"
 
-if [[ ! -x "$VENV/bin/python" ]]; then
-    echo "[bench] creating venv at $VENV"
-    (cd "$REPO_ROOT" && uv venv .venv-baseline --python 3.11)
-    VIRTUAL_ENV="$VENV" uv pip install ortools pulp fire openai
-fi
+# if [[ ! -x "$VENV/bin/python" ]]; then
+#     echo "[bench] creating venv at $VENV"
+#     (cd "$REPO_ROOT" && uv venv .venv-baseline --python 3.11)
+#     VIRTUAL_ENV="$VENV" uv pip install ortools pulp fire openai
+# fi
 
 # ---- I/O ----
-INPUTS=/Users/themaoqiu/Downloads/preception.jsonl,/Users/themaoqiu/Downloads/mose.jsonl
-OUT=/Users/themaoqiu/CodeRepo/DORO-STVG/graph_generator/outputs/baselines/full_run.json
+INPUTS=/home/wangxingjian/data/compstvg/preception.jsonl,/home/wangxingjian/data/compstvg/mose.jsonl
+OUT=/home/wangxingjian/DORO-STVG/graph_generator/outputs/baselines/mose_preception_full_run.json
 
 # ---- benchmark scope ----
 NUM_GRAPHS=-1            # -1 = every graph in each file
@@ -35,7 +35,7 @@ echo "[bench] num_workers : $NUM_WORKERS"
 echo "[bench] out         : $OUT"
 
 cd "$PROJECT_ROOT"
-VIRTUAL_ENV="$VENV" "$VENV/bin/python" -m modules.query_generator.baseline.benchmark \
+python -m modules.query_generator.baseline.benchmark \
     --inputs "$INPUTS" \
     --num_graphs "$NUM_GRAPHS" \
     --max_cases "$MAX_CASES" \

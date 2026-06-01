@@ -1,19 +1,19 @@
 #!/bin/bash
-source ../envs/eval/qwen/.venv/bin/activate
+source ../envs/eval/qwen_internvl/.venv/bin/activate
 
 export FORCE_QWENVL_VIDEO_READER=decord
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=5
 
 # Default parameters
 MODEL_NAME="qwen3VL"
-MODEL_PATH="/home/wangxingjian/model/qwen3_vl_8b_instruct"
+MODEL_PATH="/home/wangxingjian/model/stvg-grpo-curriculum-px200k-r8192-rb8-step66/stvg_grpo_curriculum_fast_px200k_r8192_rb8_half_save33_merge/global_step_66_huggingface"
 DATA_NAME="doro-stvg"
-ANNOTATION_PATH="/home/wangxingjian/DORO-STVG/graph_generator/modules/autoresearch/round_24/query_raw.jsonl"
-VIDEO_DIR="/home/wangxingjian/data/vidstg/video"
+ANNOTATION_PATH="/home/wangxingjian/data/compstvg/test.jsonl"
+VIDEO_DIR=""
 OUTPUT_DIR="./res"
-BATCH_SIZE=64
+BATCH_SIZE=1
 MAX_TOKENS=4096
-MAX_MODEL_LEN=24800
+MAX_MODEL_LEN=64000
 TEMPERATURE=0.1
 TENSOR_PARALLEL_SIZE=1
 GPU_MEMORY_UTILIZATION=0.9

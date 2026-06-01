@@ -5,8 +5,72 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
+# Example:
+#   python3 video_reencode.py \
+#     --input /path/to/input.mp4 \
+#     --output /path/to/output_1fps.mp4 \
+#     --fps 1 \
+#     --overwrite
+#
+#   python3 video_reencode.py \
+#     --input /path/to/video_folder \
+#     --output /path/to/video_folder_1fps \
+#     --fps 1 \
+#     --workers 8 \
+#     --overwrite
+
 
 VIDEO_EXTENSIONS = {".mp4", ".m4v", ".webm", ".avi", ".mkv", ".mov", ".flv", ".wmv"}
+FRAME_MAP_SUFFIX = ".frame_map.tsv"
+
+
+def get_frame_map_path(output_path: str) -> Path:
+    output = Path(output_path)
+    return output.with_suffix(f"{output.suffix}{FRAME_MAP_SUFFIX}")
+
+
+def _select_codec(output_path: str, codec: Optional[str]) -> str:
+    if codec is not None:
+        return codec
+
+    suffix = Path(output_path).suffix.lower()
+    if suffix in {".mp4", ".m4v"}:
+        return "libx264"
+    if suffix in {".webm"}:
+        return "libvpx-vp9"
+    if suffix in {".avi"}:
+        return "mpeg4"
+    return "libx264"
+
+
+def _build_ffmpeg_command(input_path: str, output_path: str, target_fps: float, codec: Optional[str]) -> list[str]:
+    filter_chain = f"fps={target_fps},scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    frame_map_path = get_frame_map_path(output_path)
+    selected_codec = _select_codec(output_path, codec)
+    return [
+        "ffmpeg",
+        "-i",
+        input_path,
+        "-map",
+        "0:v:0",
+        "-vf",
+        filter_chain,
+        "-an",
+        "-stats_mux_pre",
+        str(frame_map_path),
+        "-stats_mux_pre_fmt",
+        "{n}\t{ni}\t{pts}\t{ptsi}\t{tb}\t{tbi}",
+        "-c:v",
+        selected_codec,
+        "-preset",
+        "medium",
+        "-crf",
+        "23",
+        "-movflags",
+        "+faststart",
+        "-y",
+        output_path,
+    ]
 
 
 def reencode_video_fps(
@@ -23,32 +87,7 @@ def reencode_video_fps(
 
     output_dir = Path(output_path).parent
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    if codec is None:
-        suffix = Path(output_path).suffix.lower()
-        if suffix in {".mp4", ".m4v"}:
-            codec = "libx264"
-        elif suffix in {".webm"}:
-            codec = "libvpx-vp9"
-        elif suffix in {".avi"}:
-            codec = "mpeg4"
-        else:
-            codec = "libx264"
-
-    cmd = [
-        "ffmpeg",
-        "-i", input_path,
-        "-r", str(target_fps),
-        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-        "-c:v", codec,
-        "-preset", "medium",
-        "-crf", "23",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-movflags", "+faststart",
-        "-y",
-        output_path,
-    ]
+    cmd = _build_ffmpeg_command(input_path, output_path, target_fps, codec)
 
     print("Running ffmpeg command:", flush=True)
     print(" ".join(cmd), flush=True)
@@ -59,6 +98,7 @@ def reencode_video_fps(
             check=True,
         )
         print(f"✅ Video re-encoded successfully: {output_path}", flush=True)
+        print(f"✅ Frame map written to: {get_frame_map_path(output_path)}", flush=True)
 
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"FFmpeg failed with exit code {e.returncode}")
@@ -80,7 +120,8 @@ def _reencode_one(
 ) -> Tuple[str, bool, str]:
     src_path = Path(src)
     dst_path = Path(dst)
-    if dst_path.exists() and not overwrite:
+    frame_map_path = get_frame_map_path(dst)
+    if dst_path.exists() and frame_map_path.exists() and not overwrite:
         return str(src_path), True, f"skip existing: {dst_path}"
 
     try:
@@ -94,6 +135,63 @@ def iter_video_files(root: Path) -> Iterable[Path]:
     for path in root.rglob("*"):
         if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS:
             yield path
+
+
+def run_folder(
+    input_root: Path,
+    output_root: Path,
+    target_fps: float,
+    codec: Optional[str],
+    workers: int,
+    overwrite: bool,
+) -> None:
+    output_root.mkdir(parents=True, exist_ok=True)
+    video_files = sorted(iter_video_files(input_root))
+    if not video_files:
+        print(f"⚠️ No video files found in folder: {input_root}", flush=True)
+        return
+
+    print(f"Found {len(video_files)} videos in {input_root}. Output folder: {output_root}", flush=True)
+    jobs = []
+    for src in video_files:
+        rel = src.relative_to(input_root)
+        dst = output_root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        jobs.append((str(src), str(dst)))
+
+    print(f"Using {workers} parallel workers", flush=True)
+    failed = []
+    completed = 0
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                _reencode_one,
+                src,
+                dst,
+                target_fps,
+                codec,
+                overwrite,
+            ): (src, dst)
+            for src, dst in jobs
+        }
+        for future in as_completed(futures):
+            src, dst = futures[future]
+            completed += 1
+            ok_src, ok, message = future.result()
+            if ok:
+                print(f"[{completed}/{len(video_files)}] Done: {ok_src} -> {message}", flush=True)
+            else:
+                failed.append((src, message))
+                print(f"[{completed}/{len(video_files)}] Failed: {src}\n   Reason: {message}", flush=True)
+
+    print(
+        f"Done. Success: {len(video_files) - len(failed)}, Failed: {len(failed)}, Total: {len(video_files)}",
+        flush=True,
+    )
+    if failed:
+        print("Failed videos:", flush=True)
+        for src, reason in failed:
+            print(f"- {src}: {reason}", flush=True)
 
 
 def main() -> None:
@@ -130,54 +228,7 @@ def main() -> None:
         return
 
     output_root = Path(args.output) if args.output else input_path.parent / f"{input_path.name}_reencoded"
-    output_root.mkdir(parents=True, exist_ok=True)
-
-    video_files = sorted(iter_video_files(input_path))
-    if not video_files:
-        print(f"⚠️ No video files found in folder: {input_path}", flush=True)
-        return
-
-    print(f"Found {len(video_files)} videos in {input_path}. Output folder: {output_root}", flush=True)
-    failed = []
-    jobs = []
-    for src in video_files:
-        rel = src.relative_to(input_path)
-        dst = output_root / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        jobs.append((str(src), str(dst)))
-
-    print(f"Using {args.workers} parallel workers", flush=True)
-    completed = 0
-    with ProcessPoolExecutor(max_workers=args.workers) as executor:
-        futures = {
-            executor.submit(
-                _reencode_one,
-                src,
-                dst,
-                args.fps,
-                args.codec,
-                args.overwrite,
-            ): (src, dst)
-            for src, dst in jobs
-        }
-        for future in as_completed(futures):
-            src, dst = futures[future]
-            completed += 1
-            ok_src, ok, message = future.result()
-            if ok:
-                print(f"[{completed}/{len(video_files)}] Done: {ok_src} -> {message}", flush=True)
-            else:
-                failed.append((src, message))
-                print(f"[{completed}/{len(video_files)}] Failed: {src}\n   Reason: {message}", flush=True)
-
-    print(
-        f"Done. Success: {len(video_files) - len(failed)}, Failed: {len(failed)}, Total: {len(video_files)}",
-        flush=True,
-    )
-    if failed:
-        print("Failed videos:", flush=True)
-        for src, reason in failed:
-            print(f"- {src}: {reason}", flush=True)
+    run_folder(input_path, output_root, args.fps, args.codec, args.workers, args.overwrite)
 
 
 if __name__ == "__main__":

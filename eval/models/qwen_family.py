@@ -7,6 +7,9 @@ from transformers import AutoProcessor
 
 os.environ["DECORD_EOF_RETRY_MAX"] = "20480"
 
+VIDEO_MIN_PIXELS = 28 * 28
+VIDEO_MAX_PIXELS = 512 * 28 * 28
+
 
 class QwenVLBase:
     """Base class for Qwen-VL models."""
@@ -64,7 +67,8 @@ class QwenVLBase:
                     {
                         "type": "video",
                         "video": video_path,
-                        "max_pixels": 128 * 28 * 28,
+                        "min_pixels": VIDEO_MIN_PIXELS,
+                        "max_pixels": VIDEO_MAX_PIXELS,
                     },
                     {
                         "type": "text",
@@ -168,8 +172,8 @@ class Qwen3VL(QwenVLBase):
             max_model_len=self.max_model_len,
             gpu_memory_utilization=self.gpu_memory_utilization,
             mm_processor_kwargs={
-                "min_pixels": 28 * 28,
-                "max_pixels": 128 * 28 * 28,
+                "min_pixels": VIDEO_MIN_PIXELS,
+                "max_pixels": VIDEO_MAX_PIXELS,
             },
             limit_mm_per_prompt={"image": 1, "video": 1},
             trust_remote_code=True,
