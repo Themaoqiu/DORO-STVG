@@ -1,0 +1,113 @@
+# CompSTVG (mose + perception) SFT for Qwen3-VL-8B-Instruct.
+#
+# Hyperparameters aligned with Video-Thinker SFT
+#   (https://github.com/shijian2001/Video-Thinker, scripts/run_sft_video.sh):
+#     lr=1e-5, per_device_bs=1, grad_accum=2, num_epochs=1,
+#     max_grad_norm=5, bf16, AdamW, flash_attention_2,
+#     gradient_checkpointing=true, save_strategy=epoch.
+#
+# With 8 GPUs:  global_batch_size = 1 * 8 * 2 = 16
+# With 4132 SFT samples and global bs 16:  ~258 steps per epoch.
+#
+# Launch:
+#   bash examples/vlm_finetune/qwen3/run_compstvg_sft_8b.sh
+# or directly:
+#   uv run automodel examples/vlm_finetune/qwen3/qwen3_vl_8b_compstvg.yaml \
+#     --nproc-per-node 8
+
+recipe: FinetuneRecipeForVLM
+
+step_scheduler:
+  global_batch_size: 16
+  local_batch_size: 1
+  ckpt_every_steps: 258
+  val_every_steps: 258
+  num_epochs: 1
+  max_steps: 258
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 30
+
+rng:
+  _target_: nemo_automodel.components.training.rng.StatefulRNG
+  seed: 1234
+  ranked: true
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForImageTextToText.from_pretrained
+  pretrained_model_name_or_path: /home/wangxingjian/model/qwen3_vl_8b_instruct
+  attn_implementation: flash_attention_2
+  torch_dtype: bfloat16
+
+processor:
+  _target_: transformers.AutoProcessor.from_pretrained
+  pretrained_model_name_or_path: /home/wangxingjian/model/qwen3_vl_8b_instruct
+  # Match eval/models/qwen_family.py video pixel range so SFT and eval see
+  # the same number of vision tokens per video.
+  min_pixels: 784        # 28*28
+  max_pixels: 200704     # 512*28*28
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: /home/wangxingjian/checkpoints/qwen3_vl_8b_compstvg_sft/
+  model_save_format: safetensors
+  save_consolidated: true
+
+distributed:
+  _target_: nemo_automodel.components.distributed.fsdp2.FSDP2Manager
+  tp_size: 2
+  cp_size: 1
+  pp_size: 1
+  dp_replicate_size: 1
+  ep_size: 1
+  sequence_parallel: true
+  activation_checkpointing: true
+
+freeze_config:
+  freeze_embeddings: false
+  freeze_vision_tower: false
+  freeze_language_model: false
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+clip_grad_norm:
+  max_norm: 5.0
+
+dataset:
+  _target_: nemo_automodel.components.datasets.vlm.datasets.make_compstvg_sft_dataset
+  path_or_dataset: /home/wangxingjian/data/compstvg/splits/sft.jsonl
+  video_dir: /home/wangxingjian/data/compstvg
+  split: train
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  num_workers: 2
+  pin_memory: true
+  collate_fn:
+    _target_: nemo_automodel.components.datasets.vlm.collate_fns.qwen2_5_collate_fn
+
+# RL split is held out for the next stage. Comment in to validate on it.
+# validation_dataset:
+#   _target_: nemo_automodel.components.datasets.vlm.datasets.make_compstvg_sft_dataset
+#   path_or_dataset: /home/wangxingjian/data/compstvg/splits/rl.jsonl
+#   video_dir: /home/wangxingjian/data/compstvg
+#   split: validation
+# validation_dataloader:
+#   _target_: torchdata.stateful_dataloader.StatefulDataLoader
+#   num_workers: 0
+#   pin_memory: true
+#   collate_fn:
+#     _target_: nemo_automodel.components.datasets.vlm.collate_fns.qwen2_5_collate_fn
+
+optimizer:
+  _target_: torch.optim.AdamW
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  lr: 1.0e-5
+  weight_decay: 0.0
+
+# wandb:
+#   project: doro-stvg
+#   name: qwen3_vl_8b_compstvg_sft

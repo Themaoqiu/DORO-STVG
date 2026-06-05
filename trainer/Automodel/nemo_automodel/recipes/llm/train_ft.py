@@ -1,0 +1,1918 @@
+# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+import warnings
+
+# Suppress pydantic v2 UnsupportedFieldAttributeWarning before heavy imports
+# (transformers, huggingface_hub) trigger schema generation.
+try:
+    from pydantic.warnings import UnsupportedFieldAttributeWarning
+
+    warnings.filterwarnings("ignore", category=UnsupportedFieldAttributeWarning)
+except ImportError:
+    pass
+
+import gc
+import inspect
+import logging
+import pathlib
+import time
+from contextlib import nullcontext
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
+import mlflow
+import torch
+import torch.nn as nn
+import wandb
+from huggingface_hub import constants as hf_constants
+from torch.utils.data import DataLoader, IterableDataset
+from torchao.float8 import precompute_float8_dynamic_scale_for_fsdp
+from torchdata.stateful_dataloader.sampler import StatefulDistributedSampler
+from transformers import AutoConfig
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+from wandb import Settings
+
+from nemo_automodel._transformers import NeMoAutoModelForCausalLM, NeMoAutoModelForSequenceClassification
+from nemo_automodel._transformers.auto_tokenizer import NeMoAutoTokenizer
+from nemo_automodel._transformers.infrastructure import (
+    apply_model_infrastructure,
+    instantiate_infrastructure,
+)
+from nemo_automodel._transformers.mfu import AutoMFU
+from nemo_automodel._transformers.utils import apply_cache_compatibility_patches
+from nemo_automodel.components.checkpoint.checkpointing import (
+    Checkpointer,
+    CheckpointingConfig,
+)
+from nemo_automodel.components.config._arg_parser import parse_args_and_load_config
+from nemo_automodel.components.datasets.llm.megatron.sampler import create_megatron_sampler
+from nemo_automodel.components.datasets.llm.megatron_dataset import MegatronPretraining
+from nemo_automodel.components.datasets.llm.packed_sequence import pack_dataset
+from nemo_automodel.components.distributed.config import FSDP2Config, MegatronFSDPConfig
+from nemo_automodel.components.distributed.cp_utils import make_cp_batch_and_ctx
+from nemo_automodel.components.distributed.init_utils import (
+    initialize_distributed,
+)
+from nemo_automodel.components.distributed.megatron_fsdp import fully_shard_optimizer
+from nemo_automodel.components.distributed.mesh import MeshContext
+from nemo_automodel.components.distributed.pipelining import AutoPipeline
+from nemo_automodel.components.distributed.utils import FirstRankPerNode, dp_eval_sample_shard, get_sync_ctx
+from nemo_automodel.components.loggers.comet_utils import build_comet
+from nemo_automodel.components.loggers.log_utils import setup_logging
+from nemo_automodel.components.loggers.metric_logger import MetricsSample, build_metric_logger
+from nemo_automodel.components.loggers.mlflow_utils import (
+    configure_mlflow,
+    end_mlflow_active_run_as_killed,
+    to_float_metrics,
+)
+from nemo_automodel.components.loggers.wandb_utils import suppress_wandb_log_messages
+from nemo_automodel.components.loss.linear_ce import FusedLinearCrossEntropy
+from nemo_automodel.components.loss.masked_ce import MaskedCrossEntropy
+from nemo_automodel.components.loss.mtp import PipelineCausalLMLoss, calculate_mtp_loss
+from nemo_automodel.components.loss.utils import calculate_loss
+from nemo_automodel.components.moe.megatron.moe_utils import MoEAuxLossAutoScaler
+from nemo_automodel.components.optim.scheduler import OptimizerParamScheduler
+from nemo_automodel.components.optim.utils import build_dion_optimizer, is_dion_optimizer
+from nemo_automodel.components.quantization.fp8 import build_fp8_config
+from nemo_automodel.components.training.model_output_utils import get_final_hidden_states
+from nemo_automodel.components.training.precision_warnings import warn_if_torch_adam_with_bf16_params
+from nemo_automodel.components.training.rng import ScopedRNG, StatefulRNG
+from nemo_automodel.components.training.step_scheduler import StepScheduler
+from nemo_automodel.components.training.utils import (
+    count_tail_padding,
+    prepare_after_first_microbatch,
+    prepare_for_final_backward,
+    prepare_for_grad_accumulation,
+    scale_grads_and_clip_grad_norm,
+)
+from nemo_automodel.components.utils.compile_utils import (
+    build_compile_config,
+)
+from nemo_automodel.components.utils.flops_utils import calculate_mfu
+from nemo_automodel.components.utils.model_utils import (
+    _supports_logits_to_keep,
+    _supports_seq_lens,
+    filter_forward_kwargs,
+    resolve_trust_remote_code,
+)
+from nemo_automodel.recipes._dist_setup import setup_distributed
+from nemo_automodel.recipes.base_recipe import BaseRecipe
+from nemo_automodel.shared.te_patches import apply_te_patches
+from nemo_automodel.shared.utils import dtype_from_str
+
+if TYPE_CHECKING:
+    from torch.optim import Optimizer
+
+    from nemo_automodel.components.distributed.init_utils import DistInfo
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------
+#  Stateless helper functions
+# ---------------------------
+def _get_model_name(cfg_model):
+    if cfg_model.get("pretrained_model_name_or_path", None) is not None:
+        return cfg_model.pretrained_model_name_or_path
+    elif cfg_model.get("config", None) is not None:
+        if isinstance(cfg_model.config, str):
+            return cfg_model.config
+        return cfg_model.config.get("pretrained_model_name_or_path", None)
+    else:
+        return None
+
+
+def _uses_te_dot_product_attention(model_or_cfg):
+    """Check whether the model uses TE DotProductAttention.
+
+    Accepts either an instantiated nn.Module (preferred — inspects actual modules)
+    or a config object (fallback — checks backend.attn string).
+    """
+    if isinstance(model_or_cfg, torch.nn.Module):
+        try:
+            from transformer_engine.pytorch.attention import DotProductAttention
+        except ImportError:
+            return False
+        return any(isinstance(m, DotProductAttention) for m in model_or_cfg.modules())
+    # Config fallback for call sites before model is built
+    return (
+        hasattr(model_or_cfg, "backend") and hasattr(model_or_cfg.backend, "attn") and model_or_cfg.backend.attn == "te"
+    )
+
+
+def _uses_thd_collater(cfg_dataloader):
+    """Return True if the dataloader's collate_fn is ``packed_sequence_thd_collater``.
+
+    ``collate_fn`` ends in ``_fn``, so ConfigNode resolves the YAML dotted-path string to
+    the actual callable at load time — the value here is always the function, never a string.
+    """
+    from nemo_automodel.components.datasets.utils import packed_sequence_thd_collater
+
+    return getattr(cfg_dataloader, "collate_fn", None) is packed_sequence_thd_collater
+
+
+def _should_precompute_pp_causal_masks(model_config: Any) -> bool:
+    """Return whether the recipe should attach PP causal-mask precomputation."""
+    return getattr(model_config, "model_type", None) != "deepseek_v4"
+
+
+def _get_num_thd_chunks(pp_enabled, cfg):
+    if pp_enabled:
+        return cfg.step_scheduler.local_batch_size // cfg.get("distributed.pipeline.pp_microbatch_size", 1)
+    return 1
+
+
+def build_model(
+    cfg_model,
+    cfg_peft,
+    seed,
+    has_packed_sequence=False,
+    cfg_fp8=None,
+    cfg_compile=None,
+    cfg_quantization=None,
+    device_mesh=None,
+    moe_mesh=None,
+    distributed_config=None,
+    pipeline_config=None,
+    cfg_qat=None,
+    cfg_moe=None,
+    activation_checkpointing=False,
+    unfreeze_modules: list[str] | None = None,
+    sdpa_method: list[str] | None = None,
+) -> tuple[nn.Module | AutoPipeline, list["Optimizer"]]:  # noqa: F821
+    """Build and initialize a model.
+
+    Args:
+        cfg_model: Configuration for model instantiation.
+        cfg_peft: Configuration for PEFT.
+        seed: Random seed.
+        has_packed_sequence: Whether using packed sequences.
+        cfg_fp8: Configuration for FP8.
+        cfg_compile: Configuration for torch.compile.
+        cfg_quantization: Configuration for BitsAndBytes quantization.
+        device_mesh: Device mesh for distributed training.
+        moe_mesh: MOE mesh for expert parallelism.
+        distributed_config: Strategy-specific distributed config (FSDP2Config, etc.).
+        pipeline_config: Pipeline parallelism config.
+        cfg_qat: Configuration for QAT (will be instantiated to QATConfig).
+        cfg_moe: MoEParallelizerConfig instance, or ConfigNode to be converted.
+        activation_checkpointing: Whether to enable activation checkpointing.
+        unfreeze_modules: List of module names/substrings to unfreeze.
+        sdpa_method: Explicit list of SDPA backend name strings (e.g.
+            ``["flash_attention", "efficient_attention"]``), or ``None`` to
+            auto-select based on CP / activation checkpointing.
+    """
+    with ScopedRNG(seed=seed, ranked=True):
+        kwargs = {
+            "has_packed_sequence": has_packed_sequence,
+            "peft_config": cfg_peft,
+            "device_mesh": device_mesh,
+            "moe_mesh": moe_mesh,
+            "distributed_config": distributed_config,
+            "pipeline_config": pipeline_config,
+            "sdpa_method": sdpa_method,
+        }
+
+        if cfg_qat is not None and cfg_qat.get("enabled", False):
+            if cfg_peft is not None:
+                raise ValueError("QAT with PEFT is not currently supported")
+            qat_config_attr = getattr(cfg_qat, "qat_config", None)
+            if qat_config_attr is not None:
+                kwargs["qat_config"] = qat_config_attr.instantiate()
+            else:
+                # Fallback to legacy quantizer format for backward compatibility
+                quantizer_attr = getattr(cfg_qat, "quantizer", None)
+                if quantizer_attr is not None:
+                    kwargs["qat_config"] = quantizer_attr.instantiate()
+
+        if cfg_moe is not None:
+            from nemo_automodel.components.moe.config import MoEParallelizerConfig
+
+            if isinstance(cfg_moe, MoEParallelizerConfig):
+                kwargs["moe_config"] = cfg_moe
+            else:
+                moe_dict = cfg_moe.to_dict() if hasattr(cfg_moe, "to_dict") else dict(cfg_moe)
+                # activation_checkpointing is handled separately; strip config keys
+                moe_dict.pop("activation_checkpointing", None)
+                moe_dict.pop("_target_", None)
+                kwargs["moe_config"] = MoEParallelizerConfig(**moe_dict)
+            kwargs["activation_checkpointing"] = activation_checkpointing
+
+        if cfg_fp8 is not None:
+            kwargs["fp8_config"] = build_fp8_config(cfg_fp8)
+        if cfg_compile is not None:
+            kwargs["compile_config"] = build_compile_config(cfg_compile)
+        if cfg_quantization is not None:
+            logger.info("Model weight quantization enabled with BitsAndBytes")
+            from nemo_automodel.components.quantization.qlora import create_bnb_config
+
+            kwargs["quantization_config"] = create_bnb_config(cfg_quantization)
+
+        is_nemo_auto_model = cfg_model.get("_target_", None) in (
+            NeMoAutoModelForCausalLM.from_config,
+            NeMoAutoModelForCausalLM.from_pretrained,
+            NeMoAutoModelForSequenceClassification.from_config,
+            NeMoAutoModelForSequenceClassification.from_pretrained,
+        )
+
+        if is_nemo_auto_model:
+            # NeMoAutoModel handles infrastructure internally
+            model = cfg_model.instantiate(**kwargs)
+        else:
+            # For non-NemoAutoModel entry points (e.g., build_gpt2_model),
+            # instantiate the model first, then apply infrastructure separately.
+            # Note: sdpa_method is not supported here — SDPA patching only runs
+            # inside NeMoAutoModel._build_model.
+            if sdpa_method is not None:
+                logger.warning("sdpa_method is ignored for non-NeMoAutoModel targets.")
+            # We must convert config objects into runtime objects (model_wrapper,
+            # autopipeline, parallelize_fn, etc.) via instantiate_infrastructure,
+            # exactly as from_pretrained/from_config do internally.
+            model = cfg_model.instantiate()
+
+            mesh = MeshContext.from_meshes(device_mesh, moe_mesh)
+            model_wrapper, autopipeline, parallelize_fn, qat_quantizer = instantiate_infrastructure(
+                distributed_config=distributed_config,
+                pipeline_config=pipeline_config,
+                qat_config=kwargs.get("qat_config"),
+                moe_config=kwargs.get("moe_config"),
+                activation_checkpointing=kwargs.get("activation_checkpointing", False),
+                device=torch.device("cuda", torch.cuda.current_device()),
+                mesh=mesh,
+            )
+            loss_fn = pipeline_config.loss_fn if pipeline_config is not None else None
+
+            model = apply_model_infrastructure(
+                model,
+                is_meta_device=False,
+                device=torch.cuda.current_device(),
+                mesh=mesh,
+                model_wrapper=model_wrapper,
+                autopipeline=autopipeline,
+                parallelize_fn=parallelize_fn,
+                qat_quantizer=qat_quantizer,
+                loss_fn=loss_fn,
+                peft_config=kwargs.get("peft_config"),
+                fp8_config=kwargs.get("fp8_config"),
+                compile_config=kwargs.get("compile_config"),
+                quantization_config=kwargs.get("quantization_config"),
+                pretrained_model_name_or_path=None,
+                load_base_model=False,
+                cache_dir=hf_constants.HF_HUB_CACHE,
+            )
+
+    # Explicitly unfreeze specified modules (e.g. task heads) that need full fine-tuning
+    if unfreeze_modules:
+        for name, param in model.named_parameters():
+            if any(module_name in name for module_name in unfreeze_modules):
+                param.requires_grad_(True)
+        logging.info(f"Unfroze parameters matching: {unfreeze_modules}")
+
+    return model
+
+
+def build_optimizer(model, cfg_opt, distributed_config, device_mesh, is_peft: bool = False):
+    """Build an optimizer for the model.
+
+    Args:
+        model: The model to build an optimizer for.
+        cfg_opt: The configuration for the optimizer.
+        distributed_config: The distributed configuration.
+        device_mesh: The device mesh.
+        is_peft: Whether the optimizer is for a PEFT run.
+    """
+    # Resolve dtype strings (e.g. "torch.bfloat16") to torch.dtype objects for
+    # optimizers like TE FusedAdam that accept dtype kwargs.
+    for attr in ("master_weight_dtype", "exp_avg_dtype", "exp_avg_sq_dtype"):
+        val = getattr(cfg_opt, attr, None)
+        if isinstance(val, str):
+            setattr(cfg_opt, attr, dtype_from_str(val))
+
+    if device_mesh is not None and "tp" in device_mesh.mesh_dim_names and device_mesh["tp"].size() > 1:
+        # TP does not support foreach for torch optimizers. Do not add this kwarg
+        # to optimizer classes that do not declare it, such as TE FusedAdam.
+        target = getattr(cfg_opt, "_target_", None)
+        if isinstance(target, str):
+            target_name = target
+        else:
+            target_module = getattr(target, "__module__", "")
+            target_name = f"{target_module}.{getattr(target, '__qualname__', '')}"
+        if target_name.startswith("torch.optim.") or hasattr(cfg_opt, "foreach"):
+            cfg_opt.foreach = False
+
+    optimizer = []
+    has_dion_optimizer = is_dion_optimizer(cfg_opt)
+    for part in getattr(model, "parts", [model]):
+        trainable_params = list(filter(lambda x: x.requires_grad, part.parameters()))
+        assert len(trainable_params) > 0, "trainable_params cannot be empty"
+        # TODO(@akoumparouli): no branching for building the optimizer, refactor.
+        if has_dion_optimizer:
+            tmp_optimizer = build_dion_optimizer(
+                cfg_opt=cfg_opt,
+                model=part,
+                distributed_mesh=device_mesh,
+            )
+        else:
+            tmp_optimizer = cfg_opt.instantiate(params=trainable_params)
+        if isinstance(distributed_config, MegatronFSDPConfig) and torch.distributed.get_world_size() > 1:
+            assert not has_dion_optimizer, "Dion optimizer does not support fully_shard_optimizer"
+            tmp_optimizer = fully_shard_optimizer(part, tmp_optimizer)
+        optimizer.append(tmp_optimizer)
+
+    warn_if_torch_adam_with_bf16_params(
+        optimizer=optimizer,
+        optimizer_cfg=cfg_opt,
+        is_peft=is_peft,
+        context="llm",
+        logger=logger,
+    )
+
+    return optimizer
+
+
+def build_checkpoint_config(cfg_ckpt, cache_dir, model_repo_id, is_peft) -> CheckpointingConfig:
+    """Build a checkpoint configuration.
+
+    Args:
+        cfg_ckpt: Configuration for checkpointing.
+        cache_dir: Cache directory for the model.
+        model_repo_id: Model repository ID.
+        is_peft: Whether the model is PEFT.
+        state_dict_keys: Copy of the model state dict keys before any parallelization.
+
+    Returns:
+        The instantiated checkpoint configuration.
+    """
+
+    ckpt_kwargs = dict(
+        enabled=True,
+        checkpoint_dir="checkpoints/",
+        model_save_format="safetensors",
+        model_repo_id=model_repo_id,
+        model_cache_dir=cache_dir if cache_dir is not None else hf_constants.HF_HUB_CACHE,
+        save_consolidated="final",
+        is_peft=is_peft,
+    )
+    user_cfg = {}
+    if cfg_ckpt is not None:
+        user_cfg = cfg_ckpt.to_dict()
+        user_cfg.pop("restore_from", None)
+    if is_peft and user_cfg.get("model_save_format") == "torch_save":
+        logger.warning(
+            "PEFT checkpointing is not supported for `torch_save` format; "
+            "discarding user checkpoint config and using safetensors defaults "
+            "(preserving `checkpoint_dir` if set)."
+        )
+        if "checkpoint_dir" in user_cfg:
+            ckpt_kwargs["checkpoint_dir"] = user_cfg["checkpoint_dir"]
+    else:
+        ckpt_kwargs |= user_cfg
+    checkpoint_config = CheckpointingConfig(**ckpt_kwargs)
+    return checkpoint_config
+
+
+def build_loss_fn(cfg_loss):
+    """Build a loss function.
+
+    Args:
+        cfg_loss (ConfigNode): Loss function configuration.
+
+    Returns:
+        The instantiated loss function on the specified device.
+    """
+    return cfg_loss.instantiate()
+
+
+def compute_trust_remote_code_from_model(cfg_model):
+    """Compute the value of trust_remote_code based on the model configuration.
+
+    Args:
+        cfg_model (ConfigNode): Model configuration.
+
+    Returns:
+        bool: Whether to trust remote code.
+    """
+    if hasattr(cfg_model, "trust_remote_code"):
+        return getattr(cfg_model, "trust_remote_code")
+    elif hasattr(cfg_model, "config") and hasattr(cfg_model.config, "trust_remote_code"):
+        return getattr(cfg_model.config, "trust_remote_code")
+    return resolve_trust_remote_code(_get_model_name(cfg_model))
+
+
+def _build_tokenizer(cfg_model, cfg_ds):
+    trust_remote_code = compute_trust_remote_code_from_model(cfg_model)
+    # if tokenizer is not provided, use the model config to instantiate it
+    if "tokenizer" not in cfg_ds and _get_model_name(cfg_model) is not None:
+        logging.info("Using model config to instantiate tokenizer")
+        tokenizer = NeMoAutoTokenizer.from_pretrained(_get_model_name(cfg_model), trust_remote_code=trust_remote_code)
+    elif cfg_ds.get("tokenizer", None) is None:
+        tokenizer = None
+    elif "_target_" not in cfg_ds.tokenizer:
+        tokenizer_dict = cfg_ds.tokenizer.to_dict()
+        trust_remote_code = tokenizer_dict.pop("trust_remote_code", trust_remote_code)
+        tokenizer = NeMoAutoTokenizer.from_pretrained(**tokenizer_dict, trust_remote_code=trust_remote_code)
+    else:
+        trust_remote_code = cfg_ds.tokenizer.to_dict().pop("trust_remote_code", trust_remote_code)
+        tokenizer = cfg_ds.tokenizer.instantiate(trust_remote_code=trust_remote_code)
+
+    # Finally, check if the dataset target accepts a tokenizer parameter
+    kwargs = {}
+    if tokenizer is not None and callable(cfg_ds._target_):
+        try:
+            sig = inspect.signature(cfg_ds._target_)
+            if "tokenizer" in sig.parameters:
+                kwargs["tokenizer"] = tokenizer
+        except (ValueError, TypeError):
+            # If we can't get the signature, skip adding tokenizer
+            pass
+    return kwargs, tokenizer
+
+
+def build_dataloader(
+    cfg_ds,
+    cfg_dl,
+    cfg_model,
+    cfg_ps,
+    seed,
+    local_batch_size,
+    global_batch_size,
+    max_steps,
+    val_check_interval,
+    dp_rank,
+    dp_world_size,
+    pp_enabled,
+    cp_size=1,
+    model: Optional[nn.Module] = None,
+) -> tuple[DataLoader, PreTrainedTokenizerBase]:
+    """Build a DataLoader for the dataset.
+
+    Args:
+        cfg_ds: Dataset configuration.
+        cfg_dl: DataLoader configuration.
+        cfg_model: Model configuration.
+        cfg_ps: Packed sequence configuration.
+        seed: Random seed.
+        local_batch_size: Local batch size.
+        global_batch_size: Global batch size.
+        max_steps: Maximum number of steps.
+        val_check_interval: Validation check interval.
+        dp_rank: Data parallel rank.
+        dp_world_size: Data parallel world size.
+        pp_enabled: Whether pipeline parallelism is enabled.
+        cp_size: Context parallel size.
+        model: Optional model instance. If provided and packed sequences are enabled,
+            seq_lens will only be included if the model's forward() accepts it.
+    Returns:
+        The instantiated DataLoader and tokenizer.
+    """
+    with ScopedRNG(seed=seed, ranked=True):
+        kwargs, tokenizer = _build_tokenizer(cfg_model, cfg_ds)
+        # Megatron specific kwargs
+        if cfg_ds._target_ == MegatronPretraining:
+            kwargs["global_batch_size"] = global_batch_size
+            kwargs["trainer_max_steps"] = max_steps if max_steps is not None else None
+            kwargs["trainer_val_check_interval"] = val_check_interval
+            ds = cfg_ds.instantiate(**kwargs)
+            ds.build()
+        else:
+            with FirstRankPerNode():
+                ds = cfg_ds.instantiate(**kwargs)
+
+        # If using an IterableDataset, per-rank sharding for unique samples
+        if isinstance(ds, IterableDataset):
+            if callable(getattr(ds, "shard", None)):
+                ds = ds.shard(dp_world_size, dp_rank)
+                logging.info(f"Sharded IterableDataset via dataset.shard: world_size={dp_world_size}, rank={dp_rank}")
+            elif hasattr(ds, "dataset"):
+                # HuggingFace streaming datasets: split by file shards when possible.
+                from datasets.distributed import split_dataset_by_node
+
+                assert hasattr(ds, "dataset"), "dataset must have a dataset attribute"
+                ds.dataset = split_dataset_by_node(ds.dataset, world_size=dp_world_size, rank=dp_rank)
+                logging.info(f"Sharded dataset via split_dataset_by_node: world_size={dp_world_size}")
+            else:
+                logging.warning("IterableDataset does not support sharding; Data may be duplicated across ranks.")
+
+        packed_sequence_size = getattr(cfg_ps, "packed_sequence_size", 0)
+        packing_strategy = getattr(cfg_ps, "packing_strategy", "thd")
+
+        # check if packed sequence is supported (only for thd strategy)
+        supports_seq_lens = _supports_seq_lens(model)
+        if packed_sequence_size > 0 and packing_strategy == "thd" and not supports_seq_lens:
+            logging.warning("Packed sequence is not supported without seq_lens; disabling packed sequence")
+            packed_sequence_size = 0
+
+        # Apply packing if configured
+        if packed_sequence_size > 0:
+            logger.info(f"Packing dataset with size: {packed_sequence_size}, strategy: {packing_strategy}")
+            if hasattr(ds, "shuffle"):
+                ds = ds.shuffle(seed)
+
+            if packing_strategy == "neat":
+                from nemo_automodel.components.datasets.llm.neat_packing import neat_pack_dataset
+                from nemo_automodel.components.datasets.utils import neat_packed_collater
+                from nemo_automodel.components.models.common.packing import configure_packing, get_attn_implementation
+
+                ds = neat_pack_dataset(
+                    ds,
+                    split=cfg_ds.split,
+                    pack_size=packed_sequence_size,
+                    max_packs=getattr(cfg_ps, "max_packs", None),
+                    padding_idx=getattr(tokenizer, "pad_token_id", 0),
+                    drop_long_samples=getattr(cfg_ps, "drop_long_samples", True),
+                )
+                _attn_impl = get_attn_implementation(cfg_model)
+                configure_packing(attn_implementation=_attn_impl)
+                # Set collater with attn_implementation so it produces the right mask format
+                cfg_dl.collate_fn = lambda batch, _ai=_attn_impl: neat_packed_collater(batch, attn_implementation=_ai)
+                logger.info(f"Configured neat packing for attn_implementation={_attn_impl}")
+            else:
+                # "thd" — existing packing logic
+                ds = pack_dataset(
+                    ds,
+                    split=cfg_ds.split,
+                    packed_sequence_size=packed_sequence_size,
+                    max_packs=getattr(cfg_ps, "max_packs", None),
+                    padding_idx=getattr(tokenizer, "pad_token_id", 0),
+                    cp_size=cp_size,
+                )
+
+        if isinstance(ds, MegatronPretraining):
+            ds = ds.get_dataset(split=cfg_ds.splits_to_build)
+            dataloader_type = cfg_dl.get("dataloader_type", "single")
+            if "dataloader_type" in cfg_dl:
+                del cfg_dl.dataloader_type
+            batch_sampler = create_megatron_sampler(
+                dataset_len=len(ds),
+                micro_batch_size=local_batch_size,
+                global_batch_size=global_batch_size,
+                dataloader_type=dataloader_type,
+                rank=dp_rank,
+                world_size=dp_world_size,
+            )
+            dl_kwargs = {"batch_sampler": batch_sampler}
+        elif not isinstance(ds, IterableDataset):
+            shuffle = cfg_dl.get("shuffle", True)
+            if "shuffle" in cfg_dl:
+                del cfg_dl.shuffle
+
+            group_by_length = cfg_dl.get("group_by_length", False)
+            if "group_by_length" in cfg_dl:
+                del cfg_dl.group_by_length
+
+            if group_by_length:
+                from nemo_automodel.components.datasets.llm.length_grouped_sampler import (
+                    LengthGroupedSampler as LLMLengthGroupedSampler,
+                )
+
+                sampler = LLMLengthGroupedSampler(
+                    dataset=ds,
+                    batch_size=local_batch_size,
+                    seed=seed,
+                    num_replicas=dp_world_size,
+                    rank=dp_rank,
+                )
+            else:
+                dist_sampler_kwargs = {
+                    "num_replicas": dp_world_size,
+                    "rank": dp_rank,
+                    "shuffle": shuffle,
+                }
+                sampler = StatefulDistributedSampler(
+                    ds,
+                    seed=seed,
+                    drop_last=True,
+                    **dist_sampler_kwargs,
+                )
+            dl_kwargs = {"sampler": sampler, "batch_size": local_batch_size}
+            if pp_enabled:
+                dl_kwargs["drop_last"] = True
+        else:
+            logging.info("Using IterableDataset; skipping sampler.")
+            # Optional shuffle for streaming IterableDataset (uses HF dataset shuffle if available)
+            shuffle = cfg_dl.get("shuffle", False)
+            shuffle_buffer_size = cfg_dl.get("shuffle_buffer_size", 10000)
+            # Do not pass shuffle-related kwargs to the DataLoader when using IterableDataset
+            # But leave them in dl config to be consistent
+            if hasattr(cfg_dl, "shuffle"):
+                del cfg_dl.shuffle
+            if hasattr(cfg_dl, "shuffle_buffer_size"):
+                del cfg_dl.shuffle_buffer_size
+
+            if shuffle and hasattr(ds, "shuffle"):
+                try:
+                    ds = ds.shuffle(buffer_size=shuffle_buffer_size, seed=seed)
+                    logging.info(f"Shuffling IterableDataset with buffer_size={shuffle_buffer_size}, seed={seed}")
+                except Exception as e:
+                    logging.warning(f"IterableDataset shuffle skipped due to error: {e}")
+            dl_kwargs = {}
+
+        # Handle collate_fn with optional mask precomputation for pipeline parallelism
+        dl_kwargs = dl_kwargs | {"dataset": ds}
+
+        # Handle collate_fn instantiation if it's a ConfigNode
+        if hasattr(cfg_dl, "collate_fn"):
+            if hasattr(cfg_dl.collate_fn, "_target_"):
+                collate_cfg = cfg_dl.collate_fn
+                dl_kwargs["collate_fn"] = lambda batch: collate_cfg.instantiate(batch=batch)
+            else:
+                dl_kwargs["collate_fn"] = cfg_dl.collate_fn
+            assert callable(dl_kwargs["collate_fn"]), "collate_fn must be callable"
+
+        # Chain with mask precomputation if PP is enabled
+        if pp_enabled:
+            from nemo_automodel.components.datasets.utils import add_causal_masks_to_batch
+
+            try:
+                hf_model_config = AutoConfig.from_pretrained(
+                    _get_model_name(cfg_model), trust_remote_code=compute_trust_remote_code_from_model(cfg_model)
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to load model config for causal mask precomputation. "
+                    "Pipeline parallel mask precomputation will be skipped."
+                )
+            else:
+                if not _should_precompute_pp_causal_masks(hf_model_config):
+                    logger.info(
+                        "Skipping pipeline parallel causal mask precomputation for model_type=%s.",
+                        getattr(hf_model_config, "model_type", None),
+                    )
+                elif "collate_fn" in dl_kwargs:
+                    # Case 1: PP enabled + collate_fn exists -> chain them
+                    # base_collate_fn -> add_causal_masks_to_batch
+                    base_collate_fn = dl_kwargs["collate_fn"]
+
+                    def chained_collate_fn(batch, base_fn=base_collate_fn, config=hf_model_config):
+                        batch = base_fn(batch)  # Apply base collate (padding, batching, etc.)
+                        batch = add_causal_masks_to_batch(batch, model_config=config)  # Add masks
+                        return batch
+
+                    dl_kwargs["collate_fn"] = chained_collate_fn
+                else:
+                    # Case 2: PP enabled + no collate_fn -> only add masks
+                    dl_kwargs["collate_fn"] = lambda batch, config=hf_model_config: add_causal_masks_to_batch(
+                        batch, model_config=config
+                    )
+
+        try:
+            import torch.multiprocessing as mp
+
+            if mp.get_start_method(allow_none=True) is None:
+                mp.set_start_method("spawn", force=True)
+        except RuntimeError:
+            pass
+        return cfg_dl.instantiate(**dl_kwargs), tokenizer
+
+
+def build_distributed(cfg_dist: Dict[str, Any]) -> "DistInfo":  # noqa: F821
+    """Build and initialize distributed training resources.
+
+    Args:
+        cfg_dist: Configuration for distributed training.
+
+    Returns:
+        Distributed training information from initialize_distributed.
+    """
+    backend = cfg_dist.get("backend", "nccl")
+    timeout = cfg_dist.get("timeout_minutes", 1)
+    return initialize_distributed(backend=backend, timeout_minutes=timeout)
+
+
+def build_step_scheduler(cfg, dataloader, dp_group_size, local_batch_size):
+    """Build the step scheduler.
+
+    Args:
+        cfg: configuration for the StepScheduler class.
+        dataloader: the training dataloader, used for extracting the epoch_len (in batches).
+        dp_group_size: the size of the data parallel group.
+        micro_batch_size: the size of the micro batch.
+
+    Returns:
+        StepScheduler: the configured StepScheduler.
+    """
+    assert "_target_" not in cfg, "_target_ not permitted in step scheduler"
+    default_kwargs = dict(
+        num_epochs=10,
+        global_batch_size=32,
+        local_batch_size=local_batch_size,
+        dp_size=dp_group_size,
+        ckpt_every_steps=100,
+        dataloader=dataloader,
+    )
+    if cfg is not None:
+        default_kwargs |= cfg.to_dict()
+    return StepScheduler(**default_kwargs)
+
+
+def build_lr_scheduler(cfg, optimizer, step_scheduler) -> list[OptimizerParamScheduler] | None:  # noqa: F821
+    """Build the learning rate scheduler.
+
+    Args:
+        cfg: Configuration for the OptimizerParamScheduler.
+        optimizer: The optimizer to be scheduled.
+        step_scheduler: The step scheduler to extract training parameters.
+
+    Returns:
+        OptimizerParamScheduler: The configured learning rate scheduler, or None if not configured.
+    """
+    if cfg is None:
+        return None
+
+    # Calculate total steps for the training run.
+    # `step_scheduler.epoch_len` is already in optimizer-step units
+    # (microbatches // grad_acc_steps) and is None for IterableDataset, in which
+    # case `max_steps` governs the total step count.
+    total_epochs = step_scheduler.num_epochs
+    if step_scheduler.epoch_len is not None:
+        total_steps = total_epochs * step_scheduler.epoch_len
+        if step_scheduler.max_steps is not None:
+            total_steps = min(total_steps, step_scheduler.max_steps)
+    else:
+        if step_scheduler.max_steps is None:
+            raise ValueError(
+                "build_lr_scheduler: dataloader has no __len__ (iterable dataset) and "
+                "step_scheduler.max_steps is not set. Set step_scheduler.max_steps in your config."
+            )
+        total_steps = step_scheduler.max_steps
+
+    # Set defaults for scheduler parameters
+    optimizer_param_schedulers = []
+    user_kwargs = cfg.to_dict()
+    default_kwargs = dict(
+        lr_warmup_steps=min(1000, total_steps // 10),  # 10% warmup or max 1000 steps
+        lr_decay_steps=total_steps,
+        lr_decay_style="cosine",
+        wd_incr_steps=total_steps,
+        wd_incr_style="constant",
+    )
+
+    if not isinstance(optimizer, list):
+        optimizer = [optimizer]
+
+    for opt in optimizer:
+        base_lr = opt.param_groups[0]["lr"]
+        default_kwargs.update(
+            dict(
+                optimizer=opt,
+                init_lr=base_lr * 0.1,  # Start warmup at 10% of base LR
+                max_lr=base_lr,
+                min_lr=base_lr * 0.01,  # End at 1% of base LR
+                start_wd=opt.param_groups[0].get("weight_decay", 0.0),
+                end_wd=opt.param_groups[0].get("weight_decay", 0.0),
+            )
+        )
+        default_kwargs.update(user_kwargs)
+        optimizer_param_schedulers.append(OptimizerParamScheduler(**default_kwargs))
+
+    logger.info(
+        f"Building LR scheduler with total_steps={total_steps}, "
+        f"warmup_steps={default_kwargs['lr_warmup_steps']}, "
+        f"decay_style={default_kwargs['lr_decay_style']}"
+    )
+
+    return optimizer_param_schedulers
+
+
+def build_wandb(cfg) -> wandb.Run:
+    """Instantiates wandb and returns the instance. If no name is given, it will use the model name.
+
+    Args:
+        cfg: Configuration for wandb.
+
+    Returns:
+        The wandb instance.
+    """
+    assert cfg.get("wandb", None) is not None
+    kwargs = cfg.wandb.to_dict()
+    if kwargs.get("name", "") == "":
+        kwargs["name"] = "_".join(_get_model_name(cfg.model).split("/")[-2:])
+    run = wandb.init(
+        **kwargs,
+        config=cfg.to_dict(),
+        settings=Settings(silent=True),
+    )
+    return run
+
+
+def build_validation_dataloader(cfg, dp_world_size, dp_rank, pp_enabled, model: Optional[nn.Module] = None):
+    """Build validation dataloaders from validation dataset config entries."""
+
+    def _prepare_val_ds_name(val_ds_name):
+        val_ds_name = val_ds_name.replace("validation_dataset", "")
+        if len(val_ds_name) > 1 and val_ds_name[0] in ("_", "-", "."):
+            val_ds_name = val_ds_name[1:]
+        if val_ds_name == "":
+            val_ds_name = "default"
+        return val_ds_name
+
+    # Build validation dataloader if the config provides it
+    val_dataloaders = {}
+    for val_ds_name in filter(lambda x: x.startswith("validation_dataset"), cfg.to_dict().keys()):
+        val_ds_cfg = cfg.get(val_ds_name, None)
+        val_ds_name = _prepare_val_ds_name(val_ds_name)
+        val_dataloaders[val_ds_name] = build_dataloader(
+            val_ds_cfg,
+            cfg.validation_dataloader,
+            cfg.model,
+            cfg_ps=cfg.get("packed_sequence", None)
+            if _uses_te_dot_product_attention(cfg.model) and _uses_thd_collater(cfg.dataloader)
+            else None,
+            seed=cfg.get("seed", 42),
+            local_batch_size=cfg.get("step_scheduler.local_batch_size", 1),
+            global_batch_size=cfg.get("step_scheduler.global_batch_size", 1),
+            max_steps=cfg.get("step_scheduler.max_steps", None),
+            val_check_interval=cfg.get("step_scheduler.val_every_steps", None),
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            pp_enabled=pp_enabled,
+            cp_size=cfg.get("distributed.cp_size", 1),
+            model=model,
+        )[0]
+
+    return val_dataloaders
+
+
+# ---------------------------------------------------------------------------
+#  Trainer class – orchestration only
+# ---------------------------------------------------------------------------
+
+
+class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
+    """Recipe for fine-tuning a model for next-token prediction.
+
+    This class orchestrates training, from setup to main training loop.
+    """
+
+    def __init__(self, cfg):
+        """Initialize the recipe with configuration.
+
+        Args:
+            cfg: Configuration dictionary/object for training.
+        """
+        self.cfg = cfg
+
+    # ------------------ build phase ------------------
+    def setup(self):
+        """Builds all components needed for training/validation/logging/checkpointing/etc.
+
+        This is the last place where self.cfg should be referenced.
+
+        Raises:
+            NotImplemented: Raises if it tries to restore a checkpoint; will be removed.
+        """
+        torch.cuda.reset_peak_memory_stats()
+        self.dist_env = build_distributed(self.cfg.get("dist_env", {}))
+        # setups logging and adds the rankfilter to logging
+        setup_logging()
+
+        apply_cache_compatibility_patches()
+        apply_te_patches()
+        # Set up the stateful random number generator
+        self.rng = StatefulRNG(seed=self.cfg.get("seed", 42), ranked=True)
+        # Enable NVTX patching only when explicitly requested in config
+        self.enable_nvtx = bool(self.cfg.get("nvtx", False))
+
+        self.dist_setup = setup_distributed(self.cfg, world_size=self.dist_env.world_size)
+        self.distributed_config = self.dist_setup.strategy_config
+        self.device_mesh = self.dist_setup.device_mesh
+        self.moe_mesh = self.dist_setup.moe_mesh
+        self.pp_enabled = self.dist_setup.pp_enabled
+        self.pipeline_config = self.dist_setup.pipeline_config
+
+        if self.dist_env.is_main and hasattr(self.cfg, "wandb"):
+            suppress_wandb_log_messages()
+            run = build_wandb(self.cfg)
+            logging.info("🚀 View run at {}".format(run.url))
+
+        if self.dist_env.is_main and hasattr(self.cfg, "mlflow"):
+            if configure_mlflow(self.cfg) is not None:
+                logging.info("MLflow experiment tracking enabled")
+
+        self.comet_logger = None
+        if self.dist_env.is_main and hasattr(self.cfg, "comet"):
+            self.comet_logger = build_comet(self.cfg)
+            self.comet_logger.log_params(self.cfg.to_dict())
+            logging.info("Comet experiment tracking enabled")
+
+        # Log experiment details on main rank
+        self._log_experiment_details()
+        self._log_library_versions()
+
+        # Build loss_fn (will be set on pipeline_config if PP enabled)
+        self.loss_fn = build_loss_fn(self.cfg.loss_fn)
+
+        # Pipeline runtime fields: override pp_batch_size and pp_microbatch_size
+        if self.pp_enabled:
+            pp_batch_size = self.cfg.step_scheduler.local_batch_size
+            pp_microbatch_size = self.cfg.get("distributed.pipeline.pp_microbatch_size", 1)
+
+            assert pp_batch_size // pp_microbatch_size >= self.dist_setup.pp_size, (
+                f"pp_batch_size {pp_batch_size} // pp_microbatch_size {pp_microbatch_size} must be >= pp_size {self.dist_setup.pp_size}"
+            )
+
+            # THD override logic
+            if (
+                self.dist_setup.cp_size > 1
+                and _uses_te_dot_product_attention(self.cfg.model)
+                and _uses_thd_collater(self.cfg.dataloader)
+            ):
+                pp_microbatch_size = 1
+                pp_batch_size = pp_batch_size // self.cfg.get("distributed.pipeline.pp_microbatch_size", 1)
+                logging.info(
+                    f"Overriding pp_batch_size: {pp_batch_size}, pp_microbatch_size: {pp_microbatch_size} for THD"
+                )
+
+            assert not isinstance(self.distributed_config, MegatronFSDPConfig), (
+                "MegatronFSDPConfig is not supported when pipeline parallelism is enabled"
+            )
+
+            # Update pipeline_config runtime fields
+            self.pipeline_config.pp_batch_size = pp_batch_size
+            self.pipeline_config.pp_microbatch_size = pp_microbatch_size
+            self.pipeline_config.patch_stage_backward_maybe_with_nosync = self.cfg.get(
+                "model.backend.enable_fsdp_optimizations", False
+            )
+            self.pipeline_config.loss_fn = self.loss_fn
+
+            # Infer pp_seq_len from dataset config if not explicitly set
+            if hasattr(self.pipeline_config, "pp_seq_len") and self.pipeline_config.pp_seq_len is None:
+                packed_seq_size = self.cfg.get("packed_sequence.packed_sequence_size", 0)
+                if packed_seq_size > 0:
+                    self.pipeline_config.pp_seq_len = packed_seq_size
+                elif self.cfg.get("dataset.seq_len", None) is not None:
+                    self.pipeline_config.pp_seq_len = self.cfg.dataset.seq_len
+
+        # Build components
+        self.peft_config = None
+        if self.cfg.get("peft", None) is not None:
+            self.peft_config = self.cfg.peft.instantiate()
+
+        # Build checkpoint config
+        checkpoint_config = build_checkpoint_config(
+            self.cfg.get("checkpoint", None),
+            self.cfg.get("model.cache_dir", None),
+            _get_model_name(self.cfg.model),
+            True if self.cfg.get("peft", None) else False,
+        )
+
+        if self.cfg.get("clip_grad_norm.max_norm", None) is not None:
+            self.max_grad_norm = float(self.cfg.clip_grad_norm.max_norm)
+        else:
+            logging.info("No clip_grad_norm.max_norm specified in config, using default value of 1.0")
+            self.max_grad_norm = 1.0
+
+        # Create Checkpointer instance
+        self.checkpointer = Checkpointer(
+            config=checkpoint_config,
+            dp_rank=self._get_dp_rank(include_cp=True),
+            tp_rank=self._get_tp_rank(),
+            pp_rank=self._get_pp_rank(),
+            moe_mesh=self.moe_mesh,
+        )
+
+        # Disable fused RoPE when context parallelism is enabled (cp > 1)
+        if self.dist_setup.cp_size > 1 and self.cfg.get("model.backend.rope_fusion", False):
+            logging.info("Disabling rope_fusion because cp_size=%d > 1", self.dist_setup.cp_size)
+            self.cfg.model.backend.rope_fusion = False
+
+        model = build_model(
+            self.cfg.model,
+            self.peft_config,
+            has_packed_sequence=self.cfg.get("packed_sequence.packed_sequence_size", 0) > 0,
+            seed=self.cfg.get("seed", 42),
+            cfg_fp8=self.cfg.get("fp8", None),
+            cfg_compile=self.cfg.get("compile", None),
+            cfg_quantization=self.cfg.get("quantization", None),
+            device_mesh=self.device_mesh,
+            moe_mesh=self.moe_mesh,
+            distributed_config=self.distributed_config,
+            pipeline_config=self.pipeline_config,
+            cfg_qat=self.cfg.get("qat", None),
+            cfg_moe=self.dist_setup.moe_config,
+            activation_checkpointing=self.dist_setup.activation_checkpointing,
+            sdpa_method=self.cfg.get("sdpa_method", None),
+        )
+        self.optimizer = build_optimizer(
+            model,
+            self.cfg.optimizer,
+            self.distributed_config,
+            self.device_mesh,
+            is_peft=self.peft_config is not None,
+        )
+
+        if not _supports_logits_to_keep(model) and not isinstance(self.loss_fn, MaskedCrossEntropy):
+            logger.warning("logits_to_keep not found in model.forward. Using MaskedCrossEntropy instead.")
+            self.loss_fn = MaskedCrossEntropy()
+
+        if isinstance(model, AutoPipeline):
+            self.model_parts = model.parts
+            self.pp = model
+            if self.enable_nvtx:
+                import nemo_automodel.autonvtx as autonvtx
+
+                # Patch each pipeline stage with NVTX profiling
+                for i, part in enumerate(self.model_parts):
+                    autonvtx.patch(part, name=f"PipelineStage_{i}")
+        else:
+            if self.enable_nvtx:
+                import nemo_automodel.autonvtx as autonvtx
+
+                # Patch model with NVTX profiling
+                autonvtx.patch(model, name=model.__class__.__name__)
+            self.model_parts = [model]
+            self.pp = None
+
+        # Extract TE FP8 config from model backend (set after model construction)
+        self.te_fp8 = self.model_parts[0].backend.te_fp8 if hasattr(self.model_parts[0], "backend") else None
+
+        if self.pp_enabled:
+            self._configure_pipeline_loss_fn()
+
+        _packed_seq_size = self.cfg.get("packed_sequence.packed_sequence_size", 0)
+        if self.dist_setup.cp_size > 1 and _packed_seq_size > 0:
+            _m = self.model_parts[0]
+            if hasattr(_m, "supports") and not _m.supports_cp_with_sequence_packing:
+                raise ValueError(
+                    f"Context parallelism (cp_size={self.dist_setup.cp_size}) with packed sequences "
+                    f"is not supported for {type(_m).__name__}.\n"
+                    f"Either disable sequence packing:\n"
+                    f"  packed_sequence:\n"
+                    f"    packed_sequence_size: 0\n"
+                    f"or switch to the TE attention backend -- MoE models only:\n"
+                    f"  model:\n"
+                    f"    backend:\n"
+                    f"      attn: te"
+                )
+
+        self.dataloader, self.tokenizer = build_dataloader(
+            self.cfg.dataset,
+            self.cfg.dataloader,
+            self.cfg.model,
+            self.cfg.get("packed_sequence", None),
+            seed=self.cfg.get("seed", 42),
+            local_batch_size=self.cfg.get("step_scheduler.local_batch_size", 1),
+            global_batch_size=self.cfg.get("step_scheduler.global_batch_size", 1),
+            max_steps=self.cfg.get("step_scheduler.max_steps", None),
+            val_check_interval=self.cfg.get("step_scheduler.val_every_steps", None),
+            dp_rank=self._get_dp_rank(),
+            dp_world_size=self._get_dp_group_size(),
+            pp_enabled=self.pp_enabled,
+            cp_size=self.cfg.get("distributed.cp_size", 1),
+            model=self.model_parts[0],
+        )
+        self.val_dataloaders = build_validation_dataloader(
+            self.cfg,
+            self._get_dp_group_size(),
+            self._get_dp_rank(),
+            self.pp_enabled,
+            model=self.model_parts[0],
+        )
+        # Optional tool-call accuracy evaluator for agent SFT runs.
+        # Presence of the ``tool_call_eval`` block enables it; absence skips it.
+        self.tool_call_evaluator = None
+        tool_call_eval_cfg = self.cfg.get("tool_call_eval", None)
+        if tool_call_eval_cfg is not None:
+            self.tool_call_evaluator = tool_call_eval_cfg.instantiate()
+            # Shard eval samples across DP ranks only when safe (DDP); never
+            # override a ``sample_shard`` already set from YAML.
+            if self.tool_call_evaluator.sample_shard is None:
+                self.tool_call_evaluator.sample_shard = dp_eval_sample_shard(
+                    self.distributed_config, self._get_dp_rank(), self._get_dp_group_size()
+                )
+        self._warned_tool_call_eval_skipped = False
+        self.best_metric_key = self.cfg.get("checkpoint.best_metric_key", "default")
+        # Scheduler
+        self.step_scheduler = build_step_scheduler(
+            self.cfg.get("step_scheduler", None),
+            self.dataloader,
+            self._get_dp_group_size(),
+            local_batch_size=self.cfg.get("step_scheduler.local_batch_size", 1),
+        )
+        self._setup_garbage_collection(self.step_scheduler)
+
+        # Build learning rate scheduler
+        self.lr_scheduler = build_lr_scheduler(self.cfg.get("lr_scheduler", None), self.optimizer, self.step_scheduler)
+
+        # Log model, parameter counts, norms, optimizer and scheduler
+        self._log_model_and_optimizer_details(self.model_parts, self.optimizer, self.lr_scheduler)
+
+        # Handle delayed fake-quant toggling for QAT if configured
+        self._qat_disable_fn, self._qat_enable_fn, self._qat_enable_after = self._setup_qat(self.cfg, self.model_parts)
+
+        # Enable MoE load balance tracking if configured
+        moe_metrics_cfg = self.cfg.get("moe_metrics", None)
+        if moe_metrics_cfg and moe_metrics_cfg.get("enabled", False):
+            from nemo_automodel.components.moe.load_balance_metrics import enable_load_balance_tracking
+
+            for mp in self.model_parts:
+                enable_load_balance_tracking(mp)
+
+        self.mfu_calculator = AutoMFU.from_config(self.model_parts[0])
+
+        # NEFTune: noisy embeddings for improved instruction fine-tuning
+        neftune_cfg = self.cfg.get("neftune", None)
+        self.neftune = None
+        if neftune_cfg is not None:
+            from nemo_automodel.components.training.neftune import NEFTune
+
+            noise_alpha = neftune_cfg.get("noise_alpha", 5.0) if hasattr(neftune_cfg, "get") else neftune_cfg
+            self.neftune = NEFTune(noise_alpha=float(noise_alpha))
+            self.neftune.activate(self.model_parts[0])
+
+        restore_from = self.cfg.get("checkpoint.restore_from", None)
+        # Initialize JSONL loggers
+        self.metric_logger_train = build_metric_logger(
+            pathlib.Path(self.checkpointer.config.checkpoint_dir) / "training.jsonl"
+        )
+        self.metric_logger_valid = {
+            name: build_metric_logger(
+                pathlib.Path(self.checkpointer.config.checkpoint_dir)
+                / (f"validation_{name}.jsonl" if name != "default" else "validation.jsonl")
+            )
+            for name in self.val_dataloaders.keys()
+        }
+
+        # Optionally resume
+        self.load_checkpoint(restore_from)
+        torch.cuda.empty_cache()
+
+        # Log step scheduler details
+        self._log_step_scheduler_details(self.step_scheduler)
+
+    def _collect_moe_load_balance(self):
+        """Collect MoE load balance metrics with DP all-reduce.
+
+        Must be called on ALL ranks (the all-reduce is collective).
+        Stores the result in ``self._moe_layer_loads`` for rank-0 logging.
+        """
+        moe_metrics_cfg = self.cfg.get("moe_metrics", None)
+        if not (moe_metrics_cfg and moe_metrics_cfg.get("enabled", False)):
+            self._moe_layer_loads = None
+            return
+
+        from nemo_automodel.components.moe.load_balance_metrics import collect_expert_loads
+
+        dp_group = self._get_dp_group(include_cp=True)
+        all_loads: dict = {}
+        for mp in self.model_parts:
+            all_loads.update(collect_expert_loads(mp, dp_group=dp_group))
+        self._moe_layer_loads = all_loads if all_loads else None
+
+    def _log_moe_metrics(self, step: int, wandb_log_fn) -> None:
+        """Log MoE load balance metrics to wandb.
+
+        Call after :meth:`_collect_moe_load_balance`.  Only logs when
+        ``_moe_layer_loads`` is populated and a wandb log function is provided.
+
+        Args:
+            step: Current training/benchmark step for wandb x-axis.
+            wandb_log_fn: Callable like ``wandb.log`` or ``wandb_run.log``.
+        """
+        if not getattr(self, "_moe_layer_loads", None):
+            return
+
+        from nemo_automodel.components.moe.load_balance_metrics import (
+            compute_brief_metrics,
+            compute_detailed_metrics,
+        )
+
+        moe_metrics_cfg = self.cfg.get("moe_metrics", None)
+        mode = moe_metrics_cfg.get("mode", "brief") if moe_metrics_cfg else "brief"
+        top_k = moe_metrics_cfg.get("top_k_experts", 0) if moe_metrics_cfg else 0
+        if mode == "detailed":
+            detailed_every = moe_metrics_cfg.get("detailed_every_steps", None) if moe_metrics_cfg else None
+            if detailed_every is None or step % detailed_every == 0:
+                wandb_log_fn(compute_detailed_metrics(self._moe_layer_loads, top_k=top_k), step=step)
+            else:
+                wandb_log_fn(compute_brief_metrics(self._moe_layer_loads, top_k=top_k), step=step)
+        else:
+            wandb_log_fn(compute_brief_metrics(self._moe_layer_loads, top_k=top_k), step=step)
+
+    def _configure_pipeline_loss_fn(self):
+        if self.pp is None or not self.pp.info.has_last_stage:
+            return
+
+        last_stage_model = None
+        for model_part, stage in zip(self.model_parts, self.pp.info.stages):
+            if stage.is_last:
+                last_stage_model = model_part
+                break
+        if last_stage_model is None:
+            raise RuntimeError("Pipeline reports a last stage, but no last-stage model part was found")
+
+        self.pp.info.schedule._loss_fn = PipelineCausalLMLoss(self.loss_fn, last_stage_model)
+
+    def _setup_qat(self, cfg, model_parts: list[nn.Module]):
+        if not cfg.get("qat.enabled", False):
+            return None, None, None
+        from nemo_automodel.components.quantization.qat import (
+            get_disable_fake_quant_fn,
+            get_enable_fake_quant_fn,
+        )
+
+        qat_cfg = cfg.qat
+        _qat_enable_after = qat_cfg.get("fake_quant_after_n_steps", 0)
+        # Collect mode from any model part that has it
+        qat_mode = getattr(model_parts[0], "_qat_mode", None)
+
+        if qat_mode is None:
+            return None, None, None
+
+        _qat_disable_fn = get_disable_fake_quant_fn(qat_mode)
+        _qat_enable_fn = get_enable_fake_quant_fn(qat_mode)
+        if _qat_disable_fn is not None and _qat_enable_after is not None:
+            try:
+                # start with fake-quant disabled, will enable later
+                for part in model_parts:
+                    _qat_disable_fn(part)
+                logger.info("QAT fake-quant disabled initially; will enable after %s steps", _qat_enable_after)
+            except Exception as e:
+                logger.warning("Failed to disable fake-quant at setup: %s", e)
+        return _qat_disable_fn, _qat_enable_fn, _qat_enable_after
+
+    def _enable_qat_if_delayed(self, step: int):
+        if getattr(self, "_qat_enable_after", None) is None:
+            return
+        if step < self._qat_enable_after or self._qat_enable_fn is None:
+            return
+        try:
+            for mp in self.model_parts:
+                self._qat_enable_fn(mp)
+            logger.info("Enabled QAT fake-quant after step %s", step)
+            # Enable one
+            self._qat_enable_after = None
+        except Exception as e:
+            logger.warning("Failed to enable fake-quant: %s", e)
+
+    # ------------------ main loop ------------------
+    def run_train_validation_loop(self):
+        """Run the training loop over all epochs and batches.
+
+        For each batch, perform a forward pass, compute loss, backpropagate,
+        and update model parameters when necessary. Also prints loss every gradient step.
+        """
+        for mp in self.model_parts:
+            mp.train()
+        self.timestamp = time.perf_counter()
+
+        pbar = self._make_progress_bar()
+        try:
+            for epoch in self.step_scheduler.epochs:
+                self.step_scheduler.set_epoch(epoch)
+                # The step scheduler yields a list of batches with the following properties:
+                # 1. len(batches) == grad_acc_steps
+                # 2. len(batches[0]) == batch_size
+                for batches in self.step_scheduler:
+                    # If QAT delayed fake-quant is configured, enable after threshold
+                    self._enable_qat_if_delayed(self.step_scheduler.step)
+                    train_log_data = self._run_train_optim_step(batches, self.max_grad_norm)
+                    # Collect MoE load balance metrics (all ranks participate in all-reduce)
+                    self._collect_moe_load_balance()
+                    # log
+                    self.log_train_metrics(train_log_data)
+                    self._update_progress_bar(pbar, train_log_data.metrics)
+
+                    # Run validation every val_every_steps
+                    val_losses = {}
+                    if self.step_scheduler.is_val_step:
+                        for val_name, val_dataloader in self.val_dataloaders.items():
+                            val_log_data = self._run_validation_epoch(val_dataloader)
+                            val_losses[val_name] = val_log_data.metrics["val_loss"]
+                            self.log_val_metrics(val_name, val_log_data, self.metric_logger_valid[val_name])
+                        for mp in self.model_parts:
+                            mp.train()
+
+                    # Save the checkpoint every ckpt_every_steps
+                    if self.step_scheduler.is_ckpt_step:
+                        self.save_checkpoint(
+                            epoch,
+                            self.step_scheduler.step,
+                            train_log_data.metrics["loss"],
+                            val_losses,
+                            best_metric_key=self.best_metric_key,
+                        )
+                    self._maybe_collect_garbage()
+        finally:
+            if pbar is not None:
+                pbar.close()
+        # Close JSONL loggers after training loop completes
+        self.metric_logger_train.close()
+        for v in self.metric_logger_valid.values():
+            v.close()
+
+        self.checkpointer.close()
+
+        # Mark the MLflow run KILLED if training exited via SIGTERM.
+        if self.step_scheduler.sigterm_flag:
+            end_mlflow_active_run_as_killed()
+
+    # ------------------ helpers ------------------
+    def _forward_backward_step(
+        self,
+        idx,
+        batch,
+        *,
+        loss_buffer,
+        num_label_tokens,
+        num_batches,
+        is_train: bool = True,
+    ):
+        # Move batch to device (handle both tensors and dicts of tensors like causal_mask_mapping)
+        batch = {
+            k: (
+                {dk: dv.to(self.dist_env.device, non_blocking=True) for dk, dv in v.items() if dv is not None}
+                if isinstance(v, dict)
+                else (v.to(self.dist_env.device, non_blocking=True) if isinstance(v, torch.Tensor) else v)
+            )
+            for k, v in batch.items()
+        }
+        _thd_collater = _uses_thd_collater(self.cfg.dataloader)
+        # Gate THD/cu_seqlens processing on the dataset being THD-packed, not on TE
+        # attention being present on this rank: both TE attention and mamba need
+        # cu_seqlens, and gating on attention would drop PP stages with no attention
+        # layers (mamba+moe only) and leave cu_seqlens unbuilt downstream.
+        _use_te_value = _thd_collater
+        _num_chunks_value = _get_num_thd_chunks(self.pp_enabled, self.cfg)
+        train_ctx, batch = make_cp_batch_and_ctx(
+            self.device_mesh,
+            batch,
+            use_te=_use_te_value,
+            padding_token_id=self.tokenizer.pad_token_id if self.tokenizer else 0,
+            num_chunks=_num_chunks_value,
+        )
+        labels = batch.pop("labels")
+        fp8_ctx = self.te_fp8.maybe_te_autocast() if self.te_fp8 is not None else nullcontext()
+
+        if self.pp_enabled:
+            with train_ctx(), fp8_ctx:
+                losses = [] if self.pp.info.has_last_stage else None
+                if self.pp.info.has_last_stage:
+                    masked_labels = labels.clone()
+                    targets = masked_labels
+                else:
+                    targets = None
+
+                input_ids = batch.pop("input_ids")
+
+                # Update PP stage shapes for the current batch's seq_len.
+                # This is a no-op when the length hasn't changed.
+                self.pp.update_seq_len(input_ids.shape[1])
+
+                # Filter out None values and empty dicts from batch to avoid PP chunking errors
+                batch_filtered = {
+                    k: v for k, v in batch.items() if v is not None and not (isinstance(v, dict) and len(v) == 0)
+                }
+                # Hand the THD ``cu_seqlens`` to the PP loss to mask cross-sequence boundaries —
+                # the fallback when the model emits no per-microbatch seq_idx tail (which the loss
+                # prefers). One cu_seqlens encodes a single shared layout, so it is only correct at
+                # one pack/microbatch per step; the seq_idx tail handles differing per-microbatch boundaries.
+                cu_seqlens = batch_filtered.get("cu_seqlens")
+                if isinstance(cu_seqlens, torch.Tensor) and cu_seqlens.dim() == 2:
+                    cu_seqlens = cu_seqlens.squeeze(0)  # [1, T] -> [T]
+                pp_loss_fn = getattr(self.pp.info.schedule, "_loss_fn", None) if self.pp.info.has_last_stage else None
+                if pp_loss_fn is not None and hasattr(pp_loss_fn, "cu_seqlens"):
+                    pp_loss_fn.cu_seqlens = cu_seqlens
+                if is_train:
+                    # Use step for training (forward + backward)
+                    if self.pp.info.has_first_stage:
+                        self.pp.info.schedule.step(input_ids, target=targets, losses=losses, **batch_filtered)
+                    else:
+                        self.pp.info.schedule.step(target=targets, losses=losses, **batch_filtered)
+                else:
+                    # Use eval for validation (forward only, no backward)
+                    if self.pp.info.has_first_stage:
+                        self.pp.info.schedule.eval(input_ids, target=targets, losses=losses, **batch_filtered)
+                    else:
+                        self.pp.info.schedule.eval(target=targets, losses=losses, **batch_filtered)
+
+            if self.pp.info.has_last_stage:
+                local_loss = torch.sum(torch.stack(losses))
+            else:
+                local_loss = torch.tensor(0.0, device=self.dist_env.device)
+
+            loss_buffer.append(local_loss.clone().detach())
+        else:
+            model = self.model_parts[0]
+            sync_ctx = (
+                get_sync_ctx(
+                    model,
+                    idx == num_batches - 1,
+                    defer_fsdp_grad_sync=getattr(self.distributed_config, "defer_fsdp_grad_sync", True),
+                )
+                if is_train
+                else nullcontext()
+            )
+            with train_ctx(), sync_ctx, fp8_ctx:
+                batch = filter_forward_kwargs(model, batch)
+                if isinstance(self.loss_fn, FusedLinearCrossEntropy):
+                    # use num_logits_to_keep to avoid full logits matrix in memory
+                    out = model(logits_to_keep=1, **batch)
+                    if "hidden_states" not in out:
+                        raise ValueError(
+                            "FusedLinearCrossEntropy requires the model to output hidden states. Set `model.output_hidden_states=True` in the config."
+                        )
+                else:
+                    out = model(**batch)
+
+                local_loss = calculate_loss(
+                    self.loss_fn,
+                    logits=getattr(out, "logits", out),
+                    labels=labels,
+                    model=model,
+                    hidden_states=get_final_hidden_states(out),
+                    num_label_tokens=num_label_tokens,
+                )
+                mtp_per_depth_h = getattr(out, "mtp_per_depth_h", None)
+                mtp_per_depth_logits = getattr(out, "mtp_per_depth_logits", None)
+                if mtp_per_depth_h is not None or mtp_per_depth_logits is not None:
+                    local_loss = local_loss + calculate_mtp_loss(
+                        self.loss_fn,
+                        mtp_per_depth_h=mtp_per_depth_h,
+                        mtp_per_depth_logits=mtp_per_depth_logits,
+                        labels=labels,
+                        model=model,
+                        scaling_factor=out.mtp_loss_scaling_factor,
+                        num_label_tokens=num_label_tokens,
+                        # mask cross-boundary MTP label rolls in THD packing (matches the PP path)
+                        cu_seqlens=batch.get("cu_seqlens"),
+                    )
+                loss_buffer.append(local_loss.clone().detach())
+                if is_train:
+                    (local_loss * self._get_dp_group_size(include_cp=True)).backward()
+
+    def _broadcast_from_last_pp_stage(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Broadcast a PP last-stage scalar to the other ranks in its pipeline group."""
+        pp_group = self.device_mesh["pp"].get_group()
+        pp_src_rank = torch.distributed.get_global_rank(pp_group, torch.distributed.get_world_size(pp_group) - 1)
+        torch.distributed.broadcast(tensor, src=pp_src_rank, group=pp_group)
+        return tensor
+
+    def _run_train_optim_step(self, batches, max_grad_norm: Optional[float] = None):
+        """Execute a single training step.
+
+        Args:
+            batches: List of batches of training data.
+            max_grad_norm: Gradient clipping norm. Optional, if None will not clip gradients.
+        """
+
+        num_label_tokens = torch.tensor(
+            sum((batch["labels"] != -100).sum().item() for batch in batches), dtype=torch.long
+        )
+        num_label_tokens = self._dp_allreduce(num_label_tokens).item()
+
+        # MoE aux loss gradients are injected via MoEAuxLossAutoScaler, which
+        # multiplies them by main_loss_backward_scale during backward.  This
+        # counteracts the unwanted scaling that FSDP and PP post-hoc rescaling
+        # apply to *all* gradients (including aux loss):
+        #
+        #   Non-PP: FSDP allreduce divides grads by dp_group_size.
+        #           Scale = dp_group_size  →  net = 1.
+        #
+        #   PP:     FSDP divides by dp_group_size, then
+        #           scale_grads_and_clip_grad_norm divides by
+        #           (num_label_tokens / dp_group_size).  The dp_group_size
+        #           factors cancel, leaving net 1/num_label_tokens.
+        #           Scale = num_label_tokens  →  net = 1.
+        if self.pp_enabled:
+            MoEAuxLossAutoScaler.main_loss_backward_scale = torch.tensor(float(num_label_tokens))
+        else:
+            MoEAuxLossAutoScaler.main_loss_backward_scale = torch.tensor(
+                float(self._get_dp_group_size(include_cp=True))
+            )
+
+        loss_buffer = []
+
+        # number of tokens in the batch, excluding any tail padding.
+        num_tokens_in_batch = torch.tensor(
+            sum(batch["labels"].numel() - count_tail_padding(batch["labels"]) for batch in batches),
+            dtype=torch.long,
+        )
+        num_tokens_in_batch = self._dp_allreduce(num_tokens_in_batch).item()
+
+        num_batches = len(batches)
+        prepare_for_grad_accumulation(self.model_parts, pp_enabled=self.pp_enabled)
+
+        for i, batch in enumerate(batches):
+            if i == num_batches - 1:
+                prepare_for_final_backward(self.model_parts, pp_enabled=self.pp_enabled)
+
+            self._forward_backward_step(
+                i, batch, loss_buffer=loss_buffer, num_label_tokens=num_label_tokens, num_batches=num_batches
+            )
+
+            if i == 0:
+                prepare_after_first_microbatch()
+
+        grad_norm = scale_grads_and_clip_grad_norm(
+            max_grad_norm,
+            self.model_parts,
+            norm_type=2.0,
+            pp_enabled=self.pp_enabled,
+            device_mesh=self.device_mesh,
+            moe_mesh=self.moe_mesh,
+            ep_axis_name="ep" if self.moe_mesh is not None and "ep" in self.moe_mesh.mesh_dim_names else None,
+            pp_axis_name="pp" if self.pp_enabled else None,
+            foreach=True,
+            num_label_tokens=num_label_tokens,
+            dp_group_size=self._get_dp_group_size(include_cp=True),
+        )
+
+        # Note(MegatronFSDP): Need to call these functions for MegatronFSDP if not using latest api
+        # self.model_parts[0].finish_grad_sync()
+
+        self.checkpointer.maybe_wait_for_staging()
+        for opt in self.optimizer:
+            opt.step()
+            opt.zero_grad()
+
+        if hasattr(self.model_parts[0], "update_moe_gate_bias"):
+            for mp in self.model_parts:
+                mp.update_moe_gate_bias()
+
+        if self.lr_scheduler is not None:
+            for scheduler in self.lr_scheduler:
+                scheduler.step(1)
+
+        # Precompute FP8 scales
+        fp8_config = self.cfg.get("fp8", None)
+        if (
+            fp8_config is not None
+            and fp8_config.get("enabled", False)
+            and fp8_config.get("precompute_float8_dynamic_scale_for_fsdp", False)
+            and not self.pp_enabled
+            and self.device_mesh is not None
+            and self.device_mesh["dp_shard"].size() > 1
+        ):
+            precompute_float8_dynamic_scale_for_fsdp(self.model_parts[0])
+
+        # Note(MegatronFSDP): Need to call these functions for MegatronFSDP if not using latest api
+        # self.model_parts[0].install_optimized_model_weights()
+        # self.model_parts[0].zero_grad_buffer()
+
+        t = time.perf_counter()
+        time_delta = t - self.timestamp
+        self.timestamp = t
+        tps = num_tokens_in_batch / time_delta
+
+        mfu = None
+        mfu_calculator = getattr(self, "mfu_calculator", None)
+        if batches and mfu_calculator is not None:
+            step_flops = 0.0
+            flops_supported = True
+            for batch in batches:
+                input_ids = batch.get("input_ids")
+                if input_ids is None:
+                    flops_supported = False
+                    break
+                batch_flops = mfu_calculator.get_flops(input_ids)
+                if batch_flops is None:
+                    flops_supported = False
+                    break
+                step_flops += float(batch_flops)
+
+            if flops_supported:
+                step_flops = self._dp_allreduce(
+                    torch.tensor(step_flops, dtype=torch.float64, device=self.dist_env.device), include_cp=True
+                ).item()
+                mfu = calculate_mfu(step_flops / 1e12, self.dist_env.world_size, time_delta)
+
+        reporting_loss = torch.sum(torch.stack(loss_buffer))
+        reporting_loss = self._dp_allreduce(reporting_loss, include_cp=True)
+        if self.pp_enabled:
+            reporting_loss = reporting_loss / num_label_tokens
+            reporting_loss = reporting_loss.to(self.dist_env.device)
+            reporting_loss = self._broadcast_from_last_pp_stage(reporting_loss)
+
+        reporting_loss = reporting_loss.cpu().item()
+        # fix reporting_loss, tps across ranks
+
+        return MetricsSample(
+            step=self.step_scheduler.step,
+            epoch=self.step_scheduler.epoch,
+            metrics={
+                "loss": reporting_loss,
+                "grad_norm": grad_norm,
+                "lr": self.optimizer[0].param_groups[0]["lr"],
+                "mem": torch.cuda.max_memory_allocated() / 1024**3,
+                "tps": tps,
+                "tps_per_gpu": tps / self._get_cp_group_size() / max(self._get_dp_group_size(), 1),
+                "mfu": mfu,
+                "num_tokens_per_step": num_tokens_in_batch,
+                "num_label_tokens": num_label_tokens,
+            },
+        )
+
+    @torch.no_grad()
+    def _run_validation_epoch(self, val_dataloader):
+        """Run one pass over a single validation dataloader.
+
+        Args:
+            val_name: Name of the validation dataset.
+            val_dataloader: DataLoader for the validation dataset.
+        """
+        with ScopedRNG(seed=1, ranked=True):
+            for mp in self.model_parts:
+                mp.eval()
+
+            total_loss = torch.tensor(0.0, dtype=torch.float32, device=self.dist_env.device)
+            total_num_label_tokens = 0
+
+            for batch in val_dataloader:
+                loss_buffer = []
+                num_label_tokens = (batch["labels"] != -100).sum().item()
+                self._forward_backward_step(
+                    0,
+                    batch,
+                    loss_buffer=loss_buffer,
+                    num_label_tokens=None,  # we will normalize outside.
+                    num_batches=1,
+                    is_train=False,
+                )
+
+                total_loss += torch.sum(torch.stack(loss_buffer)).item()
+                total_num_label_tokens += num_label_tokens
+
+        total_loss = self._dp_allreduce(total_loss, include_cp=True)
+        total_num_label_tokens = self._dp_allreduce(
+            torch.tensor(total_num_label_tokens, dtype=torch.long, device=self.dist_env.device)
+        ).item()
+        val_loss = total_loss / max(total_num_label_tokens, 1e-8)
+
+        # For PP, send val_loss and num_label_tokens from last stage to main rank
+        if self.pp_enabled:
+            val_loss = val_loss.to(self.dist_env.device)
+            # On non-last ranks total_num_label_tokens is 0; this tensor is just a recv buffer.
+            pp_num_tokens = torch.tensor(total_num_label_tokens, dtype=torch.long, device=self.dist_env.device)
+            val_loss = self._broadcast_from_last_pp_stage(val_loss)
+            pp_num_tokens = self._broadcast_from_last_pp_stage(pp_num_tokens)
+            if self.dist_env.is_main:
+                total_num_label_tokens = pp_num_tokens.item()
+
+        val_loss = val_loss.item() if isinstance(val_loss, torch.Tensor) else val_loss
+
+        metrics = {
+            "val_loss": val_loss,
+            "lr": self.optimizer[0].param_groups[0]["lr"],
+            "num_label_tokens": total_num_label_tokens,
+            "mem": torch.cuda.max_memory_allocated() / 1024**3,
+        }
+
+        # Tool-call accuracy is the only signal that catches "loss going
+        # down because format was learned but the model picks wrong tools".
+        # Generation on an FSDP2 training model is intentionally opt-in:
+        # generate() repeatedly unshards parameters and can leave enough
+        # allocator pressure to OOM the next backward pass.
+        if getattr(self, "tool_call_evaluator", None) is not None:
+            prefix = self.tool_call_evaluator.metric_prefix
+            count_key = f"{prefix}/_count"
+            if isinstance(self.distributed_config, FSDP2Config) and not getattr(
+                self.tool_call_evaluator, "run_on_fsdp2", False
+            ):
+                if not self._warned_tool_call_eval_skipped:
+                    logging.warning(
+                        "Skipping tool_call_evaluator during FSDP2 training. "
+                        "Set tool_call_eval.run_on_fsdp2=true to force in-loop generation, "
+                        "or run the evaluator offline from a checkpoint."
+                    )
+                    self._warned_tool_call_eval_skipped = True
+                metrics[f"{prefix}/_disabled_fsdp2"] = 1.0
+            else:
+                # sample_shard is set (identically) on every rank only for DDP,
+                # where each rank scored a DISJOINT subset → all-reduce. When it
+                # is None (FSDP2 in-loop, or single rank) every rank scored the
+                # SAME set in lockstep and holds identical results → use them
+                # directly with no collective. The branch is taken identically on
+                # all ranks, so the collectives below stay in sync.
+                sharded = self.tool_call_evaluator.sample_shard is not None
+                try:
+                    local_metrics = self.tool_call_evaluator.evaluate(self.model_parts[0], self.tokenizer)
+                except Exception as exc:
+                    logging.warning("tool_call_evaluator.evaluate failed: %s", exc)
+                    local_metrics = {}
+
+                metric_keys = list(self.tool_call_evaluator.METRIC_KEYS)
+                local_count = float(local_metrics.get(count_key, 0.0))
+                if sharded:
+                    # Every DP rank must issue the SAME collective here, whatever
+                    # its local eval produced. A rank whose evaluate() raised (e.g.
+                    # a divergent generate() OOM) or that hit different skip reasons
+                    # must not skip or add an all-reduce, or it desyncs the
+                    # collective and deadlocks the others. So reduce a FIXED vector
+                    # (count, count-weighted means, skipped — never the per-rank
+                    # _skip_<reason> keys) in one packed all-reduce; a local failure
+                    # contributes zeros but still participates.
+                    packed = torch.tensor(
+                        [local_count]
+                        + [float(local_metrics.get(f"{prefix}/{k}", 0.0)) * local_count for k in metric_keys]
+                        + [float(local_metrics.get(f"{prefix}/_skipped", 0.0))],
+                        dtype=torch.float32,
+                        device=self.dist_env.device,
+                    )
+                    reduced = self._dp_allreduce(packed).tolist()
+                    total_count = reduced[0]
+                    for i, k in enumerate(metric_keys, start=1):
+                        metrics[f"{prefix}/{k}"] = reduced[i] / total_count if total_count > 0 else 0.0
+                    metrics[f"{prefix}/_skipped"] = reduced[-1]
+                    metrics[count_key] = total_count
+                else:
+                    # Replicated: identical on every rank, so report the local
+                    # values directly (no collective, _count is the true count).
+                    for k in metric_keys:
+                        metrics[f"{prefix}/{k}"] = float(local_metrics.get(f"{prefix}/{k}", 0.0))
+                    metrics[f"{prefix}/_skipped"] = float(local_metrics.get(f"{prefix}/_skipped", 0.0))
+                    metrics[count_key] = local_count
+
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+        return MetricsSample(
+            step=self.step_scheduler.step,
+            epoch=self.step_scheduler.epoch,
+            metrics=metrics,
+        )
+
+    def log_val_metrics(self, val_name, log_data, metric_logger=None):
+        """Log metrics to wandb, MLflow and other loggers
+        Args:
+            log_data: MetricsSample object, containing:
+                step: int, the current step.
+                epoch: int, the current epoch.
+                metrics: Dict[str, float], containing:
+                    "val_loss": Validation loss.
+                    "lr": Learning rate.
+                    "num_label_tokens": Number of label tokens.
+                    "mem": Memory allocated.
+        """
+
+        if not self.dist_env.is_main or log_data is None:
+            return
+
+        if wandb.run is not None:
+            wandb.log(log_data.to_dict() | {"val_name": val_name}, step=log_data.step)
+
+        if mlflow.active_run() is not None:
+            mlflow.log_metrics(to_float_metrics(log_data.to_dict()), step=log_data.step)
+
+        if self.comet_logger is not None:
+            self.comet_logger.log_metrics(log_data.to_dict() | {"val_name": val_name}, step=log_data.step)
+
+        # JSONL validation log
+        if not metric_logger is None:
+            metric_logger.log(log_data)
+
+        tool_call_suffix = ""
+        if "tool_call/_count" in log_data.metrics:
+            tool_call_suffix = (
+                " | tool_name_acc {:.3f} | args_json_valid {:.3f} | args_exact_match {:.3f} (n={})".format(
+                    log_data.metrics.get("tool_call/name_correct", 0.0),
+                    log_data.metrics.get("tool_call/args_json_valid", 0.0),
+                    log_data.metrics.get("tool_call/args_exact_match", 0.0),
+                    int(log_data.metrics.get("tool_call/_count", 0)),
+                )
+            )
+        logging.info(
+            '[val] name "{}" | step {} | epoch {} | loss {:.4f} | lr {:.2e} | num_label_tokens {}{}'.format(
+                val_name,
+                log_data.step,
+                log_data.epoch,
+                log_data.metrics["val_loss"],
+                log_data.metrics["lr"],
+                log_data.metrics["num_label_tokens"],
+                tool_call_suffix,
+            )
+        )
+
+    def log_train_metrics(self, log_data):
+        """Log metrics to wandb and other loggers.
+
+        Args:
+            log_data: MetricsSample object, containing:
+                step: int, the current step.
+                epoch: int, the current epoch.
+                metrics: Dict[str, float], containing:
+                    "loss": Training loss.
+                    "grad_norm": Grad norm from the training step.
+                    "lr": Learning rate.
+                    "mem": Memory allocated.
+                    "tps": Tokens per second.
+                    "tps_per_gpu": Tokens per second per GPU.
+                    "num_label_tokens": Number of label tokens.
+        """
+        if not self.dist_env.is_main:
+            return
+
+        # Log to remote services (WandB, MLflow, Comet) according to step_scheduler frequency
+        if self.step_scheduler.is_remote_logging_step:
+            if wandb.run is not None:
+                wandb.log(log_data.to_dict(), step=self.step_scheduler.step)
+            if mlflow.active_run() is not None:
+                mlflow.log_metrics(to_float_metrics(log_data.to_dict()), step=log_data.step)
+            if self.comet_logger is not None:
+                self.comet_logger.log_metrics(log_data.to_dict(), step=log_data.step)
+
+        # Log MoE load balance metrics (already collected/reduced on all ranks)
+        if self.step_scheduler.is_remote_logging_step:
+            if wandb.run is not None:
+                self._log_moe_metrics(self.step_scheduler.step, wandb.log)
+            if self.comet_logger is not None:
+                self._log_moe_metrics(
+                    self.step_scheduler.step, lambda m, step: self.comet_logger.log_metrics(m, step=step)
+                )
+            if mlflow.active_run() is not None:
+                self._log_moe_metrics(
+                    self.step_scheduler.step, lambda m, step: mlflow.log_metrics(to_float_metrics(m), step=step)
+                )
+
+        # JSONL training log (always log for detailed local records)
+        self.metric_logger_train.log(log_data)
+        logging.info(
+            "step {} | epoch {} | loss {:.4f} | grad_norm {:.4f} | lr {:.2e} | mem {:.2f} GiB | tps {:.2f}({:.2f}/gpu) | num_label_tokens {}".format(
+                log_data.step,
+                log_data.epoch,
+                log_data.metrics["loss"],
+                log_data.metrics["grad_norm"],
+                log_data.metrics["lr"],
+                log_data.metrics["mem"],
+                log_data.metrics["tps"],
+                log_data.metrics["tps_per_gpu"],
+                log_data.metrics["num_label_tokens"],
+            )
+        )
+        torch.cuda.reset_peak_memory_stats()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main(config_path=None):
+    """Main entry point for the fine-tuning recipe.
+
+    Loads the configuration, sets up the trainer, and initiates the training loop.
+    """
+    if config_path is None:
+        config_path = pathlib.Path(__file__).parent.resolve() / "llama_3_2_1b_hellaswag.yaml"
+    cfg = parse_args_and_load_config(config_path)
+    trainer = TrainFinetuneRecipeForNextTokenPrediction(cfg)
+    trainer.setup()
+    trainer.run_train_validation_loop()
+
+
+if __name__ == "__main__":
+    main()

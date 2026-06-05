@@ -1,0 +1,157 @@
+# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import pytest
+from datasets import Dataset
+
+
+def _build_tiny_dataset():
+    return Dataset.from_dict(
+        {
+            "ctx": ["ctx 1", "ctx 2"],
+            "endings": [
+                ["e1_a", "e1_b", "e1_c", "e1_d"],
+                ["e2_a", "e2_b", "e2_c", "e2_d"],
+            ],
+            "label": [2, 0],  # → e1_c, e2_a
+            "attention_mask": [[1, 1], [1, 1]],
+        }
+    )
+
+
+@pytest.fixture(autouse=True)
+def _patch_external_libs(monkeypatch):
+    # 1) Patch datasets.load_dataset everywhere
+    def _fake_load_dataset(path_or_dataset, split=None, trust_remote_code=True):
+        # We only check that the slice expression is propagated
+        assert split in (None, "train", "train[:1]")
+        return _build_tiny_dataset()
+
+    monkeypatch.setattr("datasets.load_dataset", _fake_load_dataset)
+
+    # 2) Patch the NeMo pre-processor on its real import path
+    class _DummyPreprocessor:
+        def __init__(self, tokenizer):
+            self.tokenizer = tokenizer
+            self.pad_to_max_length = True  # Default value
+
+        def process(self, ds, _parent):
+            # Return dataset unchanged
+            return ds
+
+    monkeypatch.setattr(
+        "nemo_automodel.components.datasets.utils.SFTSingleTurnPreprocessor",
+        _DummyPreprocessor,
+        raising=False,
+    )
+
+    yield
+
+
+def test_dataset_basic():
+    # Import after patching so the class sees the fakes
+    from nemo_automodel.components.datasets.llm.hellaswag import HellaSwag
+
+    dummy_tokenizer = object()
+    ds = HellaSwag(path_or_dataset="ignored", tokenizer=dummy_tokenizer)
+
+    # Length
+    assert len(ds) == 2
+
+    # Context
+    ctxs = ds.get_context(_build_tiny_dataset())
+    assert ctxs == ["ctx 1", "ctx 2"]
+
+    # Target
+    tgts = ds.get_target(_build_tiny_dataset())
+    assert tgts == ["e1_c", "e2_a"]
+
+    row = ds[0]
+    assert row["ctx"] == "ctx 1"
+
+
+def test_sample_limiting():
+    from nemo_automodel.components.datasets.llm.hellaswag import HellaSwag
+
+    dummy_tokenizer = object()
+    ds = HellaSwag(
+        path_or_dataset="ignored",
+        tokenizer=dummy_tokenizer,
+        num_samples_limit=1,  # forces split 'train[:1]'
+    )
+    # Our stub still returns the same two rows
+    assert len(ds) == 2
+
+
+def test_pad_to_max_length_control():
+    """Test that pad_to_max_length parameter is properly passed to processor."""
+    from nemo_automodel.components.datasets.llm.hellaswag import HellaSwag
+
+    # Import after the autouse fixture has already patched
+    dummy_tokenizer = object()
+
+    # Test with pad_to_max_length=True (default)
+    ds1 = HellaSwag(path_or_dataset="ignored", tokenizer=dummy_tokenizer, pad_to_max_length=True)
+    # The fixture's _DummyPreprocessor will be used, we just verify no crash
+
+    # Test with pad_to_max_length=False
+    ds2 = HellaSwag(path_or_dataset="ignored", tokenizer=dummy_tokenizer, pad_to_max_length=False)
+    # The fixture's _DummyPreprocessor will be used, we just verify no crash
+
+    # Both should complete without errors
+    assert len(ds1) == 2
+    assert len(ds2) == 2
+
+
+def test_load_dataset_called_without_trust_remote_code(monkeypatch):
+    """HellaSwag should call ``load_dataset`` WITHOUT a trust_remote_code kwarg.
+
+    The kwarg was removed from ``HellaSwag.__init__`` and from the wrapped
+    ``load_dataset`` call in this branch — modern HF datasets reject it
+    on script-less repos.
+    """
+    captured: dict = {"kwargs": None}
+
+    def _capturing_load_dataset(path_or_dataset, *args, **kwargs):
+        captured["path"] = path_or_dataset
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _build_tiny_dataset()
+
+    # hellaswag.py does ``from datasets import load_dataset`` — patching
+    # ``datasets.load_dataset`` does NOT update the bound local symbol once
+    # the module is cached in sys.modules.  Patch the module-local binding
+    # directly to be robust.
+    import nemo_automodel.components.datasets.llm.hellaswag as hellaswag_mod
+
+    monkeypatch.setattr(hellaswag_mod, "load_dataset", _capturing_load_dataset)
+
+    hellaswag_mod.HellaSwag(path_or_dataset="ignored", tokenizer=object())
+
+    assert captured["kwargs"] is not None, "load_dataset was not called"
+    assert "trust_remote_code" not in captured["kwargs"], (
+        f"trust_remote_code should NOT be passed to load_dataset; got {captured['kwargs']!r}"
+    )
+
+
+def test_init_does_not_accept_trust_remote_code_kwarg():
+    """Passing ``trust_remote_code`` to ``HellaSwag(...)`` must raise TypeError after this branch."""
+    from nemo_automodel.components.datasets.llm.hellaswag import HellaSwag
+
+    with pytest.raises(TypeError):
+        HellaSwag(
+            path_or_dataset="ignored",
+            tokenizer=object(),
+            trust_remote_code=True,  # removed kwarg
+        )

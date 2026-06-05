@@ -1,0 +1,398 @@
+# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import json
+from pathlib import Path
+
+import pytest
+
+from nemo_automodel.components.datasets.llm.column_mapped_text_instruction_dataset import (
+    ColumnMappedTextInstructionDataset,
+    _str_is_hf_repo_id,
+    make_iterable,
+    _load_dataset,
+    _check_all_values_equal_length,
+    _has_chat_template,
+)
+
+
+def test_make_iterable_basic():
+    # single string -> iterator with one element
+    assert list(make_iterable("hello")) == ["hello"]
+
+    # list of strings stays untouched
+    assert list(make_iterable(["a", "b", "c"])) == ["a", "b", "c"]
+
+    # invalid type should raise
+    with pytest.raises(ValueError):
+        list(make_iterable(123))  # type: ignore[arg-type]
+
+def test_str_is_hf_repo_id():
+    assert _str_is_hf_repo_id("allenai/c4") is True
+    assert _str_is_hf_repo_id("some/local/path.json") is False
+    assert _str_is_hf_repo_id("invalid_format") is False
+
+
+def test_load_dataset_local_json(tmp_path: Path):
+    data = [
+        {"q": "How are you?", "a": "Fine."},
+        {"q": "What is your name?", "a": "Bot."},
+    ]
+    file_path = tmp_path / "samples.json"
+    with file_path.open("w", encoding="utf-8") as fp:
+        json.dump(data, fp)
+
+    ds = _load_dataset(str(file_path))
+    assert len(ds) == 2
+    assert ds[0]["q"] == "How are you?"
+
+
+class _DummyTokenizer:  # noqa: D401
+    """Minimal tokenizer stub - only what's required for the dataset."""
+
+    def __init__(self):
+        self.pad_token = "<pad>"
+        self.pad_token_id = 0
+        self.eos_token_id = 1
+        self.bos_token_id = 2
+        self._counter = 3  # Start token IDs from 3 to avoid conflicts
+
+    def __call__(self, text: str, add_special_tokens: bool = True, padding=None, truncation=None, max_length=None):  # noqa: D401
+        """Mimic the Hugging Face tokenizer ``__call__`` API.
+
+        The real tokenizer would convert *text* into a list of integer token IDs.
+        For the purpose of these unit tests we just assign a deterministic ID to
+        each whitespace-separated token so that the returned structure matches
+        what the dataset expects (a dict with an ``input_ids`` key).
+        """
+
+        # Very simple whitespace tokenisation - one integer per token.
+        # Start from _counter to avoid conflicts with special tokens
+        tokens = text.split()
+        input_ids = list(range(self._counter, self._counter + len(tokens)))
+        if add_special_tokens:
+            input_ids = [self.bos_token_id] + input_ids + [self.eos_token_id]
+        return {"input_ids": input_ids}
+
+
+def test_column_mapped_dataset_basic_no_tokenizer(tmp_path: Path):
+    samples = [
+        {"query": "Why is the sky blue?", "response": "Rayleigh scattering."},
+        {"query": "What is 2+2?", "response": "4."},
+    ]
+    jsonl_path = tmp_path / "toy.jsonl"
+    with jsonl_path.open("w", encoding="utf-8") as fp:
+        for row in samples:
+            fp.write(json.dumps(row) + "\n")
+
+    column_mapping = {"question": "query", "answer": "response"}
+
+    with pytest.raises(AssertionError):
+        ds = ColumnMappedTextInstructionDataset(
+            path_or_dataset_id=str(jsonl_path),
+            column_mapping=column_mapping,
+            tokenizer=None,
+            answer_only_loss_mask=False,
+        )
+
+def test_column_mapped_dataset_bad_mapping(tmp_path: Path):
+    samples = [
+        {"query": "Why is the sky blue?", "response": "Rayleigh scattering."},
+        {"query": "What is 2+2?", "response": "4."},
+    ]
+    jsonl_path = tmp_path / "toy.jsonl"
+    with jsonl_path.open("w", encoding="utf-8") as fp:
+        for row in samples:
+            fp.write(json.dumps(row) + "\n")
+
+    column_mapping = {"question": "query", "answer": "response", "bad": "column"}
+
+    with pytest.raises(AssertionError, match="Expected context to be in column_mapping"):
+        ds = ColumnMappedTextInstructionDataset(
+            path_or_dataset_id=str(jsonl_path),
+            column_mapping=column_mapping,
+            tokenizer=_DummyTokenizer(),
+            answer_only_loss_mask=False,
+        )
+
+def test_column_mapped_dataset_basic(tmp_path: Path):
+    samples = [
+        {"query": "Why is the sky blue?", "response": "Rayleigh scattering."},
+        {"query": "What is 2+2?", "response": "4."},
+    ]
+    jsonl_path = tmp_path / "toy.jsonl"
+    with jsonl_path.open("w", encoding="utf-8") as fp:
+        for row in samples:
+            fp.write(json.dumps(row) + "\n")
+
+    column_mapping = {"question": "query", "answer": "response"}
+
+    ds = ColumnMappedTextInstructionDataset(
+        path_or_dataset_id=str(jsonl_path),
+        column_mapping=column_mapping,
+        tokenizer=_DummyTokenizer(),
+        answer_only_loss_mask=False,
+    )
+
+    assert len(ds) == 2
+    first = ds[0]
+    del first["___PAD_TOKEN_IDS___"]
+    assert set(first.keys()) == {"labels", "input_ids", "attention_mask"}
+
+@pytest.mark.skip
+def test_column_mapped_dataset_streaming(tmp_path: Path):
+    """Verify behaviour when *streaming=True*.
+
+    In streaming mode the dataset becomes an ``IterableDataset`` - length and
+    random access are undefined, but iteration should lazily yield the mapped
+    rows.  We check that these constraints are enforced and that the mapping
+    logic still works.
+    """
+
+    import itertools
+
+    samples = [
+        {"q": "Who wrote Hamlet?", "a": "Shakespeare"},
+        {"q": "Capital of France?", "a": "Paris"},
+    ]
+
+    jsonl_path = tmp_path / "toy_stream.jsonl"
+    with jsonl_path.open("w", encoding="utf-8") as fp:
+        for row in samples:
+            fp.write(json.dumps(row) + "\n")
+
+    ds = ColumnMappedTextInstructionDataset(
+        path_or_dataset_id=str(jsonl_path),
+        column_mapping={"question": "q", "answer": "a"},
+        tokenizer=_DummyTokenizer(),
+        streaming=True,
+        answer_only_loss_mask=False,
+    )
+
+    # __len__ and __getitem__ are not supported in streaming mode
+    with pytest.raises(RuntimeError):
+        _ = len(ds)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError):
+        _ = ds[0]  # type: ignore[index]
+
+    # But we can iterate and obtain the mapped columns
+    first_two = list(itertools.islice(ds, 2))
+
+def test_limit_dataset_samples(tmp_path: Path):
+    """
+    `limit_dataset_samples` should select only the requested number of
+    rows in the dataset.
+    """
+    samples = [
+        {"query": "Why is the sky blue?", "response": "Rayleigh scattering."},
+        {"query": "What is 2+2?", "response": "4."},
+        {"query": "How many r's in the word strawberry?", "response": "3."},
+    ]
+    jsonl_path = tmp_path / "toy.jsonl"
+    with jsonl_path.open("w", encoding="utf-8") as fp:
+        for row in samples:
+            fp.write(json.dumps(row) + "\n")
+
+    column_mapping = {"question": "query", "answer": "response"}
+
+    ds = ColumnMappedTextInstructionDataset(
+        path_or_dataset_id=str(jsonl_path),
+        column_mapping=column_mapping,
+        tokenizer=_DummyTokenizer(),
+        answer_only_loss_mask=False,
+        limit_dataset_samples=1,
+    )
+
+    assert len(ds) == 1
+    first = ds[0]
+    del first["___PAD_TOKEN_IDS___"]
+    assert set(first.keys()) == {"labels", "input_ids", "attention_mask"}
+
+class _TokenizerNoChat:  # noqa: D401 - minimal stub only
+    """Tokenizer *without* chat‐template support."""
+
+    def __call__(self, text: str):  # pragma: no cover - unused in these tests
+        return {"input_ids": []}
+
+
+class _TokenizerChat(_TokenizerNoChat):  # noqa: D401 - adds chat template features
+    """Tokenizer *with* chat‐template support.
+
+    Only the attributes consumed by ``_has_chat_template`` are implemented.
+    """
+
+    chat_template = "<dummy>"
+
+    def apply_chat_template(self, messages):  # type: ignore[override]
+        return []
+
+
+class _TokenizerChatButNoCallable(_TokenizerNoChat):  # noqa: D401
+    """Tokenizer with a *non‐callable* ``apply_chat_template`` attribute."""
+
+    chat_template = "<dummy>"
+    apply_chat_template = "not callable"  # type: ignore[assignment]
+
+def test_has_chat_template_positive():
+    """Tokenizer advertises *chat_template* and *apply_chat_template* is callable."""
+
+    tok = _TokenizerChat()
+    assert _has_chat_template(tok) is True
+
+
+def test_has_chat_template_negative_missing_attrs():
+    """Tokenizer lacks chat‐template attributes → returns *False*."""
+
+    tok = _TokenizerNoChat()
+    assert _has_chat_template(tok) is False
+
+
+def test_has_chat_template_negative_not_callable():
+    """``apply_chat_template`` exists but is *not* callable → returns *False*."""
+
+    tok = _TokenizerChatButNoCallable()
+    assert _has_chat_template(tok) is False
+
+def test_check_all_values_equal_length_true():
+    sample = {"a": [1, 2, 3], "b": [4, 5, 6], "c": [7, 8, 9]}
+    assert _check_all_values_equal_length(sample) is True
+
+
+def test_check_all_values_equal_length_false():
+    sample = {"a": [1, 2, 3, 4], "b": [5, 6], "c": []}
+    assert _check_all_values_equal_length(sample) is False
+
+
+class TestColumnMappedIter:
+    """Tests for ColumnMappedTextInstructionDataset.__iter__."""
+
+    def _make_dataset(self, tmp_path):
+        samples = [
+            {"query": "Why is the sky blue?", "response": "Rayleigh scattering."},
+            {"query": "What is 2+2?", "response": "4."},
+            {"query": "Capital of France?", "response": "Paris."},
+        ]
+        jsonl_path = tmp_path / "iter_test.jsonl"
+        with jsonl_path.open("w", encoding="utf-8") as fp:
+            for row in samples:
+                fp.write(json.dumps(row) + "\n")
+
+        return ColumnMappedTextInstructionDataset(
+            path_or_dataset_id=str(jsonl_path),
+            column_mapping={"question": "query", "answer": "response"},
+            tokenizer=_DummyTokenizer(),
+            answer_only_loss_mask=False,
+        )
+
+    def test_iter_yields_all_items(self, tmp_path):
+        ds = self._make_dataset(tmp_path)
+        items = list(ds)
+        assert len(items) == len(ds)
+
+    def test_iter_matches_getitem(self, tmp_path):
+        ds = self._make_dataset(tmp_path)
+        for i, item in enumerate(ds):
+            direct = ds[i]
+            assert item["input_ids"] == direct["input_ids"]
+            assert item["labels"] == direct["labels"]
+
+    def test_iter_yields_dicts_with_expected_keys(self, tmp_path):
+        ds = self._make_dataset(tmp_path)
+        for item in ds:
+            assert "input_ids" in item
+            assert "labels" in item
+            assert "attention_mask" in item
+
+
+class TestColumnMappedGetitemBoundedLoop:
+    """Tests for the bounded-loop skip logic in __getitem__."""
+
+    def _make_dataset(self, tmp_path, samples):
+        jsonl_path = tmp_path / "getitem_test.jsonl"
+        with jsonl_path.open("w", encoding="utf-8") as fp:
+            for row in samples:
+                fp.write(json.dumps(row) + "\n")
+
+        return ColumnMappedTextInstructionDataset(
+            path_or_dataset_id=str(jsonl_path),
+            column_mapping={"question": "query", "answer": "response"},
+            tokenizer=_DummyTokenizer(),
+            answer_only_loss_mask=False,
+        )
+
+    def test_skips_all_minus_100_sample(self, tmp_path, monkeypatch):
+        """When one sample produces all -100 labels, __getitem__ skips to the next."""
+        samples = [
+            {"query": "Bad question", "response": "Bad answer"},
+            {"query": "Good question", "response": "Good answer"},
+        ]
+        ds = self._make_dataset(tmp_path, samples)
+        good_result = ds[1]
+
+        call_count = 0
+        original_apply = ds._apply_tokenizer
+
+        def _patched_apply(sample):
+            nonlocal call_count
+            call_count += 1
+            if sample.get("question") == "Bad question":
+                result = original_apply(sample)
+                result["labels"] = [-100] * len(result["labels"])
+                return result
+            return original_apply(sample)
+
+        monkeypatch.setattr(ds, "_apply_tokenizer", _patched_apply)
+        result = ds[0]
+        assert call_count == 2
+        assert result["input_ids"] == good_result["input_ids"]
+
+    def test_raises_when_all_samples_produce_minus_100(self, tmp_path, monkeypatch):
+        """When every sample produces all -100 labels, __getitem__ raises ValueError."""
+        samples = [
+            {"query": "Q1", "response": "A1"},
+            {"query": "Q2", "response": "A2"},
+        ]
+        ds = self._make_dataset(tmp_path, samples)
+        original_apply = ds._apply_tokenizer
+
+        def _all_masked(sample):
+            result = original_apply(sample)
+            result["labels"] = [-100] * len(result["labels"])
+            return result
+
+        monkeypatch.setattr(ds, "_apply_tokenizer", _all_masked)
+        with pytest.raises(ValueError, match="entirely -100"):
+            ds[0]
+
+    def test_wraps_around_to_beginning(self, tmp_path, monkeypatch):
+        """When the last sample is bad, the loop wraps around to idx 0."""
+        samples = [
+            {"query": "Good question", "response": "Good answer"},
+            {"query": "Bad question", "response": "Bad answer"},
+        ]
+        ds = self._make_dataset(tmp_path, samples)
+        good_result = ds[0]
+
+        original_apply = ds._apply_tokenizer
+
+        def _patched_apply(sample):
+            if sample.get("question") == "Bad question":
+                result = original_apply(sample)
+                result["labels"] = [-100] * len(result["labels"])
+                return result
+            return original_apply(sample)
+
+        monkeypatch.setattr(ds, "_apply_tokenizer", _patched_apply)
+        result = ds[1]
+        assert result["input_ids"] == good_result["input_ids"]

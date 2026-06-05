@@ -1,0 +1,304 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import hashlib
+from typing import TYPE_CHECKING, Any, Dict, List, Union
+
+import torch
+from transformers import DataCollatorWithPadding, PreTrainedTokenizerBase
+from transformers.file_utils import PaddingStrategy
+
+
+def _doc_id_str_to_int64(doc_id: str) -> int:
+    """Stable 63-bit int for corpus doc id strings (for in-batch duplicate masking)."""
+    h = hashlib.md5(doc_id.encode("utf-8")).digest()[:8]
+    return int.from_bytes(h, "little", signed=False) & ((1 << 63) - 1)
+
+
+if TYPE_CHECKING:
+    from transformers import BatchEncoding
+
+
+def _unpack_doc_values(features: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Unpack document lists into individual examples.
+
+    Example:
+        Input: [{'input_ids': [[1,2], [3,4]], 'attention_mask': [[1,1], [1,1]]}]
+        Output: [{'input_ids': [1,2], 'attention_mask': [1,1]},
+                 {'input_ids': [3,4], 'attention_mask': [1,1]}]
+    """
+    doc_examples = []
+    for f in features:
+        keys = list(f.keys())
+        lists_per_key = len(f[keys[0]])
+        for idx in range(lists_per_key):
+            doc_examples.append({k: f[k][idx] for k in keys})
+    return doc_examples
+
+
+class BiEncoderCollator:
+    """
+    Collator for encoder retrieval training.
+
+    This collator handles tokenization of queries and documents at batch time,
+    which is more memory-efficient than pre-tokenization and allows for
+    dynamic padding based on batch max length.
+
+    Based on EncoderCollator from nemo-retriever-research but adapted for Automodel.
+    """
+
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        q_max_len: int = 512,
+        p_max_len: int = 512,
+        query_prefix: str = "",
+        passage_prefix: str = "",
+        padding: Union[bool, str, PaddingStrategy] = True,
+        pad_to_multiple_of: int = None,
+        use_dataset_instruction: bool = False,
+    ):
+        """
+        Initialize the collator.
+
+        Args:
+            tokenizer: Tokenizer to use for encoding
+            q_max_len: Maximum length for queries
+            p_max_len: Maximum length for passages
+            query_prefix: Prefix to add to queries (e.g., "query: ")
+            passage_prefix: Prefix to add to passages (e.g., "passage: ")
+            padding: Padding strategy ("longest", "max_length", or "do_not_pad")
+            pad_to_multiple_of: Pad to multiple of this value (e.g., 8 for FP16)
+            use_dataset_instruction: Whether to use instruction from dataset's metadata
+        """
+        self.tokenizer = tokenizer
+        self.q_max_len = q_max_len
+        self.p_max_len = p_max_len
+        self.query_prefix = query_prefix
+        self.passage_prefix = passage_prefix
+        self.padding = padding
+        self.pad_to_multiple_of = pad_to_multiple_of
+        self.use_dataset_instruction = use_dataset_instruction
+
+    def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        """
+        Collate a batch of examples.
+
+        Args:
+            batch: List of examples, each with 'question', 'doc_text', 'doc_image' keys
+
+        Returns:
+            Dictionary with:
+            - q_input_ids: Query input IDs [batch_size, q_seq_len]
+            - q_attention_mask: Query attention mask [batch_size, q_seq_len]
+            - d_input_ids: Document input IDs [batch_size * num_docs, d_seq_len]
+            - d_attention_mask: Document attention mask [batch_size * num_docs, d_seq_len]
+            - labels: Dummy labels for compatibility [batch_size]
+        """
+        # Extract queries and documents
+        query_examples = [x["question"] for x in batch]
+        doc_examples = [x["doc_text"] for x in batch]
+
+        # Flatten documents (each example has multiple docs)
+        doc_examples_flat = []
+        doc_size = len(doc_examples[0])
+
+        if self.use_dataset_instruction:
+            query_instruction_examples = [x["query_instruction"] for x in batch]
+            passage_instruction_examples = [x["passage_instruction"] for x in batch]
+            passage_instruction_examples_flat = []
+
+            # Flatten documents with instructions
+            for doc, passage_instruction in zip(doc_examples, passage_instruction_examples):
+                doc_examples_flat += doc
+                passage_instruction_examples_flat += [passage_instruction] * len(doc)
+        else:
+            # Flatten documents without instructions
+            for doc in doc_examples:
+                doc_examples_flat += doc
+
+        # Add prefixes
+        if self.use_dataset_instruction:
+            query_examples = [
+                f"{query_instruction} {question}" if query_instruction else question
+                for query_instruction, question in zip(query_instruction_examples, query_examples)
+            ]
+            doc_examples_flat = [
+                f"{passage_instruction} {passage}" if passage_instruction else passage
+                for passage_instruction, passage in zip(passage_instruction_examples_flat, doc_examples_flat)
+            ]
+        else:
+            if self.query_prefix:
+                query_examples = [self.query_prefix + " " + question for question in query_examples]
+            if self.passage_prefix:
+                doc_examples_flat = [self.passage_prefix + " " + passage for passage in doc_examples_flat]
+
+        # Tokenize queries (no padding yet)
+        query_encodings = self.tokenizer(
+            query_examples,
+            max_length=self.q_max_len,
+            padding=PaddingStrategy.DO_NOT_PAD,
+            truncation=True,
+            return_token_type_ids=False,
+        )
+
+        # Tokenize documents (no padding yet)
+        doc_encodings = self.tokenizer(
+            doc_examples_flat,
+            max_length=self.p_max_len,
+            padding=PaddingStrategy.DO_NOT_PAD,
+            truncation=True,
+            return_token_type_ids=False,
+        )
+
+        # Merge into features format for unpacking
+        features = self._merge_batch_dict(
+            query_batch_dict=query_encodings, doc_batch_dict=doc_encodings, train_n_passages=doc_size
+        )
+        features = self._convert_dict_to_list(features)
+
+        # Separate query and document features with prefixes
+        q_prefix, d_prefix = "q_", "d_"
+        query_features = [{k[len(q_prefix) :]: v for k, v in f.items() if k.startswith(q_prefix)} for f in features]
+        doc_features = _unpack_doc_values(
+            [{k[len(d_prefix) :]: v for k, v in f.items() if k.startswith(d_prefix)} for f in features]
+        )
+
+        assert len(doc_features) % len(query_features) == 0, (
+            f"{len(doc_features)} doc and {len(query_features)} queries"
+        )
+
+        # Pad queries based on batch max length
+        q_collated = self.tokenizer.pad(
+            query_features, padding=self.padding, pad_to_multiple_of=self.pad_to_multiple_of, return_tensors="pt"
+        )
+
+        # Pad documents based on batch max length
+        d_collated = self.tokenizer.pad(
+            doc_features, padding=self.padding, pad_to_multiple_of=self.pad_to_multiple_of, return_tensors="pt"
+        )
+
+        # Add prefixes to keys
+        merged_batch_dict = {}
+        for k in q_collated.keys():
+            merged_batch_dict[q_prefix + k] = q_collated[k]
+        for k in d_collated.keys():
+            merged_batch_dict[d_prefix + k] = d_collated[k]
+
+        # Add dummy labels (required by some training frameworks)
+        labels = torch.zeros(len(query_features), dtype=torch.long)
+        merged_batch_dict["labels"] = labels
+
+        # Per-passage corpus doc ids (positive + negatives, flattened in d_input_ids
+        # order) for distributed in-batch same-doc negative masking. Top-level key
+        # so it bypasses the q_/d_ unpacking in the trainer.
+        if batch and batch[0].get("doc_id") is not None:
+            doc_id_flat: List[str] = []
+            for x in batch:
+                doc_id_flat.extend(x["doc_id"])
+            merged_batch_dict["passage_doc_ids"] = torch.tensor(
+                [_doc_id_str_to_int64(s) for s in doc_id_flat],
+                dtype=torch.long,
+            )
+
+        return merged_batch_dict
+
+    def _merge_batch_dict(
+        self, query_batch_dict: Dict[str, List], doc_batch_dict: Dict[str, List], train_n_passages: int
+    ) -> Dict[str, List]:
+        """
+        Merge query and document batches into a single dictionary.
+
+        Adapted from nemo-retriever-research/src/loaders/loader_utils.py
+        """
+        batch_size = len(query_batch_dict["input_ids"])
+
+        merged_batch_dict = {}
+        for key in query_batch_dict:
+            merged_batch_dict["q_" + key] = query_batch_dict[key]
+
+        for key in doc_batch_dict:
+            # Reshape doc features: [batch_size * train_n_passages, seq_len]
+            # -> [batch_size, train_n_passages, seq_len]
+            doc_values = doc_batch_dict[key]
+            doc_values_reshaped = []
+            for i in range(batch_size):
+                doc_values_reshaped.append(doc_values[i * train_n_passages : (i + 1) * train_n_passages])
+            merged_batch_dict["d_" + key] = doc_values_reshaped
+
+        return merged_batch_dict
+
+    def _convert_dict_to_list(self, input_dict: Dict[str, List]) -> List[Dict[str, Any]]:
+        """
+        Convert dictionary of lists to list of dictionaries.
+
+        Example:
+            Input: {'a': [1, 2], 'b': [3, 4]}
+            Output: [{'a': 1, 'b': 3}, {'a': 2, 'b': 4}]
+        """
+        out_list = []
+        length = len(input_dict[list(input_dict.keys())[0]])
+        for i in range(length):
+            tmp = {}
+            for key in input_dict.keys():
+                tmp[key] = input_dict[key][i]
+            out_list.append(tmp)
+        return out_list
+
+
+class CrossEncoderCollator(DataCollatorWithPadding):
+    """Collate query-document pairs for cross-encoder reranking."""
+
+    def __init__(
+        self, rerank_max_length: int, *args, prompt_template: str = "question:{query} \n \n passage:{passage}", **kwargs
+    ):
+        self.rerank_max_length = rerank_max_length
+        self.prompt_template = prompt_template
+        # Call Base with all args and kwargs
+        self.args = None
+        if "args" in kwargs:
+            self.args = kwargs.pop("args")
+        super().__init__(*args, **kwargs)
+
+    def __call__(self, features: List[Dict[str, Any]]) -> "BatchEncoding":
+        query_examples = [x["question"] for x in features]
+        doc_examples = [x["doc_text"] for x in features]
+        num_labels = features[0].get("num_labels") if features else None
+
+        def format_text(q, p):
+            return self.prompt_template.format(query=q, passage=p)
+
+        examples = [format_text(q, d) for q, d in zip(query_examples, doc_examples)]
+
+        # Tokenize without tensors first (so NeMoAutoTokenizer BOS/EOS insertion works on lists),
+        # then pad and convert to tensors in a separate step.
+        encodings = self.tokenizer(
+            examples,
+            max_length=self.rerank_max_length,
+            padding=PaddingStrategy.DO_NOT_PAD,
+            truncation=True,
+        )
+        tok_features = [{k: encodings[k][i] for k in encodings} for i in range(len(examples))]
+        batch_dict = self.tokenizer.pad(
+            tok_features,
+            padding=True,
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            return_tensors=self.return_tensors,
+        )
+
+        if num_labels is not None:
+            batch_dict["labels"] = torch.zeros(num_labels, dtype=torch.long)
+
+        return batch_dict

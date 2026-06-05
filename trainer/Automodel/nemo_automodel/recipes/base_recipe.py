@@ -1,0 +1,1005 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import getpass
+import json
+import logging
+import os
+import re
+import socket
+from datetime import datetime
+from pathlib import Path
+
+import torch
+
+from nemo_automodel.shared.torch_patches import apply_torch_patches
+
+apply_torch_patches()
+import torch.distributed as dist
+import torch.nn as nn
+import yaml
+from torch.nn.parallel import DistributedDataParallel
+from torch.optim import Optimizer
+from torchdata.stateful_dataloader import StatefulDataLoader
+from transformers.processing_utils import ProcessorMixin
+
+try:
+    # >= v5
+    from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+except ImportError:
+    # < v5
+    from transformers.tokenization_utils import PreTrainedTokenizerBase
+
+from nemo_automodel.components.checkpoint.checkpointing import save_config
+from nemo_automodel.components.config.loader import ConfigNode, config_to_yaml_str
+from nemo_automodel.components.distributed.mesh_utils import get_flat_mesh
+from nemo_automodel.components.optim.scheduler import OptimizerParamScheduler
+from nemo_automodel.components.training.garbage_collection import GarbageCollection
+from nemo_automodel.components.training.rng import StatefulRNG
+from nemo_automodel.components.training.step_scheduler import StepScheduler
+
+logger = logging.getLogger(__name__)
+
+
+def has_load_restore_state(object):
+    """
+    Checks whether object has load_state_dict and state_dict functions.
+
+    TODO: also need to check function signatures.
+
+    Args:
+        object (any): the object to check.
+
+    Returns:
+        bool: returns True if has callable load_state_dict and state_dict
+    """
+    return all(callable(getattr(object, attr, None)) for attr in ("load_state_dict", "state_dict"))
+
+
+def is_dataloader(object):
+    """
+    Checks whether object is a dataloader.
+
+    Args:
+        object (any): the object to check.
+
+    Returns:
+        bool: returns True if object is a dataloader.
+    """
+    return isinstance(object, StatefulDataLoader) and has_load_restore_state(object)
+
+
+def is_tokenizer(object):
+    """
+    Checks whether object is a tokenizer or VLM processor.
+
+    Args:
+        object (any): the object to check.
+
+    Returns:
+        bool: returns True if object is a tokenizer or VLM processor.
+    """
+    return isinstance(object, (PreTrainedTokenizerBase, ProcessorMixin))
+
+
+def is_lr_scheduler(object):
+    """
+    Checks whether object is a learning rate scheduler.
+
+    Args:
+        object (any): the object to check.
+
+    Returns:
+        bool: returns True if object is an OptimizerParamScheduler.
+    """
+    return isinstance(object, OptimizerParamScheduler) or (
+        isinstance(object, list)
+        and all(isinstance(item, OptimizerParamScheduler) for item in object)
+        and len(object) > 0
+    )
+
+
+def is_optimizer(object):
+    """
+    Checks whether object is an optimizer.
+    """
+    return isinstance(object, Optimizer) or (
+        isinstance(object, list) and len(object) > 0 and all(isinstance(item, Optimizer) for item in object)
+    )
+
+
+def is_model(object):
+    """
+    Checks whether object is a model.
+    """
+    return isinstance(object, nn.Module) or (
+        isinstance(object, list) and len(object) > 0 and all(isinstance(item, nn.Module) for item in object)
+    )
+
+
+def _list_existing_checkpoints(ckpt_root: Path) -> list[Path]:
+    """Return existing checkpoint directories under ckpt_root (matching '*step_*')."""
+    if not ckpt_root.exists():
+        return []
+    return list(ckpt_root.glob("*step_*"))
+
+
+def _resolve_restore_from_to_ckpt_dir(checkpoint_dir: str, restore_from: str) -> str | None:
+    """
+    Resolve restore_from to a checkpoint directory.
+
+    Returns:
+        - str: resolved checkpoint directory
+        - None: if restore_from='LATEST' but no checkpoint found (caller should start fresh)
+    """
+    # Handle "LATEST" keyword for convenience
+    if restore_from.upper() == "LATEST":
+        return _find_latest_checkpoint(checkpoint_dir)
+
+    # If restore_from is just a directory name (no path separator), treat it as
+    # relative to checkpoint_dir. Otherwise use as-is (absolute or relative path).
+    if os.path.sep not in restore_from and not os.path.isabs(restore_from):
+        return os.path.join(checkpoint_dir, restore_from)
+    return restore_from
+
+
+def _format_missing_checkpoint_dir_error(checkpoint_dir: str, restore_from: str, resolved_ckpt_dir: str) -> str:
+    """Format a helpful error message for a missing checkpoint directory."""
+    error_msg = [
+        f"\n{'=' * 80}",
+        "ERROR: Checkpoint directory does not exist",
+        f"{'=' * 80}",
+        f"Specified: checkpoint.restore_from: '{restore_from}'",
+        f"Resolved to: {resolved_ckpt_dir}",
+        "",
+        "Please check:",
+        "  1. The checkpoint directory exists",
+        f"  2. The path is correct (restore_from: '{restore_from}')",
+        f"  3. Available checkpoints in {checkpoint_dir}:",
+    ]
+
+    ckpt_root = Path(checkpoint_dir)
+    available_ckpts = _list_existing_checkpoints(ckpt_root)
+    if available_ckpts:
+        error_msg += [f"       {', '.join([p.name for p in available_ckpts[:5]])}"]
+        if len(available_ckpts) > 5:
+            error_msg += [f"       ... and {len(available_ckpts) - 5} more"]
+    else:
+        error_msg += (
+            ["       (no checkpoints found)"] if ckpt_root.exists() else ["       (checkpoint_dir does not exist)"]
+        )
+
+    error_msg += [f"{'=' * 80}"]
+    return "\n".join(error_msg)
+
+
+def _is_rank_0() -> bool:
+    """True if distributed is not initialized or this process is rank 0.
+    TODO(@akoumpa): deprecate in favor of deviemesh api
+    """
+    return not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
+
+
+def _dist_barrier() -> None:
+    """Barrier if torch.distributed is initialized.
+    TODO(@akoumpa): deprecate in favor of deviemesh api
+    """
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+
+class BaseRecipe:
+    """
+    BaseRecipe provides checkpoint load/save functionality for recipes.
+    """
+
+    def __setattr__(self, key, value):
+        """
+        Overriden __setattr__ to keep track of stateful classes.
+
+        Args:
+            key (str): attribute named.
+            value (Any): Value assigned
+
+        Raises:
+            ValueError: if __state_tracked is attemped to be overwriten.
+
+        """
+        # assuming no one will do recipe.__dict__['__state_tracked'] = None
+        if key == "__state_tracked":
+            raise ValueError("cannot set __state_tracked")
+        if "__state_tracked" not in self.__dict__:
+            self.__dict__["__state_tracked"] = set()
+
+        # Initialize best checkpoint tracking
+        if "_best_val_loss" not in self.__dict__:
+            self.__dict__["_best_val_loss"] = float("inf")
+
+        # Track stateful objects unless they are validation/eval components.
+        should_track = (
+            is_model(value)
+            or has_load_restore_state(value)
+            or is_tokenizer(value)
+            or is_lr_scheduler(value)
+            or is_optimizer(value)
+            or isinstance(value, ConfigNode)
+            or is_dataloader(value)
+        )
+
+        if should_track and not any(substr in key.lower() for substr in ("val", "eval", "test", "loss")):
+            if key in self.__dict__["__state_tracked"]:
+                raise RuntimeError(f"State key {key!r} is already tracked")
+            self.__dict__["__state_tracked"].add(key)
+        super().__setattr__(key, value)
+
+    def save_checkpoint(
+        self,
+        epoch: int,
+        step: int,
+        train_loss: float,
+        val_loss: dict[str, float] | None = None,
+        best_metric_key: str = "default",
+    ):
+        """
+        Save the current training state as a checkpoint.
+
+        As long as the object has a 'load_state_dict' and 'state_dict' function, it will be saved.
+
+        Args:
+            epoch (int): The current epoch.
+            step (int): The current step.
+            train_loss (float): The current training loss.
+            val_loss (dict[str, float]): The current validation losses.
+            best_metric_key (str): The validation metric key used to select the best checkpoint.
+        """
+        if not self.checkpointer.config.enabled:
+            return
+
+        # Wait for any in-flight checkpoint (async case) to complete
+        self.checkpointer.async_wait()
+
+        # If a previous async checkpoint just finished, update the "latest" symlink now
+        prev_pending = getattr(self, "_last_pending_checkpoint_dir", None)
+        is_dist_initialized = torch.distributed.is_initialized()
+        is_rank_0 = not is_dist_initialized or torch.distributed.get_rank() == 0
+        if prev_pending is not None:
+            if is_rank_0:
+                self._update_latest_symlink(prev_pending)
+            # clear and remember the last completed path
+            setattr(self, "_last_pending_checkpoint_dir", None)
+            if is_dist_initialized:
+                torch.distributed.barrier()
+
+        # If a previous async checkpoint just finished, also update the "best" symlink now (if pending)
+        prev_best_pending = getattr(self, "_last_pending_best_checkpoint_info", None)
+        if prev_best_pending is not None:
+            if is_rank_0 and prev_best_pending.get("val") is not None:
+                self._update_best_symlink(prev_best_pending["path"], float(prev_best_pending["val"]))
+            setattr(self, "_last_pending_best_checkpoint_info", None)
+            if is_dist_initialized:
+                torch.distributed.barrier()
+
+        path = self.checkpointer.config.checkpoint_dir
+        path = os.path.join(path, f"epoch_{epoch}_step_{step}")
+
+        best_val_metric = (
+            val_loss[next(iter(val_loss.keys())) if len(val_loss) == 1 else best_metric_key] if val_loss else None
+        )
+
+        if is_rank_0:
+            if os.path.exists(path):
+                raise FileExistsError(f"Checkpoint directory {path} already exists")
+            os.makedirs(path, exist_ok=True)
+            logger.info("Saving checkpoint to %s", path)
+
+            def to_item(x):
+                if isinstance(x, torch.Tensor):
+                    return x.item()
+                return x
+
+            # dump the train and val loss to a json file
+            loss_dict = {"train_loss": train_loss}
+            if val_loss:
+                # the name of the key can be "default", so we rename it to "val_loss"
+                if len(val_loss) == 1:
+                    key = next(iter(val_loss.keys()))
+                    loss_dict["val_loss"] = val_loss[key]
+                else:
+                    loss_dict.update(val_loss)
+            with open(os.path.join(path, "losses.json"), "w") as f:
+                try:
+                    json.dump({k: to_item(v) for k, v in loss_dict.items()}, f)
+                except (TypeError, ValueError, OSError):
+                    logger.warning("Failed to write checkpoint loss metadata to %s", f.name, exc_info=True)
+
+        if is_dist_initialized:
+            torch.distributed.barrier()
+
+        model, optimizer, scheduler, tokenizer, config = None, None, None, None, None
+        step_scheduler = getattr(self, "step_scheduler", None)
+        is_final_checkpoint = bool(getattr(step_scheduler, "is_last_step", False))
+
+        for key in sorted(self.__dict__["__state_tracked"]):
+            if is_model(getattr(self, key)):
+                if key == "teacher_model":
+                    continue
+                model = getattr(self, key)
+            elif is_optimizer(getattr(self, key)):
+                optimizer = getattr(self, key)
+            elif isinstance(getattr(self, key), ConfigNode):
+                config = getattr(self, key)
+            elif is_lr_scheduler(getattr(self, key)):
+                scheduler = getattr(self, key)
+            elif is_tokenizer(getattr(self, key)):
+                tokenizer = getattr(self, key)
+            elif is_dataloader(getattr(self, key)) or isinstance(getattr(self, key), StatefulRNG):
+                self.checkpointer.save_on_dp_ranks(getattr(self, key), key, path)
+            else:
+                if is_rank_0:
+                    torch.save(
+                        getattr(self, key).state_dict(),
+                        os.path.join(path, f"{key}.pt"),
+                    )
+
+        # For multi-stage PP models, use checkpointer directly to handle all parts
+        # For single models, use save_pretrained for HF-compatible API
+        if isinstance(model, list) and len(model) > 1:
+            self.checkpointer.save_model(
+                model,
+                path,
+                peft_config=self.peft_config,
+                tokenizer=tokenizer,
+                is_final_checkpoint=is_final_checkpoint,
+            )
+        else:
+            unwrapped_model = model[0] if isinstance(model, list) else model
+            # Unwrap DDP if present
+            if isinstance(unwrapped_model, DistributedDataParallel):
+                unwrapped_model = unwrapped_model.module
+            # Models with HFCheckpointingMixin route save_pretrained through checkpointer.save_model (DCP).
+            # Models without it (e.g. diffusers) would use their native save_pretrained which fails on
+            # FSDP2-sharded DTensors, so fall back to checkpointer.save_model directly.
+            if hasattr(unwrapped_model, "save_pretrained") and hasattr(unwrapped_model.save_pretrained, "__func__"):
+                from nemo_automodel.components.models.common.hf_checkpointing_mixin import HFCheckpointingMixin
+
+                if isinstance(unwrapped_model, HFCheckpointingMixin):
+                    unwrapped_model.save_pretrained(
+                        save_directory=path,
+                        checkpointer=self.checkpointer,
+                        tokenizer=tokenizer,
+                        peft_config=self.peft_config,
+                        is_final_checkpoint=is_final_checkpoint,
+                    )
+                else:
+                    self.checkpointer.save_model(
+                        model=unwrapped_model,
+                        weights_path=path,
+                        peft_config=self.peft_config,
+                        tokenizer=tokenizer,
+                        is_final_checkpoint=is_final_checkpoint,
+                    )
+            else:
+                self.checkpointer.save_model(
+                    model=unwrapped_model,
+                    weights_path=path,
+                    peft_config=self.peft_config,
+                    tokenizer=tokenizer,
+                    is_final_checkpoint=is_final_checkpoint,
+                )
+
+        # Sync before checkpointing for Dion
+        optimizers = optimizer if isinstance(optimizer, list) else [optimizer]
+        for opt in optimizers:
+            if hasattr(opt, "synchronize_for_checkpoint"):
+                opt.synchronize_for_checkpoint()
+        self.checkpointer.save_optimizer(optimizer, model, path, scheduler)
+        save_config(config.raw_config, path)
+        if is_dist_initialized:
+            torch.distributed.barrier()
+
+        # Update latest symlink according to sync/async behavior
+        if getattr(self.checkpointer.config, "is_async", False):
+            # Async: defer symlink until the next call (after async_wait completes)
+            setattr(self, "_last_pending_checkpoint_dir", path)
+            # Defer best symlink update similarly, capturing the metric used for comparison
+            if best_val_metric is not None:
+                setattr(self, "_last_pending_best_checkpoint_info", {"path": path, "val": float(best_val_metric)})
+        else:
+            # Sync: update immediately
+            if is_rank_0:
+                self._update_latest_symlink(path)
+                if best_val_metric is not None:
+                    self._update_best_symlink(path, float(best_val_metric))
+            if is_dist_initialized:
+                torch.distributed.barrier()
+
+    def _update_checkpoint_symlink(self, link_name: str, target_dir: str) -> None:
+        """
+        Create or update a symlink named `link_name` under the checkpoint root
+        that points to `target_dir`.
+        Assumes caller ensures rank 0 if needed.
+        """
+        ckpt_root = self.checkpointer.config.checkpoint_dir
+        link_path = os.path.join(ckpt_root, link_name)
+        if os.path.lexists(link_path):
+            os.remove(link_path)
+
+        ckpt_root_abs = os.path.abspath(ckpt_root)
+        target_abs = os.path.abspath(target_dir)
+        relative_target = os.path.relpath(target_abs, start=ckpt_root_abs)
+        try:
+            os.symlink(relative_target, link_path)
+        except OSError:
+            # Fallback: write a text file containing the target path if symlinks aren't supported
+            with open(f"{link_path}.txt", "w") as f:
+                f.write(relative_target)
+
+    def _update_latest_symlink(self, target_dir: str) -> None:
+        """
+        Create or update a symlink named "latest" under the checkpoint root
+        that points to `target_dir`.
+        Only called on rank 0.
+        """
+        self._update_checkpoint_symlink("LATEST", target_dir)
+
+    def _update_best_symlink(self, target_dir: str, val_loss: float) -> None:
+        """
+        Create or update a symlink named "LOWEST_VAL" under the checkpoint root
+        that points to the checkpoint with the lowest validation loss.
+        Only called on rank 0.
+        """
+        # Update best checkpoint if this one is better
+        if val_loss < self._best_val_loss:
+            self._best_val_loss = val_loss
+            self._update_checkpoint_symlink("LOWEST_VAL", target_dir)
+            logging.info(
+                f"Updated LOWEST_VAL checkpoint symlink to {os.path.basename(target_dir)} (val_loss={val_loss:.4f})"
+            )
+
+    def _validate_checkpoint_dir_exists(self, ckpt_dir: str, restore_from: str, is_rank_0: bool) -> None:
+        """Validate resolved checkpoint directory exists; raise FileNotFoundError with a helpful message."""
+        if os.path.exists(ckpt_dir):
+            return
+
+        # Build helpful error message on rank 0
+        if is_rank_0:
+            error_msg = _format_missing_checkpoint_dir_error(
+                checkpoint_dir=self.checkpointer.config.checkpoint_dir,
+                restore_from=restore_from,
+                resolved_ckpt_dir=ckpt_dir,
+            )
+        else:
+            error_msg = f"Checkpoint directory does not exist: {ckpt_dir}"
+
+        # Ensure all ranks fail together (before raising)
+        _dist_barrier()
+        raise FileNotFoundError(error_msg)
+
+    def _load_checkpoint_tracked_state(self, ckpt_dir: str):
+        """Load tracked state and return (model, optimizer, scheduler) for downstream loader calls."""
+        model, optimizer, scheduler = None, None, None
+
+        for key in sorted(self.__dict__["__state_tracked"]):
+            obj = getattr(self, key)
+            if is_model(obj):
+                if key == "teacher_model":
+                    continue
+                model = obj
+            elif is_optimizer(obj):
+                optimizer = obj
+            elif is_lr_scheduler(obj):
+                scheduler = obj
+            elif is_dataloader(obj) or isinstance(obj, StatefulRNG):
+                self.checkpointer.load_on_dp_ranks(obj, key, ckpt_dir)
+            elif is_tokenizer(obj) or isinstance(obj, ConfigNode):
+                # we don't need to load the tokenizer or config from the checkpoint
+                # we only save the tokenizer for consolidated checkpoints for downstream use
+                continue
+            else:
+                obj.load_state_dict(torch.load(os.path.join(ckpt_dir, f"{key}.pt"), weights_only=False))
+
+        return model, optimizer, scheduler
+
+    def load_checkpoint(self, restore_from: str | None = None):
+        """
+        Loads checkpoint with automatic compatibility checking.
+
+        This method will:
+        - If restore_from is set to a path or "LATEST": resolve and load that checkpoint
+        - If restore_from is None: auto-detect the latest checkpoint in checkpoint_dir
+        - Before loading, check if the checkpoint is compatible with the current model config
+        - If incompatible: print a warning and proceed with the restore anyway
+
+        Args:
+            restore_from: Path to checkpoint directory to restore from. Options:
+                         - None: Auto-detect latest checkpoint in checkpoint_dir
+                         - "LATEST": Explicitly auto-detect latest checkpoint
+                         - "epoch_0_step_100": Subdirectory name (relative to checkpoint_dir)
+                         - "./path/to/checkpoint": Absolute or relative path
+        """
+        if not self.checkpointer.config.enabled:
+            if _is_rank_0() and restore_from is not None:
+                print("Enable checkpointing to resume from a checkpoint, skipping...", flush=True)
+            return
+
+        is_rank_0 = _is_rank_0()
+
+        if restore_from:
+            ckpt_dir = _resolve_restore_from_to_ckpt_dir(self.checkpointer.config.checkpoint_dir, restore_from)
+            if ckpt_dir is None:
+                # LATEST keyword with no checkpoints found
+                if is_rank_0:
+                    logging.warning(
+                        "restore_from='LATEST' specified but no checkpoint found in "
+                        f"{self.checkpointer.config.checkpoint_dir}. Starting fresh."
+                    )
+                return
+            self._validate_checkpoint_dir_exists(ckpt_dir, restore_from=restore_from, is_rank_0=is_rank_0)
+        else:
+            # Auto-detect latest checkpoint
+            ckpt_dir = _find_latest_checkpoint(self.checkpointer.config.checkpoint_dir)
+            if ckpt_dir is None:
+                return
+            ckpt_dir = str(ckpt_dir)
+
+        # Check if the checkpoint is compatible with the current model configuration.
+        #  - Auto-detected checkpoints (restore_from=None) are SKIPPED when
+        #    incompatible, because they likely belong to a different training run
+        #    that happened to share the same checkpoint_dir.
+        #  - Explicitly requested checkpoints still proceed (user's intent).
+        cfg = getattr(self, "cfg", None)
+        if cfg is not None:
+            ok, reason = _is_checkpoint_model_config_compatible(cfg, ckpt_dir)
+            if not ok:
+                if not restore_from:
+                    # Auto-detected: skip restore to avoid loading stale/incompatible checkpoints.
+                    # The return must happen on ALL ranks; restricting it to rank 0 would
+                    # cause non-rank-0 processes to continue into collective load operations
+                    # (e.g. set_model_state_dict with broadcast_from_rank0) while rank 0 has
+                    # already exited, leading to a deadlock.
+                    if is_rank_0:
+                        logging.warning(
+                            f"Auto-detected checkpoint at {ckpt_dir} is incompatible with current "
+                            f"model configuration: {reason}. Skipping restore."
+                        )
+                    return
+                else:
+                    # Explicit restore_from: warn but honour the user's request
+                    if is_rank_0:
+                        logging.warning(
+                            f"Checkpoint at {ckpt_dir} may be incompatible with current model "
+                            f"configuration: {reason}. Proceeding with restore anyway."
+                        )
+
+        if is_rank_0:
+            print(f"Loading checkpoint from {ckpt_dir}", flush=True)
+
+        model, optimizer, scheduler = self._load_checkpoint_tracked_state(ckpt_dir)
+
+        # Composite models (e.g. ``Gemma4WithDrafter``) save weights to multiple
+        # HF-format sub-directories instead of a single ``model/`` dir. Dispatch
+        # to the model's own ``load_pretrained`` when it provides one so the
+        # composite knows how to read its custom layout. This mirrors the
+        # save-side dispatch in ``save_checkpoint``.
+        from torch.nn.parallel import DistributedDataParallel
+
+        # ``model`` here may be a single ``nn.Module`` (LLM/diffusion recipes)
+        # or a ``list[nn.Module]`` (VLM recipe stores ``self.model_parts``).
+        # Peek at the first element when given a single-item list so we can
+        # check for the composite hook regardless of recipe shape.
+        candidate = model[0] if isinstance(model, list) and len(model) == 1 else model
+        if isinstance(candidate, DistributedDataParallel):
+            candidate = candidate.module
+        if hasattr(candidate, "load_pretrained") and hasattr(candidate.load_pretrained, "__func__"):
+            candidate.load_pretrained(ckpt_dir, checkpointer=self.checkpointer)
+        else:
+            self.checkpointer.load_model(model, os.path.join(ckpt_dir, "model"))
+        self.checkpointer.load_optimizer(optimizer, model, ckpt_dir, scheduler)
+
+    def _log_experiment_details(self):
+        """Log metadata and config on main rank using YAML markers."""
+        if not getattr(self, "dist_env", None) or not getattr(self.dist_env, "is_main", False):
+            return
+        details = {
+            "Timestamp": datetime.now().isoformat(timespec="seconds"),
+            "User": getpass.getuser(),
+            "Host": socket.gethostname(),
+            "World size": getattr(self.dist_env, "world_size", None),
+            "Backend": getattr(getattr(self, "cfg", {}), "get", lambda *_: None)("dist_env.backend", "nccl"),
+            "Recipe": self.__class__.__name__,
+            "Model name": getattr(getattr(self, "cfg", None), "model", None)
+            and getattr(self.cfg.model, "pretrained_model_name_or_path", None),
+        }
+        try:
+            details_yaml = yaml.safe_dump(details, sort_keys=False, default_flow_style=False).strip()
+            for line in ("Experiment_details:\n" + details_yaml).splitlines():
+                logging.info(line)
+        except yaml.YAMLError:
+            logging.info(f"Experiment details: {details}")
+        # Config (print original placeholders for reproducibility; no internal keys like _original_strings)
+        try:
+            cfg_obj = getattr(self, "cfg", None)
+            cfg_yaml = config_to_yaml_str(cfg_obj, use_orig_values=True)
+            if cfg_yaml:
+                print(cfg_yaml, flush=True)
+        except (AttributeError, TypeError, ValueError, yaml.YAMLError):
+            logger.info("Recipe config: <unavailable>", exc_info=True)
+
+    def _log_library_versions(self):
+        """Log import paths and versions for nemo_automodel, transformers, and torch."""
+        if not getattr(self, "dist_env", None) or not getattr(self.dist_env, "is_main", False):
+            return
+        nemo_am = None
+        try:
+            import nemo_automodel as nemo_am
+
+            nemo_path = Path(getattr(nemo_am, "__file__", "<unknown>")).resolve().as_posix()
+        except (ImportError, OSError, RuntimeError):
+            nemo_path = "<unknown>"
+        hf_transformers = None
+        try:
+            import transformers as hf_transformers
+
+            tfm_path = Path(getattr(hf_transformers, "__file__", "<unknown>")).resolve().as_posix()
+        except (ImportError, OSError, RuntimeError):
+            tfm_path = "<unknown>"
+        libs = {
+            "nemo_automodel": {"version": getattr(nemo_am, "__version__", None), "import_path": nemo_path},
+            "transformers": {"version": getattr(hf_transformers, "__version__", None), "import_path": tfm_path},
+            "torch": {"version": torch.__version__, "cuda": getattr(torch.version, "cuda", None)},
+        }
+        logging.info("Library versions:")
+        for key, value in libs.items():
+            if "cuda" in value:
+                logging.info(f"- {key}: {value['version']} CUDA {value['cuda']}")
+            else:
+                logging.info(f"- {key}: {value['version']} ({value['import_path']})")
+
+    def _log_model_and_optimizer_details(
+        self,
+        model: nn.Module | list[nn.Module] | None = None,
+        optimizer: Optimizer | list[Optimizer] | None = None,
+        lr_scheduler: OptimizerParamScheduler | list[OptimizerParamScheduler] | None = None,
+    ):
+        """Log model repr, parameter stats, param norm, optimizer and lr scheduler with YAML markers."""
+        # Model repr
+        if not isinstance(model, list):
+            model = [model]
+
+        for i, m in enumerate(model):
+            if m is None:
+                logging.info(f"Model Part {i}: <unavailable>")
+                continue
+
+            model_str = str(m)
+            model_lines = model_str.splitlines()
+            logging.info(f"Model Part {i}:")
+            for line in model_lines[:40]:
+                logging.info(line)
+            if len(model_lines) > 40:
+                logging.info("...")
+
+        # Optimizer
+        if optimizer:
+            if not isinstance(optimizer, list):
+                optimizer = [optimizer]
+            for opt in optimizer:
+                for line in ("Optimizer:\n" + str(opt)).splitlines():
+                    logging.info(line)
+        else:
+            logging.info("Optimizer: <unavailable>")
+
+        # LR scheduler
+        if lr_scheduler:
+            if not isinstance(lr_scheduler, list):
+                lr_scheduler = [lr_scheduler]
+            for sched in lr_scheduler:
+                for line in ("LR scheduler:\n" + str(sched)).splitlines():
+                    logging.info(line)
+        else:
+            logging.info("LR scheduler: <unavailable>")
+
+    def _log_step_scheduler_details(self, step_scheduler: StepScheduler):
+        """Log step scheduler details."""
+        attrs = {
+            "Gradient accumulation steps": step_scheduler.grad_acc_steps,
+            "Checkpoint every steps": step_scheduler.ckpt_every_steps,
+            "Garbage collect every steps": getattr(step_scheduler, "gc_every_steps", None),
+            "Current Epoch": step_scheduler.epoch,
+            "Number of epochs": step_scheduler.num_epochs,
+            "Validation every steps": step_scheduler.val_every_steps,
+            "Max train steps": step_scheduler.max_steps,
+        }
+        logging.info("Step scheduler:")
+        for k, v in attrs.items():
+            logging.info(f"- {k}: {v}")
+
+    def _setup_garbage_collection(self, step_scheduler: StepScheduler | None = None) -> None:
+        """Initialize manual garbage collection based on step scheduler config."""
+        if step_scheduler is None:
+            step_scheduler = getattr(self, "step_scheduler", None)
+
+        gc_every_steps = getattr(step_scheduler, "gc_every_steps", None)
+        if gc_every_steps is None:
+            self.garbage_collector = None
+            return
+
+        self.garbage_collector = GarbageCollection(gc_every_steps=gc_every_steps)
+
+    def _maybe_collect_garbage(self) -> None:
+        """Run manual garbage collection if the current step is configured for it."""
+        step_scheduler = getattr(self, "step_scheduler", None)
+        garbage_collector = getattr(self, "garbage_collector", None)
+        if step_scheduler is None or garbage_collector is None:
+            return
+
+        garbage_collector.run(step_scheduler.step)
+
+    def _get_dp_group(self, include_cp: bool = False):
+        if not self.device_mesh:
+            return None
+
+        if include_cp and self.device_mesh["cp"].size() > 1:
+            return get_flat_mesh(self.device_mesh, "dp_cp").get_group()
+        return get_flat_mesh(self.device_mesh, "dp").get_group()
+
+    def _get_dp_group_size(self, include_cp: bool = False):
+        dp_group = self._get_dp_group(include_cp=include_cp)
+        if dp_group is None:
+            # For DDP without a device mesh, all ranks form a single
+            # data-parallel group whose size equals the world size.
+            if dist.is_initialized():
+                return dist.get_world_size()
+            return 1
+        return dp_group.size()
+
+    def _get_cp_group_size(self):
+        if not self.device_mesh or self.device_mesh["cp"].size() == 1:
+            return 1
+        return self.device_mesh["cp"].size()
+
+    def _get_dp_rank(self, include_cp: bool = False):
+        if not self.device_mesh:
+            # For DDP without a device mesh, the global rank is the DP rank.
+            if dist.is_initialized():
+                return dist.get_rank()
+            return 0
+
+        if include_cp and self.device_mesh["cp"].size() > 1:
+            return get_flat_mesh(self.device_mesh, "dp_cp").get_local_rank()
+        return get_flat_mesh(self.device_mesh, "dp").get_local_rank()
+
+    def _get_tp_rank(self):
+        if not self.device_mesh or self.device_mesh["tp"].size() == 1:
+            return 0
+        return self.device_mesh.get_local_rank("tp")
+
+    def _get_pp_rank(self):
+        # PP is a special case because it'll only be present in the device mesh if pp is enabled
+        if not self.device_mesh or "pp" not in self.device_mesh.mesh_dim_names or self.device_mesh["pp"].size() == 1:
+            return 0
+        return self.device_mesh.get_local_rank("pp")
+
+    def _dp_allreduce(self, tensor, op=dist.ReduceOp.SUM, include_cp: bool = False):
+        dp_group = self._get_dp_group(include_cp=include_cp)
+        if dp_group is not None:
+            tensor = tensor.cuda()
+            dist.all_reduce(tensor, op=op, group=dp_group)
+            tensor = tensor.cpu()
+        return tensor
+
+    def _make_progress_bar(self):
+        """Create a tqdm progress bar on rank 0; returns None on other ranks."""
+        if not _is_rank_0():
+            return None
+        from tqdm import tqdm
+
+        return tqdm(
+            total=getattr(self.step_scheduler, "max_steps", None),
+            initial=getattr(self.step_scheduler, "step", 0),
+            desc="Training",
+            unit="step",
+            dynamic_ncols=True,
+        )
+
+    def _update_progress_bar(self, pbar, metrics: dict) -> None:
+        """Update tqdm bar with loss/lr/tps from a metrics dict (no-op if pbar is None)."""
+        if pbar is None:
+            return
+        postfix = {}
+        for loss_key in ("loss", "Loss/Train_Total"):
+            if loss_key in metrics:
+                postfix["loss"] = f"{metrics[loss_key]:.4f}"
+                break
+        for lr_key in ("lr", "Train/lr"):
+            if lr_key in metrics:
+                postfix["lr"] = f"{metrics[lr_key]:.2e}"
+                break
+        for tps_key in ("tps", "Train/tps"):
+            if tps_key in metrics:
+                postfix["tps"] = f"{metrics[tps_key]:.0f}"
+                break
+        pbar.set_postfix(**postfix)
+        pbar.update(1)
+
+
+def _find_latest_checkpoint(checkpoint_dir):
+    """
+    Resolve the most recent checkpoint directory.
+
+    Preference order:
+      1) Valid LATEST symlink or txt file under checkpoint_dir
+      2) Highest step directory under checkpoint_dir matching *step_*
+
+    Returns:
+        Path (or str) of the latest checkpoint directory, or None.
+    """
+    root = Path(checkpoint_dir)
+    if not root.exists():
+        return
+
+    # Try LATEST symlink or txt pointer first
+    latest_link = os.path.join(os.fspath(root), "LATEST")
+    resolved = None
+    if os.path.islink(latest_link):
+        try:
+            resolved = os.readlink(latest_link)
+        except OSError:
+            pass
+    elif os.path.isfile(latest_link + ".txt"):
+        try:
+            with open(latest_link + ".txt", "r") as f:
+                resolved = f.read().strip()
+        except OSError:
+            pass
+
+    if resolved:
+        if not os.path.isabs(resolved):
+            resolved = os.path.abspath(os.path.join(os.fspath(root), resolved))
+        if os.path.isdir(resolved):
+            return resolved
+
+    # Fallback to scanning
+    checkpoint_files = list(root.glob("*step_*"))
+    if not checkpoint_files:
+        return
+
+    def _step_num(path: Path):
+        m = re.search(r"step_(\d+)$", path.stem)
+        return int(m.group(1)) if m else -1
+
+    latest = max(checkpoint_files, key=_step_num)
+    if _step_num(latest) == -1:
+        return
+
+    return latest
+
+
+def _extract_model_signature(cfg: dict) -> dict:
+    """
+    Extract a stable subset of the model config used to decide checkpoint compatibility.
+
+    This includes model architecture fields AND training-mode indicators (e.g. PEFT)
+    that affect the checkpoint format.
+    """
+    if not isinstance(cfg, dict):
+        return {}
+    model_cfg = cfg.get("model", {})
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    keys = (
+        # the most common identifier in this repo's configs
+        "pretrained_model_name_or_path",
+        # common HF config-ish fields that indicate architecture
+        "architectures",
+        "model_type",
+        "hidden_size",
+        "num_hidden_layers",
+        "num_attention_heads",
+        "num_key_value_heads",
+        "intermediate_size",
+        "vocab_size",
+        "tie_word_embeddings",
+        "rope_theta",
+        "rope_scaling",
+    )
+    sig = {k: model_cfg.get(k, None) for k in keys}
+
+    # PEFT presence affects checkpoint format (adapter-only vs full model).
+    # A PEFT checkpoint is NOT loadable into a non-PEFT model and vice-versa.
+    peft_cfg = cfg.get("peft", None)
+    sig["_has_peft"] = peft_cfg is not None and isinstance(peft_cfg, dict)
+
+    return sig
+
+
+def _normalize_signature_value(v):
+    """
+    Normalize a signature value so that YAML round-trip and minor type differences
+    (e.g. int vs str, ConfigNode vs dict) do not cause false mismatches.
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v
+    if isinstance(v, str):
+        # YAML may round-trip numbers as strings; normalize so 32 and "32" match
+        try:
+            f = float(v)
+            return int(f) if f == int(f) else f
+        except (ValueError, TypeError):
+            return v
+    if isinstance(v, dict):
+        return {k: _normalize_signature_value(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_normalize_signature_value(x) for x in v]
+    # ConfigNode or other: try to treat as scalar for comparison
+    if hasattr(v, "_orig_value"):
+        return _normalize_signature_value(getattr(v, "_orig_value"))
+    return v
+
+
+def _signatures_match(cur_sig: dict, ckpt_sig: dict) -> bool:
+    """Compare two model signatures with normalization so YAML round-trip does not cause false mismatches."""
+    if set(cur_sig.keys()) != set(ckpt_sig.keys()):
+        return False
+    for k in cur_sig:
+        cur_v = _normalize_signature_value(cur_sig[k])
+        ckpt_v = _normalize_signature_value(ckpt_sig[k])
+        if cur_v != ckpt_v:
+            return False
+    return True
+
+
+def _is_checkpoint_model_config_compatible(current_cfg, ckpt_dir: str) -> tuple[bool, str]:
+    """
+    Compare the checkpoint's saved ``config.yaml`` model signature to the
+    current run's model signature.
+
+    Uses ``raw_config`` (when available) for comparison because
+    ``save_config`` serialises ``raw_config`` to YAML.  Round-tripping
+    through YAML preserves types, avoiding false mismatches that would
+    arise from using ``to_dict()`` (which may apply type conversions).
+    """
+    config_path = os.path.join(os.fspath(ckpt_dir), "config.yaml")
+    if not os.path.exists(config_path):
+        return True, "checkpoint has no config.yaml (cannot validate)"
+    try:
+        with open(config_path, "r") as f:
+            ckpt_cfg = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError) as e:
+        return True, f"failed to read checkpoint config.yaml (cannot validate): {e}"
+
+    # Prefer raw_config (same representation that was saved) to avoid
+    # type-coercion mismatches between to_dict() and yaml.safe_load().
+    try:
+        if hasattr(current_cfg, "raw_config"):
+            cur_cfg = current_cfg.raw_config
+        elif hasattr(current_cfg, "to_dict"):
+            cur_cfg = current_cfg.to_dict()
+        else:
+            cur_cfg = dict(current_cfg)
+    except (AttributeError, TypeError, ValueError):
+        cur_cfg = {}
+
+    ckpt_sig = _extract_model_signature(ckpt_cfg)
+    cur_sig = _extract_model_signature(cur_cfg)
+    if not ckpt_sig or not cur_sig:
+        return True, "could not extract model signature (cannot validate)"
+
+    if not _signatures_match(cur_sig, ckpt_sig):
+        return False, f"model signature mismatch (checkpoint={ckpt_sig}, current={cur_sig})"
+    return True, "model signature matches"

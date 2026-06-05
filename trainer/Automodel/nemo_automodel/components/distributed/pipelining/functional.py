@@ -1,0 +1,793 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import copy
+import inspect
+import logging
+import math
+import os
+import types
+from typing import Callable, Optional, Protocol
+
+import torch
+import torch.nn as nn
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.pipelining import PipelineStage
+from torch.distributed.pipelining.schedules import (
+    PipelineScheduleMulti,
+    PipelineScheduleSingle,
+    ScheduleZBVZeroBubble,
+    _PipelineSchedule,
+    _PipelineScheduleRuntime,
+    get_schedule_class,
+)
+
+from nemo_automodel.components.distributed.pipelining.hf_utils import (
+    MULTIMODAL_SUFFIXES,
+    TEXT_MODULE_ATTRS,
+    get_text_module,
+    model_keeps_self_forward,
+    patch_hf_model_for_pp,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _get_optional_hook(module: object, name: str) -> Callable | None:
+    try:
+        inspect.getattr_static(module, name)
+    except AttributeError:
+        return None
+    hook = getattr(module, name)
+    return hook if callable(hook) else None
+
+
+class ParallelizeFnProtocol(Protocol):
+    """Callable protocol for applying distributed parallelism to a model."""
+
+    def __call__(
+        self,
+        model: torch.nn.Module,
+        world_mesh: DeviceMesh,
+        moe_mesh: DeviceMesh,
+        *,
+        dp_axis_names: tuple[str, ...],
+        cp_axis_name: str | None = None,
+        tp_axis_name: str | None = None,
+        ep_axis_name: str | None = None,
+        ep_shard_axis_names: tuple[str, ...] | None = None,
+    ) -> None: ...
+
+
+@torch.no_grad()
+def scale_grads_by_divisor(
+    stages: list[PipelineStage],
+    divisor: int,
+) -> None:
+    """Scale pipeline stage gradients by a common divisor when supported."""
+    for stage in stages:
+        if hasattr(stage, "scale_grads"):
+            stage.scale_grads(divisor)
+
+
+def stage_ids_this_rank(pp_rank: int, pp_size: int, num_stages: int, style: str = "loop") -> tuple[int]:
+    """Compute the stage ids for the stages that will run on this pp rank for either a looped or V style schedule"""
+    assert num_stages % pp_size == 0, f"num_stages {num_stages} must be evenly divisible by pp_size {pp_size}"
+    stages_per_rank = num_stages // pp_size
+    if style == "loop":
+        return tuple(pp_rank + s * pp_size for s in range(stages_per_rank))
+    elif style == "v":
+        assert stages_per_rank == 2, f"v schedules assume 2 stages per rank, got {stages_per_rank}"
+        stage_v_pairs = list(zip(range(pp_size), range(num_stages - 1, pp_size - 1, -1)))
+        return stage_v_pairs[pp_rank]
+
+
+def generate_hf_model_fqn_per_model_part(
+    num_stages: int,
+    num_layers: int,
+    include_embeddings: bool = True,
+    include_lm_head: bool = True,
+    include_rotary_emb: bool = True,
+    include_multimodal_encoders: bool = True,
+    extra_module_fqns: Optional[list[str]] = None,
+    fqn_prefix: str = "model.",
+    lm_head_fqn: str = "lm_head",
+) -> list[list[str]]:
+    """
+    Generates module names for each pipeline stage for HuggingFace models.
+
+    Args:
+        num_stages: Number of pipeline stages
+        num_layers: Total number of transformer layers in the model
+        include_embeddings: Whether to include embedding layer in first stage
+        include_lm_head: Whether to include lm_head in last stage (for CausalLM models)
+        include_multimodal_encoders: Whether to include common vision/audio encoder modules in stage 0
+        extra_module_fqns: Optional list of extra module FQNs to include in stage 0
+
+    Returns:
+        List of lists containing module names for each stage
+
+    Example:
+        generate_hf_model_split(4, 32) might return:
+        [
+            ["model.embed_tokens", "model.layers.0", ..., "model.layers.7"],
+            ["model.layers.8", ..., "model.layers.15"],
+            ["model.layers.16", ..., "model.layers.23"],
+            ["model.layers.24", ..., "model.layers.31", "model.norm", "lm_head"]
+        ]
+    """
+    if num_stages < 1:
+        raise ValueError("Number of stages must be at least 1")
+
+    if num_stages > num_layers:
+        raise ValueError(f"Number of stages ({num_stages}) cannot exceed number of layers ({num_layers})")
+
+    # Calculate base layers per stage and remainder
+    layers_per_stage = num_layers // num_stages
+    extra_layers = num_layers % num_stages
+
+    module_names_per_stage = []
+    current_layer = 0
+
+    for stage_idx in range(num_stages):
+        stage_modules = []
+
+        # Calculate number of layers for this stage
+        stage_layer_count = layers_per_stage
+        if stage_idx < extra_layers:
+            stage_layer_count += 1
+
+        # First stage: add embeddings and multimodal encoders if requested
+        if stage_idx == 0:
+            if include_embeddings:
+                stage_modules.append(f"{fqn_prefix}embed_tokens")
+            if include_multimodal_encoders:
+                stage_modules.extend([f"{fqn_prefix}{suffix}" for suffix in MULTIMODAL_SUFFIXES])
+            if extra_module_fqns:
+                stage_modules.extend(extra_module_fqns)
+
+        # Add transformer layers for this stage
+        for _ in range(stage_layer_count):
+            stage_modules.append(f"{fqn_prefix}layers.{current_layer}")
+            current_layer += 1
+
+        # Last stage: add norm and lm_head if requested
+        if stage_idx == num_stages - 1:
+            stage_modules.append(f"{fqn_prefix}norm")
+            if include_lm_head:
+                stage_modules.append(lm_head_fqn)
+
+        if include_rotary_emb:
+            # Always include rotary_emb in all stages (it's needed for position embeddings)
+            stage_modules.append(f"{fqn_prefix}rotary_emb")
+
+        module_names_per_stage.append(stage_modules)
+
+    return module_names_per_stage
+
+
+def calculate_virtual_stages(
+    num_layers: int,
+    layers_per_stage: Optional[int],
+    pp_size: int,
+    is_single_stage_schedule: bool,
+    round_to_pp_multiple: str | None = None,
+) -> tuple[int, int]:
+    """Calculate virtual pipeline stages and layers per stage."""
+    if layers_per_stage is not None:
+        # Calculate number of virtual stages needed (using ceiling division)
+        # This allows for unequal distribution where stages can differ by at most 1 layer
+        # Note: embeddings and lm_head are added to first/last stages, not counted separately
+        num_virtual_stages = math.ceil(num_layers / layers_per_stage)
+
+        # Validation: check stages per rank based on schedule type
+        # Common error message components to reduce duplication
+        model_config_info = f"Model has {num_layers} layers with pipeline_parallel_layers_per_stage={layers_per_stage}"
+        stage_distribution_info = f"resulting in {num_virtual_stages=} across {pp_size} PP ranks"
+
+        if num_virtual_stages % pp_size != 0:
+            # Rename arg to round_virtual_stages_to_pp_multiple for clarity
+            if round_to_pp_multiple is not None:
+                if round_to_pp_multiple == "up":
+                    if num_virtual_stages % pp_size != 0:
+                        num_virtual_stages += pp_size - (num_virtual_stages % pp_size)
+                elif round_to_pp_multiple == "down":
+                    if num_virtual_stages % pp_size != 0:
+                        num_virtual_stages -= num_virtual_stages % pp_size
+                else:
+                    raise ValueError(
+                        f"Invalid value for round_to_pp_multiple: {round_to_pp_multiple}. Use 'up' or 'down'."
+                    )
+            else:
+                raise ValueError(
+                    f"Number of virtual stages ({num_virtual_stages}) must be divisible by "
+                    f"pipeline parallel size ({pp_size}). "
+                    f"{model_config_info}. "
+                    f"Please adjust pipeline_parallel_layers_per_stage to a value that results in a number of stages "
+                    f"divisible by {pp_size}."
+                )
+
+        stages_per_rank = num_virtual_stages // pp_size
+
+        if is_single_stage_schedule and stages_per_rank != 1:
+            raise ValueError(
+                f"Single stage schedule requires exactly 1 stage per rank, but got {stages_per_rank} stages per rank. "
+                f"{model_config_info}, {stage_distribution_info}. "
+                f"Please increase pipeline_parallel_layers_per_stage to {num_layers // pp_size} or higher "
+                f"to achieve 1 stage per rank."
+            )
+
+        if not is_single_stage_schedule and stages_per_rank < 2:
+            raise ValueError(
+                f"Multi-stage schedule requires at least 2 stages per rank, but got {stages_per_rank} stages per rank. "
+                f"{model_config_info}, {stage_distribution_info}. "
+                f"Please decrease pipeline_parallel_layers_per_stage to {num_layers // (2 * pp_size)} or lower "
+                f"to achieve at least 2 stages per rank."
+            )
+    else:
+        # Fallback to default behavior when layers_per_stage is not provided
+        # For multi-stage schedules, default is 2 virtual stages per rank
+        # For single-stage schedules, default is 1 virtual stage per rank
+        stages_per_rank = 1 if is_single_stage_schedule else 2
+        num_virtual_stages = pp_size * stages_per_rank
+
+    return num_virtual_stages, stages_per_rank
+
+
+def _get_hidden_and_vocab_size(model_config) -> tuple[int, int]:
+    """Extract hidden_size and vocab_size from a model config.
+
+    Handles both flat configs (LLM) and nested configs where these attributes
+    live under ``text_config`` (VLM models such as Qwen3-VL, LLaVA, etc.).
+    """
+    hidden_size = getattr(model_config, "hidden_size", None)
+    vocab_size = getattr(model_config, "vocab_size", None)
+
+    if hidden_size is None or vocab_size is None:
+        text_config = getattr(model_config, "text_config", None)
+        if text_config is not None:
+            if hidden_size is None:
+                hidden_size = getattr(text_config, "hidden_size", None)
+            if vocab_size is None:
+                vocab_size = getattr(text_config, "vocab_size", None)
+
+    if hidden_size is None:
+        raise ValueError(
+            f"Cannot determine hidden_size from {type(model_config).__name__}. "
+            "Expected either model_config.hidden_size or model_config.text_config.hidden_size."
+        )
+    if vocab_size is None:
+        raise ValueError(
+            f"Cannot determine vocab_size from {type(model_config).__name__}. "
+            "Expected either model_config.vocab_size or model_config.text_config.vocab_size."
+        )
+    return hidden_size, vocab_size
+
+
+def _precompute_stage_shapes(
+    stages: list[PipelineStage],
+    model_config,
+    microbatch_size: int,
+    seq_len: int,
+    tensor_dtype: torch.dtype | None = None,
+) -> None:
+    """Precompute input/output meta tensors for each pipeline stage to bypass serial shape inference.
+
+    By default, PipelineStage performs shape inference at runtime via a serial P2P chain:
+    stage 0 → send → stage 1 → send → ... → stage N-1.  This is O(N) in the number of
+    pipeline stages and becomes a bottleneck for large world sizes.
+
+    This function sets ``inputs_meta`` and ``_outputs_meta`` on each stage *before* the
+    first ``step()`` call, so that ``_shape_inference`` is never invoked and the serial
+    chain is completely eliminated.
+
+    Args:
+        stages: The local pipeline stages (already parallelized).
+        model_config: The HuggingFace model config (``model.config``).
+        microbatch_size: Microbatch size used by the pipeline schedule.
+        seq_len: Sequence length of the input data.
+    """
+    hidden_size, vocab_size = _get_hidden_and_vocab_size(model_config)
+
+    for stage in stages:
+        if tensor_dtype is None:
+            try:
+                model_dtype = next(stage.submod.parameters()).dtype
+            except StopIteration:
+                model_dtype = torch.bfloat16
+        else:
+            model_dtype = tensor_dtype
+
+        get_stage_metas = _get_optional_hook(stage.submod, "get_pipeline_stage_metas")
+        if get_stage_metas is not None:
+            stage.inputs_meta, outputs_meta = get_stage_metas(
+                is_first=stage.is_first,
+                microbatch_size=microbatch_size,
+                seq_len=seq_len,
+                dtype=model_dtype,
+            )
+            stage._configure_outputs_meta(outputs_meta)
+            continue
+
+        # --- inputs_meta ---
+        if stage.is_first:
+            # First stage receives input_ids: [mb, seq_len] int64
+            stage.inputs_meta = (torch.empty(microbatch_size, seq_len, device="meta", dtype=torch.long),)
+        else:
+            stage.inputs_meta = (torch.empty(microbatch_size, seq_len, hidden_size, device="meta", dtype=model_dtype),)
+
+        # --- outputs_meta ---
+        has_lm_head = hasattr(stage.submod, "lm_head") and stage.submod.lm_head is not None
+        if has_lm_head:
+            # Last stage with lm_head produces logits: [mb, seq_len, vocab_size]
+            primary_output_meta = torch.empty(microbatch_size, seq_len, vocab_size, device="meta", dtype=model_dtype)
+        else:
+            primary_output_meta = torch.empty(microbatch_size, seq_len, hidden_size, device="meta", dtype=model_dtype)
+        outputs_meta = (primary_output_meta,)
+        stage._configure_outputs_meta(outputs_meta)
+
+    logger.info(
+        f"Precomputed pipeline stage shapes (seq_len={seq_len}, microbatch_size={microbatch_size}) — "
+        f"serial shape inference bypassed"
+    )
+
+
+def reset_pp_stage_shapes(
+    schedule: _PipelineSchedule,
+    stages: list[PipelineStage],
+    model_config,
+    microbatch_size: int,
+    seq_len: int,
+    tensor_dtype: torch.dtype | None = None,
+) -> None:
+    """Reset pipeline stage infrastructure and recompute shapes for a new sequence length.
+
+    VLM training produces batches with highly variable sequence lengths (image tokens expand
+    the sequence dramatically).  PyTorch's PipelineStage locks in output shapes and recv
+    buffer sizes on the first ``schedule.step()`` call (``_stages_initialized = True``).
+    Subsequent steps with a different seq_len therefore hit a shape-mismatch error.
+
+    This function resets the per-stage infrastructure so that ``_initialize_stages`` re-runs
+    on the next ``step()`` call.  It then calls ``_precompute_stage_shapes`` to set the
+    correct shapes analytically — avoiding the expensive real-valued forward pass that
+    ``_shape_inference`` would otherwise perform.
+
+    Args:
+        schedule: The active pipeline schedule.
+        stages: The local pipeline stages for this rank.
+        model_config: The HuggingFace model config (``model.config``).
+        microbatch_size: Per-microbatch batch size used by the schedule.
+        seq_len: Sequence length of the upcoming batch (e.g. ``input_ids.shape[1]``).
+    """
+    for stage in stages:
+        # Allow _configure_outputs_meta to be called again (it asserts _outputs_meta is None)
+        stage._outputs_meta = None
+        # Allow _shape_inference to re-run for non-first stages receiving new shapes
+        stage.inputs_meta = None
+        # Clear pre-allocated recv/send buffers; they will be reallocated by _prepare_forward_infra
+        stage.args_recv_info = {}
+        stage.grad_recv_info = {}
+        stage.grad_send_info = None
+
+    # Analytically set shapes for the new seq_len (no forward pass)
+    _precompute_stage_shapes(stages, model_config, microbatch_size, seq_len, tensor_dtype=tensor_dtype)
+
+    # Trigger _initialize_stage(s) on the next step() call.
+    # PipelineScheduleSingle uses singular, PipelineScheduleMulti uses plural.
+    if hasattr(schedule, "_stage_forward_initialized"):
+        schedule._stage_forward_initialized = False
+        schedule._stage_backward_initialized = False
+    if hasattr(schedule, "_stages_forward_initialized"):
+        schedule._stages_forward_initialized = False
+        schedule._stages_backward_initialized = False
+
+
+def split_model_into_stages(
+    model: torch.nn.Module,
+    pp_mesh: DeviceMesh,
+    pp_axis_name: str,
+    pp_schedule: str,
+    device: torch.device,
+    module_names_per_stage: Optional[list[list[str]]] = None,
+    layers_per_stage: Optional[int] = None,
+    patch_inner_model: bool = True,
+    patch_causal_lm_model: bool = True,
+    round_to_pp_multiple: str | None = None,
+) -> tuple[list[PipelineStage], list[nn.Module]]:
+    """
+    Splits a HuggingFace model for pipeline parallelism.
+
+    Args:
+        model: The HuggingFace model to split
+        pp_mesh: Pipeline parallel device mesh
+        pp_schedule: Name of pipeline parallelism schedule
+        device: Device to place stages on
+        module_names_per_stage: Optional manual specification of modules per stage
+        num_stages: Number of pipeline stages (used if module_names_per_stage not provided)
+
+    Returns:
+        Tuple of (stages, models) where stages are PipelineStage objects and models are the
+        corresponding model chunks
+    """
+    pp_rank = pp_mesh.get_local_rank()
+    pp_size = pp_mesh.size()
+    # Detect model structure
+    has_model_attr = hasattr(model, "model")
+    text_model = get_text_module(model.model if has_model_attr else model)
+    text_model_attr_name = ""
+    for attr_name in TEXT_MODULE_ATTRS:
+        if hasattr(model, attr_name) or hasattr(model.model, attr_name):
+            text_model_attr_name = attr_name
+            break
+    has_rotary_emb = hasattr(text_model, "rotary_emb")
+
+    # Check for lm_head in multiple locations:
+    has_lm_head = hasattr(text_model, "lm_head") or hasattr(model, "lm_head")
+    lm_head_on_top_level = hasattr(model, "lm_head") and not hasattr(text_model, "lm_head")
+
+    text_model_has_model_attr = hasattr(text_model, "model")
+
+    if text_model_has_model_attr:
+        # Models like LlamaForCausalLM have model.layers
+        num_layers = len(text_model.model.layers)
+    else:
+        # Direct model access
+        num_layers = len(text_model.layers)
+
+    schedule_class = get_schedule_class(pp_schedule)
+    is_single_stage_schedule = issubclass(schedule_class, PipelineScheduleSingle)
+
+    # Calculate number of virtual stages
+    num_virtual_stages, _ = calculate_virtual_stages(
+        num_layers=num_layers,
+        layers_per_stage=layers_per_stage,
+        pp_size=pp_size,
+        is_single_stage_schedule=is_single_stage_schedule,
+        round_to_pp_multiple=round_to_pp_multiple,
+    )
+
+    # Determine module prefix for text layers and where multimodal encoders live
+    base_prefix = "model." if has_model_attr else ""
+    layers_prefix = base_prefix
+    include_multimodal_encoders = True
+    extra_module_fqns = None
+
+    text_model_attr_prefix = text_model_attr_name + "." if text_model_attr_name else ""
+    layers_prefix = (
+        f"{base_prefix}{text_model_attr_prefix}model."
+        if text_model_has_model_attr
+        else f"{base_prefix}{text_model_attr_prefix}"
+    )
+
+    # If layers live under a nested language_model, keep multimodal encoders at the base prefix
+    if layers_prefix != base_prefix:
+        include_multimodal_encoders = False
+        extra_module_fqns = [f"{base_prefix}{suffix}" for suffix in MULTIMODAL_SUFFIXES]
+        if lm_head_on_top_level:
+            lm_head_fqn = "lm_head"
+        else:
+            lm_head_fqn = f"{base_prefix}{text_model_attr_name}.lm_head"
+    else:
+        lm_head_fqn = "lm_head"
+
+    # Auto-generate module split if not provided
+    if module_names_per_stage is None:
+        module_names_per_stage = generate_hf_model_fqn_per_model_part(
+            num_stages=num_virtual_stages,
+            num_layers=num_layers,
+            include_embeddings=True,
+            include_lm_head=has_lm_head,
+            include_rotary_emb=has_rotary_emb,
+            include_multimodal_encoders=include_multimodal_encoders,
+            extra_module_fqns=extra_module_fqns,
+            fqn_prefix=layers_prefix,
+            lm_head_fqn=lm_head_fqn,
+        )
+
+        customize_stage_modules = _get_optional_hook(model, "customize_pipeline_stage_modules")
+        if customize_stage_modules is not None:
+            custom_module_names = customize_stage_modules(
+                module_names_per_stage,
+                layers_prefix=layers_prefix,
+                text_model=text_model,
+            )
+            if custom_module_names is not None:
+                module_names_per_stage = custom_module_names
+
+    def _build_stage_from_modules(
+        stage_idx: int, module_names: list[str], num_stages: int
+    ) -> tuple[PipelineStage, nn.Module]:
+        """Build a pipeline stage from specified module names."""
+        # Deep copy the model
+        stage_model = copy.deepcopy(model)
+        # Two model implementation paths:
+        #   - HF / dedicated-patch path (LLMs, Gemma4 VLM, Mistral3 VLM): the
+        #     PP-aware forward lives in ``patch_hf_model_for_pp``.
+        #   - Custom-impl path that handles PP itself (Qwen3-VL-MoE, KimiVL,
+        #     Kimi-K2.5-VL, Qwen3.5-MoE): the model class declares
+        #     ``_pp_keep_self_forward = True`` so its own ``forward`` (which
+        #     pulls per-microbatch pixel_values from ``_vlm_pixel_values_chunks``)
+        #     stays intact.
+        if not model_keeps_self_forward(stage_model):
+            patch_hf_model_for_pp(
+                stage_model, patch_inner_model=patch_inner_model, patch_causal_lm_model=patch_causal_lm_model
+            )
+        # Create a set of modules to keep
+        modules_to_keep = set(module_names)
+        modules_sorted = sorted(modules_to_keep, key=lambda x: x.split(".")[-1])
+        logger.info(f"PP Rank {pp_rank}: Stage {stage_idx}: Keeping modules: {modules_sorted}")
+
+        # Helper function to handle nested module removal
+        def _process_module(parent_module, parent_name=""):
+            for name, module in list(parent_module.named_children()):
+                full_name = f"{parent_name}.{name}" if parent_name else name
+
+                if full_name in modules_to_keep:
+                    continue
+
+                # Special handling for layers (ModuleList)
+                if isinstance(module, (nn.ModuleDict, nn.ModuleList)):
+                    # Determine which layers to keep
+                    layers_to_keep = {
+                        name.split(".")[-1] for name in modules_to_keep if name.startswith(f"{full_name}.")
+                    }
+                    # Create new ModuleList with only kept layers
+                    if layers_to_keep:
+                        # Keep only specified layers
+                        if isinstance(module, nn.ModuleDict):
+                            for layer_name in list(module.keys()):
+                                if layer_name not in layers_to_keep:
+                                    del module[layer_name]
+                        elif isinstance(module, nn.ModuleList):
+                            indices_to_keep = {int(idx) for idx in layers_to_keep if idx.isdigit()}
+                            new_layers = nn.ModuleDict(
+                                {str(i): layer for i, layer in enumerate(module) if i in indices_to_keep}
+                            )
+                            setattr(parent_module, name, new_layers)
+                    else:
+                        # No layers from this structure needed, set to empty structure
+                        if isinstance(module, nn.ModuleDict):
+                            setattr(parent_module, name, nn.ModuleDict())
+                        elif isinstance(module, nn.ModuleList):
+                            setattr(parent_module, name, nn.ModuleDict())
+
+                # If this module is explicitly in modules_to_keep, keep it and all its children
+                # (don't recurse to avoid removing PEFT adapters like lora_A, lora_B)
+                elif full_name in modules_to_keep:
+                    # Keep this module and all its children intact
+                    pass
+
+                # Handle other modules
+                elif not any(kept_name.startswith(full_name + ".") for kept_name in modules_to_keep):
+                    # This module and its children are not needed
+                    setattr(parent_module, name, None)
+                else:
+                    # This module has descendants that need to be kept, recurse into it
+                    _process_module(module, full_name)
+
+        # Process the model
+        _process_module(stage_model)
+
+        # Create pipeline stage
+        stage = PipelineStage(
+            stage_model,
+            stage_idx,
+            num_stages,
+            device,
+            group=pp_mesh.get_group(pp_axis_name),
+        )
+
+        return stage, stage_model
+
+    # Determine which stages this rank will handle
+    schedule_class = get_schedule_class(pp_schedule)
+    style = "v" if schedule_class == ScheduleZBVZeroBubble else "loop"
+
+    stages = []
+    models = []
+
+    total_stages = len(module_names_per_stage)
+    assert total_stages % pp_size == 0, f"Total stages {total_stages} must be divisible by PP size {pp_size}"
+    for stage_idx in stage_ids_this_rank(pp_rank, pp_size, total_stages, style=style):
+        module_names = module_names_per_stage[stage_idx]
+        stage, model_chunk = _build_stage_from_modules(
+            stage_idx,
+            module_names,
+            total_stages,
+        )
+        stages.append(stage)
+        models.append(model_chunk)
+
+    return stages, models
+
+
+def build_pipeline_schedule(
+    pipeline_parallel_schedule_csv: str | None,
+    pipeline_parallel_schedule: str | None,
+    microbatch_size: int,
+    local_batch_size: int,
+    stages: list[PipelineStage],
+    loss_fn: Callable,
+    scale_grads: bool = False,
+) -> _PipelineSchedule:
+    """Builds a pipeline schedule for the given job configuration and stages.
+
+    Args:
+        pipeline_parallel_schedule_csv (str | None): The path to the pipeline parallel schedule csv file.
+        pipeline_parallel_schedule (str | None): The name of the pipeline parallel schedule.
+        microbatch_size (int): The microbatch size.
+        local_batch_size (int): The local batch size.
+        stages (list[PipelineStage]): The stages to be scheduled.
+        loss_fn (Callable): The loss function.
+
+    Returns:
+        _PipelineSchedule: The pipeline schedule for the given stages.
+    """
+    pp_schedule_csv = pipeline_parallel_schedule_csv
+
+    # Validate that pp_schedule_csv is a valid path
+    if pp_schedule_csv:
+        if not os.path.isfile(pp_schedule_csv):
+            raise FileNotFoundError(f"The specified path {pp_schedule_csv} does not exist or is not a file.")
+        schedule_class = _PipelineScheduleRuntime
+    else:
+        schedule_class = get_schedule_class(pipeline_parallel_schedule)
+
+    looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
+    n_microbatches = local_batch_size // microbatch_size
+    # validate that the batch size is divisible by the microbatch_size otherwise we'll hang or error during training
+    if local_batch_size % microbatch_size != 0:
+        raise ValueError(
+            f"Batch size {local_batch_size} must be divisible by number of microbatches {n_microbatches}. "
+            "Update the config arguments for either batch_size or pipeline_parallel_microbatch_size."
+        )
+
+    # We expect that the number of local stages (`len(stages)`) is the same across all ranks
+    num_total_stages = len(stages)
+    if n_microbatches < num_total_stages:
+        logger.warning(
+            f"Number of microbatches ({n_microbatches}) is less than the total number "
+            f"of stages ({num_total_stages}) which may result in a bubble in the pipeline."
+        )
+
+    schedule = schedule_class(
+        stages if looped_schedule else stages[0],
+        n_microbatches=n_microbatches,
+        loss_fn=loss_fn,
+        scale_grads=scale_grads,
+    )
+    logger.info(
+        f"Using pipeline schedule {pipeline_parallel_schedule} "
+        f"with {n_microbatches} microbatches and {num_total_stages} stages."
+    )
+
+    if pp_schedule_csv:
+        assert schedule_class in [
+            PipelineScheduleSingle,
+            PipelineScheduleMulti,
+            _PipelineScheduleRuntime,
+        ], (
+            "Only PipelineScheduleSingle (single stage), PipelineScheduleMulti (multistage), "
+            "and _PipelineScheduleRuntime support csv schedules"
+        )
+        schedule._load_csv(pp_schedule_csv)
+
+    return schedule
+
+
+def pipeline_model(
+    model: torch.nn.Module,
+    world_mesh: DeviceMesh,
+    moe_mesh: DeviceMesh,
+    *,
+    pp_axis_name: str,
+    dp_axis_names: tuple[str, ...],
+    cp_axis_name: str | None = None,
+    tp_axis_name: str | None = None,
+    ep_axis_name: str | None = None,
+    ep_shard_axis_names: tuple[str, ...] | None = None,
+    layers_per_stage: int | None,
+    pipeline_parallel_schedule_csv: str | None,
+    pipeline_parallel_schedule: str | None,
+    microbatch_size: int,
+    local_batch_size: int,
+    device: torch.device,
+    loss_fn: Callable = None,
+    parallelize_fn: Callable | None = None,
+    module_fqns_per_model_part: list[list[str]] | None = None,
+    patch_inner_model: bool = True,
+    patch_causal_lm_model: bool = True,
+    scale_grads: bool = False,
+    round_to_pp_multiple: str | None = None,
+    patch_stage_backward_maybe_with_nosync: bool = False,
+    reduce_grad_per_microbatch: bool = False,
+    seq_len: int | None = None,
+    tensor_dtype: torch.dtype | None = None,
+) -> tuple[_PipelineSchedule, list[torch.nn.Module], bool, bool, list[PipelineStage]]:
+    """HF-specific pipeline model splitting."""
+    pp_size = world_mesh[pp_axis_name].size()
+    assert pp_size > 1, "Pipeline parallelism is not enabled"
+
+    # Use HF-specific pipeline split
+    stages, model_parts = split_model_into_stages(
+        model,
+        world_mesh[pp_axis_name],
+        pp_axis_name,
+        pipeline_parallel_schedule,
+        device,
+        module_fqns_per_model_part,
+        layers_per_stage=layers_per_stage,
+        patch_inner_model=patch_inner_model,
+        patch_causal_lm_model=patch_causal_lm_model,
+        round_to_pp_multiple=round_to_pp_multiple,
+    )
+
+    # Apply parallelization if provided
+    for i, m in enumerate(model_parts):
+        if parallelize_fn is not None:
+            parallelize_fn(
+                m,
+                world_mesh=world_mesh,
+                moe_mesh=moe_mesh,
+                dp_axis_names=dp_axis_names,
+                cp_axis_name=cp_axis_name,
+                tp_axis_name=tp_axis_name,
+                ep_axis_name=ep_axis_name,
+                ep_shard_axis_names=ep_shard_axis_names,
+            )
+            model_parts[i] = m
+            stages[i].submod = m
+
+    # Precompute stage shapes to bypass serial P2P shape inference.
+    # This must happen *after* parallelization so that dtypes are final.
+    if seq_len is not None:
+        _precompute_stage_shapes(stages, model.config, microbatch_size, seq_len, tensor_dtype=tensor_dtype)
+
+    # Build pipeline schedule
+    pp_schedule = build_pipeline_schedule(
+        pipeline_parallel_schedule_csv,
+        pipeline_parallel_schedule,
+        microbatch_size,
+        local_batch_size,
+        stages,
+        loss_fn,
+        scale_grads=scale_grads,
+    )
+
+    # Patch FSDP backward for MoE models, or when per-microbatch grad reduce-scatter
+    # is requested (mapped from surface-level defer_fsdp_grad_sync=False for memory
+    # savings). The patched function's FSDP branch is generic (non-MoE-specific)
+    # and reads the per-stage flag set below.
+    if patch_stage_backward_maybe_with_nosync or reduce_grad_per_microbatch:
+        from nemo_automodel.components.moe.fsdp_mixin import patched_backward_maybe_with_nosync
+
+        for stage in stages:
+            stage.backward_maybe_with_nosync = types.MethodType(patched_backward_maybe_with_nosync, stage)
+            stage._reduce_grad_per_microbatch = reduce_grad_per_microbatch
+
+        logger.info(
+            "Patched pipeline stages with backward_maybe_with_nosync "
+            f"(reduce_grad_per_microbatch={reduce_grad_per_microbatch})"
+        )
+
+    # Determine if this rank has first/last stage
+    has_first_stage = False
+    has_last_stage = False
+    for stage in stages:
+        if stage.is_first:
+            has_first_stage = True
+        if stage.is_last:
+            has_last_stage = True
+
+    return pp_schedule, model_parts, has_first_stage, has_last_stage, stages
